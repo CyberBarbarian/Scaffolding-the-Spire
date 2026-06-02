@@ -1,9 +1,20 @@
-# sts2-cli
+# sts2-agent-bench
 
-> Fork notice: this repository is a fork of
-> [wuhao21/sts2-cli](https://github.com/wuhao21/sts2-cli). This fork is
-> maintained under [CyberBarbarian/sts2-cli](https://github.com/CyberBarbarian/sts2-cli)
-> for BG-Agent headless Slay the Spire 2 CLI play and benchmark work.
+`sts2-agent-bench` is the private BG-Agent research repository for comparing
+LLM and hybrid-agent methods on Slay the Spire 2. It currently carries the
+headless `sts2-cli` runtime snapshot plus the `sts2_bench` benchmark scaffold so
+agent experiments, traces, metrics, and failure analysis can run from one
+checkout.
+
+The public CLI-only runtime is maintained separately at
+[CyberBarbarian/sts2-cli](https://github.com/CyberBarbarian/sts2-cli). Keep
+CLI/headless adapter fixes there; keep LLM policy, benchmark, trace, and
+research-method work here.
+
+> Runtime lineage: this repository started from the
+> [CyberBarbarian/sts2-cli](https://github.com/CyberBarbarian/sts2-cli) fork of
+> [wuhao21/sts2-cli](https://github.com/wuhao21/sts2-cli), then became the
+> private research home for LLM agent and benchmark work.
 >
 > The fork focuses on CLI, JSON protocol, headless adapter, state export, and
 > terminal presentation fixes. It does not intentionally change Slay the Spire 2
@@ -22,9 +33,10 @@
 
 ## What This Is
 
-`sts2-cli` runs the real Slay the Spire 2 engine headlessly and exposes it as an
-interactive terminal game, a stdin/stdout JSON protocol for agents, and a
-reproducible logging surface for CLI/export/headless debugging.
+The included `sts2-cli` runtime runs the real Slay the Spire 2 engine
+headlessly and exposes it as an interactive terminal game, a stdin/stdout JSON
+protocol for agents, and a reproducible logging surface for
+CLI/export/headless debugging.
 
 You must own and install Slay the Spire 2 through Steam. This repository does
 not contain or redistribute game DLLs.
