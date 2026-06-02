@@ -1,7 +1,7 @@
 import os
 import sys
 
-from sts2_bench.run_benchmark import load_benchmark_config
+from sts2_bench.run_benchmark import load_benchmark_config, load_env_file
 
 
 def test_load_benchmark_config_falls_back_to_simple_scalar_parser(tmp_path, monkeypatch):
@@ -42,3 +42,18 @@ def test_load_benchmark_config_falls_back_to_simple_scalar_parser(tmp_path, monk
     assert os.environ["STS2_BENCH_MEMORY_WINDOW"] == "8"
     assert os.environ["STS2_BENCH_MAX_STEPS"] == "300"
     assert os.environ["STS2_BENCH_OUT"] == "results/random_ironclad_a0.jsonl"
+
+
+def test_load_env_file_handles_utf8_bom(tmp_path, monkeypatch):
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\ufeffDEEPSEEK_API_KEY=secret\nSTS2_BENCH_MODEL=deepseek-v4-flash\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    monkeypatch.delenv("STS2_BENCH_MODEL", raising=False)
+
+    load_env_file(env_file)
+
+    assert os.environ["DEEPSEEK_API_KEY"] == "secret"
+    assert os.environ["STS2_BENCH_MODEL"] == "deepseek-v4-flash"
