@@ -144,6 +144,60 @@ Agent context management:
 `memory_enabled` when using `turn_chat` so benchmark runs measure one context
 method at a time.
 
+Experience memory:
+
+- `experience_memory.enabled: true` switches the LLM agent to
+  `ExperienceOpenAICompatAgent`, implemented in `experience/agent.py`.
+- The first version is read-only/frozen: it retrieves reviewed JSONL experience
+  notes from `experience_memory.store_path` and injects a short advisory section
+  before the current game state.
+- It can optionally write a compact event trace with
+  `experience_memory.event_trace_path`; the trace stores action/reason/delta
+  summaries for offline combat/act/run reflection, not full state snapshots.
+- `experience_memory.auto_learn.enabled: true` reflects the current Act's
+  combat spans. `trigger: act_end` runs only after advancing to the next Act;
+  `trigger: act_end_or_death` also runs when the character dies, which lets
+  cold-start Act 1 failures still produce candidate memories. Death-triggered
+  learning does not promote into `active.jsonl` by default; set
+  `auto_learn.promote_on_death: true` only when you want failed-run lessons to
+  affect the next run immediately.
+- The MVP supports only `context_management.mode: single_turn`.
+
+Minimal active memory entry:
+
+```json
+{"id":"exp_jaw_worm_0001","status":"active","memory_type":"risk","scope":{"level":"encounter","character":"Ironclad","act":1,"enemy":"Jaw Worm"},"trigger":"Act 1 Jaw Worm combat","recommendation":"Balance early damage with enough block when Jaw Worm is attacking.","quality":{"confidence":0.7},"retrieval_hints":{"keywords":["jaw_worm","combat_play","act1"],"priority":0.8}}
+```
+
+In-run Act-end learning loop:
+
+```bash
+python3 -m sts2_bench.run_benchmark \
+  --experience-memory-enabled \
+  --experience-event-trace-path logs/experience_events.jsonl \
+  --experience-auto-learn-enabled \
+  --experience-auto-learn-trigger act_end_or_death \
+  --no-experience-auto-learn-promote-on-death \
+  --experience-auto-learn-candidate-path sts2_bench/experience/memory/candidates.jsonl \
+  --experience-memory-store-path sts2_bench/experience/memory/active.jsonl
+```
+
+At Act transition, the agent uses the same OpenAI-compatible model settings as
+normal decisions to reflect only the completed Act's in-memory event trace.  It
+writes `candidates.jsonl`, promotes only the newly generated candidate ids into
+`active.jsonl`, skips duplicate ids/content, and reloads the active store before
+continuing.  On death, the same reflection writes candidates but skips promotion
+unless `promote_on_death` is enabled.
+
+For an existing trace, run the same learning step manually:
+
+```bash
+python3 -m sts2_bench.experience.learn \
+  --trace logs/experience_events.jsonl \
+  --candidate-out sts2_bench/experience/memory/candidates.jsonl \
+  --active sts2_bench/experience/memory/active.jsonl
+```
+
 JSONL logging uses `log_level`:
 
 - `metrics` records only start/action summaries/result.

@@ -121,9 +121,12 @@ def test_combat_power_descriptions_are_rendered_without_target_damage_preview():
     text = render_state_text(state)
 
     assert "Player powers (3):" in text
-    assert "Debuff Weak(2): Attacks deal 25% less damage." in text
-    assert "Debuff Strength(-4): Decreases attack damage by 4." in text
-    assert "Debuff Dexterity(-2): Reduces Block gained from cards by 2." in text
+    preview_text = "Already reflected in printed shown_* previews when applicable; do not adjust shown values again."
+    assert f"Debuff Weak(2): {preview_text}" in text
+    assert f"Debuff Strength(-4): {preview_text}" in text
+    assert f"Debuff Dexterity(-2): {preview_text}" in text
+    assert "intent=Attack(shown_damage=27,shown_total=27)" in text
+    assert "[0] Bash cost=2 Attack can_play=True shown_damage=12 target=AnyEnemy" in text
     assert "powers=Slippery(6)" in text
     assert "Buff Slippery(6): The next 6 times Vantom loses HP, it only loses 1 HP instead." in text
     assert "damage_by_target" not in text

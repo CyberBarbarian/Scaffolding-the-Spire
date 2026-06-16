@@ -5,6 +5,7 @@ import pytest
 
 from sts2_bench.actions import build_legal_actions
 from sts2_bench.agents import OpenAICompatAgent
+from sts2_bench.experience import ExperienceOpenAICompatAgent
 from sts2_bench.run_benchmark import _redact_argv, load_benchmark_config
 from sts2_bench.runner import agent_from_args, run_one
 
@@ -348,7 +349,7 @@ def test_openai_compat_agent_prompt_includes_rule_based_run_summary():
     prompt = agent.build_prompt(state, build_legal_actions(state))
 
     assert "Run summary:" in prompt
-    assert "Card damage and block values shown in the state are engine preview values" in prompt
+    assert "printed attack intent and hand damage/block are current engine values" in prompt
     assert "- position: act=1 floor=17 room=Boss boss=Lagavulin Matriarch" in prompt
     assert "- resources: hp=18/85 gold=66 deck_size=22 potions=0/4 relic_count=2" in prompt
     assert "low HP; survival and rest decisions need extra scrutiny" in prompt
@@ -771,6 +772,368 @@ def test_agent_from_args_passes_llm_temperature():
     assert agent.temperature == 0.25
 
 
+def _write_experience_store(path):
+    path.write_text(
+        json.dumps(
+            {
+                "id": "exp_jaw_worm_0001",
+                "status": "active",
+                "memory_type": "risk",
+                "scope": {
+                    "level": "encounter",
+                    "character": "Ironclad",
+                    "ascension_min": 0,
+                    "ascension_max": 20,
+                    "act": 1,
+                    "enemy": "Jaw Worm",
+                },
+                "trigger": "Jaw Worm combat in Act 1",
+                "lesson": "Jaw Worm punishes slow opening turns.",
+                "recommendation": "Balance early damage with enough block when Jaw Worm is attacking.",
+                "anti_pattern": "Ignoring incoming damage while only playing low-impact attacks.",
+                "quality": {"confidence": 0.7},
+                "retrieval_hints": {"keywords": ["jaw_worm", "combat_play", "act1"], "priority": 0.8},
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def test_experience_agent_injects_retrieved_memory_and_records_meta(tmp_path):
+    store = tmp_path / "active.jsonl"
+    _write_experience_store(store)
+    state = _combat_turn_state()
+    agent = ExperienceOpenAICompatAgent(
+        base_url="http://127.0.0.1:1",
+        model="test",
+        max_retries=0,
+        experience_memory_store_path=str(store),
+    )
+    agent.start_episode(seed="bench_0000", character="Ironclad", ascension=0)
+
+    def fake_chat(_messages):
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": json.dumps(
+                            {
+                                "action_id": 5,
+                                "reason": "Strike while tracking incoming damage.",
+                                "used_memory_ids": ["exp_jaw_worm_0001"],
+                            }
+                        )
+                    }
+                }
+            ]
+        }
+
+    agent._chat = fake_chat
+    prompt = agent.build_prompt(state, build_legal_actions(state))
+    action, meta = agent.choose(state, build_legal_actions(state), prompt=prompt)
+
+    assert "Experience notes, advisory only" in prompt
+    assert "exp_jaw_worm_0001" in prompt
+    assert action.kind == "combat_play_card"
+    assert meta["experience_memory"]["retrieved_ids"] == ["exp_jaw_worm_0001"]
+    assert meta["experience_memory"]["used_memory_ids"] == ["exp_jaw_worm_0001"]
+
+
+def test_experience_retriever_global_scope_respects_act_and_phase(tmp_path):
+    store = tmp_path / "active.jsonl"
+    store.write_text(
+        json.dumps(
+            {
+                "id": "exp_global_combat_act1",
+                "status": "active",
+                "memory_type": "rule",
+                "scope": {
+                    "level": "global",
+                    "character": "Ironclad",
+                    "act": 1,
+                    "phase": "combat_play",
+                },
+                "trigger": "Safe combat scaling turn.",
+                "lesson": "Play scaling on safe combat turns.",
+                "recommendation": "Use combat scaling only during combat decisions.",
+                "quality": {"confidence": 0.9},
+                "retrieval_hints": {"keywords": ["combat_play", "scaling", "strike"], "priority": 0.8},
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    agent = ExperienceOpenAICompatAgent(
+        base_url="http://127.0.0.1:1",
+        model="test",
+        max_retries=0,
+        experience_memory_store_path=str(store),
+    )
+    agent.start_episode(seed="bench_0000", character="Ironclad", ascension=0)
+
+    act1_combat = _combat_turn_state()
+    act1_map = {
+        "decision": "map_select",
+        "context": {"act": 1, "floor": 3, "room_type": "Map"},
+        "player": {"hp": 70, "max_hp": 80, "gold": 0, "deck_size": 10},
+        "choices": [{"col": 1, "row": 3, "type": "Monster"}],
+    }
+    act2_combat = _combat_turn_state(context={"act": 2, "floor": 2, "room_type": "Monster"})
+
+    assert "exp_global_combat_act1" in agent.build_prompt(act1_combat, build_legal_actions(act1_combat))
+    assert "exp_global_combat_act1" not in agent.build_prompt(act1_map, build_legal_actions(act1_map))
+    assert "exp_global_combat_act1" not in agent.build_prompt(act2_combat, build_legal_actions(act2_combat))
+
+
+def test_experience_agent_writes_compact_event_trace(tmp_path):
+    store = tmp_path / "active.jsonl"
+    trace = tmp_path / "events.jsonl"
+    _write_experience_store(store)
+    state = _combat_turn_state()
+    next_state = _combat_turn_state(
+        energy=2,
+        enemies=[{"index": 0, "name": "Jaw Worm", "hp": 14, "max_hp": 40, "block": 0}],
+        last_action_result={
+            "action_label": "play card 0: Strike on enemy 0: Jaw Worm",
+            "action_kind": "combat_play_card",
+            "decision_before": "combat_play",
+            "decision_after": "combat_play",
+            "changes": ["energy: 3/3 -> 2/3", "enemy Jaw Worm[0]: hp 20/40 -> 14/40"],
+        },
+    )
+    agent = ExperienceOpenAICompatAgent(
+        base_url="http://127.0.0.1:1",
+        model="test",
+        experience_memory_store_path=str(store),
+        experience_event_trace_path=str(trace),
+        max_retries=0,
+    )
+    agent.start_episode(seed="bench_0000", character="Ironclad", ascension=0)
+    action = next(action for action in build_legal_actions(state) if action.kind == "combat_play_card")
+    meta = {
+        "parsed": {"reason": "Strike while tracking incoming damage.", "used_memory_ids": ["exp_jaw_worm_0001"]},
+        "experience_memory": {
+            "retrieved_ids": ["exp_jaw_worm_0001"],
+            "used_memory_ids": ["exp_jaw_worm_0001"],
+        },
+    }
+
+    agent.record_transition(state, action, meta, next_state)
+
+    event = json.loads(trace.read_text(encoding="utf-8").strip())
+    assert event["seed"] == "bench_0000"
+    assert event["action"]["kind"] == "combat_play_card"
+    assert event["outcome"]["energy_delta"] == -1
+    assert event["outcome"]["enemy_hp_delta"] == -6
+    assert event["agent"]["retrieved_memory_ids"] == ["exp_jaw_worm_0001"]
+    assert "hand" not in event
+
+
+def test_experience_event_trace_omits_enemy_hp_delta_for_non_combat_followups(tmp_path):
+    store = tmp_path / "active.jsonl"
+    trace = tmp_path / "events.jsonl"
+    _write_experience_store(store)
+    state = _combat_turn_state()
+    next_state = _combat_turn_state(
+        decision="card_select",
+        enemies=[],
+        cards=[{"index": 0, "name": "Defend"}],
+        last_action_result={
+            "action_label": "play card 0: Armaments",
+            "action_kind": "combat_play_card",
+            "decision_before": "combat_play",
+            "decision_after": "card_select",
+            "changes": ["energy: 3/3 -> 2/3", "hand_count: 5 -> 4"],
+        },
+    )
+    agent = ExperienceOpenAICompatAgent(
+        base_url="http://127.0.0.1:1",
+        model="test",
+        experience_memory_store_path=str(store),
+        experience_event_trace_path=str(trace),
+        max_retries=0,
+    )
+    agent.start_episode(seed="bench_0000", character="Ironclad", ascension=0)
+    action = next(action for action in build_legal_actions(state) if action.kind == "combat_play_card")
+    meta = {"parsed": {"reason": "Upgrade a card."}, "experience_memory": {"retrieved_ids": [], "used_memory_ids": []}}
+
+    agent.record_transition(state, action, meta, next_state)
+
+    event = json.loads(trace.read_text(encoding="utf-8").strip())
+    assert event["outcome"]["decision_after"] == "card_select"
+    assert event["outcome"]["enemy_hp_delta"] is None
+
+
+def test_experience_agent_auto_learns_at_act_end_and_refreshes_retriever(tmp_path):
+    store = tmp_path / "active.jsonl"
+    trace = tmp_path / "events.jsonl"
+    candidates = tmp_path / "candidates.jsonl"
+    state = _combat_turn_state()
+    next_state = _combat_turn_state(
+        context={"act": 2, "floor": 1, "room_type": "Map"},
+        enemies=[],
+        last_action_result={
+            "action_label": "play card 0: Strike on enemy 0: Jaw Worm",
+            "action_kind": "combat_play_card",
+            "decision_before": "combat_play",
+            "decision_after": "map_select",
+            "changes": ["act: 1 -> 2", "enemy Jaw Worm[0]: hp 20/40 -> 0/40"],
+        },
+    )
+    agent = ExperienceOpenAICompatAgent(
+        base_url="http://127.0.0.1:1",
+        model="test",
+        experience_memory_store_path=str(store),
+        experience_event_trace_path=str(trace),
+        experience_auto_learn_enabled=True,
+        experience_auto_learn_candidate_path=str(candidates),
+        max_retries=0,
+    )
+    agent.start_episode(seed="bench_0000", character="Ironclad", ascension=0)
+
+    def fake_chat(_messages):
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": json.dumps(
+                            {
+                                "candidates": [
+                                    {
+                                        "id": "exp_auto_act1",
+                                        "memory_type": "risk",
+                                        "scope": {"level": "encounter"},
+                                        "trigger": "Jaw Worm act-end reflected lesson.",
+                                        "lesson": "Trust engine preview values when checking lethal.",
+                                        "recommendation": "Use displayed damage/block values directly.",
+                                        "quality": {"confidence": 0.8},
+                                        "retrieval_hints": {
+                                            "keywords": ["jaw_worm", "combat_play", "preview_damage"],
+                                            "priority": 0.9,
+                                        },
+                                    }
+                                ]
+                            }
+                        )
+                    }
+                }
+            ]
+        }
+
+    agent._chat = fake_chat
+    action = next(action for action in build_legal_actions(state) if action.kind == "combat_play_card")
+    meta = {"parsed": {"reason": "End the act."}, "experience_memory": {"retrieved_ids": [], "used_memory_ids": []}}
+
+    agent.record_transition(state, action, meta, next_state)
+
+    assert json.loads(store.read_text(encoding="utf-8"))["id"] == "exp_auto_act1"
+    assert json.loads(candidates.read_text(encoding="utf-8"))["status"] == "candidate"
+    records = agent.pop_auto_learn_records()
+    assert records[0]["status"] == "ok"
+    assert records[0]["act"] == 1
+    prompt = agent.build_prompt(_combat_turn_state(), build_legal_actions(_combat_turn_state()))
+    assert "exp_auto_act1" in prompt
+
+
+def test_experience_agent_auto_learns_on_death_when_configured(tmp_path):
+    store = tmp_path / "active.jsonl"
+    trace = tmp_path / "events.jsonl"
+    candidates = tmp_path / "candidates.jsonl"
+    state = _combat_turn_state()
+    next_state = _combat_turn_state(
+        decision="game_over",
+        player={"hp": 0, "max_hp": 80, "block": 0, "gold": 0, "deck_size": 10},
+        hand=[],
+        enemies=[],
+        last_action_result={
+            "action_label": "play card 0: Strike on enemy 0: Jaw Worm",
+            "action_kind": "combat_play_card",
+            "decision_before": "combat_play",
+            "decision_after": "game_over",
+            "changes": ["hp: 6/80 -> 0/80", "enemy Jaw Worm[0]: hp 20/40 -> 14/40"],
+        },
+    )
+    agent = ExperienceOpenAICompatAgent(
+        base_url="http://127.0.0.1:1",
+        model="test",
+        experience_memory_store_path=str(store),
+        experience_event_trace_path=str(trace),
+        experience_auto_learn_enabled=True,
+        experience_auto_learn_trigger="act_end_or_death",
+        experience_auto_learn_candidate_path=str(candidates),
+        max_retries=0,
+    )
+    agent.start_episode(seed="bench_0000", character="Ironclad", ascension=0)
+
+    def fake_chat(_messages):
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": json.dumps(
+                            {
+                                "candidates": [
+                                    {
+                                        "id": "exp_auto_death_act1",
+                                        "memory_type": "risk",
+                                        "scope": {"level": "encounter"},
+                                        "trigger": "Jaw Worm death reflected lesson.",
+                                        "lesson": "Do not spend the turn on damage if shown incoming total is lethal.",
+                                        "recommendation": "Use shown_total and shown_block directly before choosing an attack.",
+                                        "quality": {"confidence": 0.82},
+                                        "retrieval_hints": {
+                                            "keywords": ["jaw_worm", "death", "shown_total"],
+                                            "priority": 0.9,
+                                        },
+                                    }
+                                ]
+                            }
+                        )
+                    }
+                }
+            ]
+        }
+
+    agent._chat = fake_chat
+    action = next(action for action in build_legal_actions(state) if action.kind == "combat_play_card")
+    meta = {"parsed": {"reason": "Failed lethal check."}, "experience_memory": {"retrieved_ids": [], "used_memory_ids": []}}
+
+    agent.record_transition(state, action, meta, next_state)
+
+    assert json.loads(candidates.read_text(encoding="utf-8"))["id"] == "exp_auto_death_act1"
+    assert not store.exists()
+    records = agent.pop_auto_learn_records()
+    assert records[0]["status"] == "ok"
+    assert records[0]["trigger"] == "act_end_or_death"
+    assert records[0]["cause"] == "death"
+    assert records[0]["act"] == 1
+    assert records[0]["promote"] is False
+    assert records[0]["summary"]["promotion"] is None
+
+
+def test_agent_from_args_can_create_experience_agent(tmp_path):
+    store = tmp_path / "active.jsonl"
+    _write_experience_store(store)
+
+    agent = agent_from_args(
+        "llm",
+        base_url="http://127.0.0.1:1",
+        model="test",
+        api_key="local",
+        experience_memory_enabled=True,
+        experience_memory_store_path=str(store),
+        experience_auto_learn_enabled=True,
+        experience_auto_learn_candidate_path=str(tmp_path / "candidates.jsonl"),
+    )
+
+    assert isinstance(agent, ExperienceOpenAICompatAgent)
+    assert agent.experience_auto_learn_enabled is True
+    assert agent.experience_auto_learn_promote_on_death is False
+
+
 def test_load_benchmark_config_reads_nested_context_management(tmp_path, monkeypatch):
     pytest.importorskip("omegaconf")
     for key in (
@@ -780,6 +1143,15 @@ def test_load_benchmark_config_reads_nested_context_management(tmp_path, monkeyp
         "STS2_BENCH_TURN_CHAT_UPDATE_MODE",
         "STS2_BENCH_TURN_CHAT_ASSISTANT_HISTORY",
         "STS2_BENCH_TURN_CHAT_PLAN_ENABLED",
+        "STS2_BENCH_EXPERIENCE_MEMORY_ENABLED",
+        "STS2_BENCH_EXPERIENCE_MEMORY_STORE_PATH",
+        "STS2_BENCH_EXPERIENCE_MEMORY_TOP_K",
+        "STS2_BENCH_EXPERIENCE_EVENT_TRACE_PATH",
+        "STS2_BENCH_EXPERIENCE_AUTO_LEARN_ENABLED",
+        "STS2_BENCH_EXPERIENCE_AUTO_LEARN_TRIGGER",
+        "STS2_BENCH_EXPERIENCE_AUTO_LEARN_CANDIDATE_PATH",
+        "STS2_BENCH_EXPERIENCE_AUTO_LEARN_MAX_CANDIDATES_PER_SPAN",
+        "STS2_BENCH_EXPERIENCE_AUTO_LEARN_PROMOTE_ON_DEATH",
     ):
         monkeypatch.delenv(key, raising=False)
     config = tmp_path / "benchmark.yaml"
@@ -794,6 +1166,17 @@ context_management:
     assistant_history: compact
     plan:
       enabled: true
+experience_memory:
+  enabled: true
+  store_path: sts2_bench/experience/memory/active.jsonl
+  top_k: 3
+  event_trace_path: logs/experience_events.jsonl
+  auto_learn:
+    enabled: true
+    trigger: act_end
+    candidate_path: sts2_bench/experience/memory/candidates.jsonl
+    max_candidates_per_span: 2
+    promote_on_death: true
 """,
         encoding="utf-8",
     )
@@ -806,3 +1189,12 @@ context_management:
     assert os.environ["STS2_BENCH_TURN_CHAT_UPDATE_MODE"] == "delta"
     assert os.environ["STS2_BENCH_TURN_CHAT_ASSISTANT_HISTORY"] == "compact"
     assert os.environ["STS2_BENCH_TURN_CHAT_PLAN_ENABLED"] == "true"
+    assert os.environ["STS2_BENCH_EXPERIENCE_MEMORY_ENABLED"] == "true"
+    assert os.environ["STS2_BENCH_EXPERIENCE_MEMORY_STORE_PATH"] == "sts2_bench/experience/memory/active.jsonl"
+    assert os.environ["STS2_BENCH_EXPERIENCE_MEMORY_TOP_K"] == "3"
+    assert os.environ["STS2_BENCH_EXPERIENCE_EVENT_TRACE_PATH"] == "logs/experience_events.jsonl"
+    assert os.environ["STS2_BENCH_EXPERIENCE_AUTO_LEARN_ENABLED"] == "true"
+    assert os.environ["STS2_BENCH_EXPERIENCE_AUTO_LEARN_TRIGGER"] == "act_end"
+    assert os.environ["STS2_BENCH_EXPERIENCE_AUTO_LEARN_CANDIDATE_PATH"] == "sts2_bench/experience/memory/candidates.jsonl"
+    assert os.environ["STS2_BENCH_EXPERIENCE_AUTO_LEARN_MAX_CANDIDATES_PER_SPAN"] == "2"
+    assert os.environ["STS2_BENCH_EXPERIENCE_AUTO_LEARN_PROMOTE_ON_DEATH"] == "true"

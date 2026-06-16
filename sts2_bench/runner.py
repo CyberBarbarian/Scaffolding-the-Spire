@@ -21,6 +21,7 @@ from .agents import (
     TurnChatUpdateMode,
 )
 from .context import build_last_action_result, compact_state
+from .experience import ExperienceOpenAICompatAgent
 from .process import Sts2Process
 
 
@@ -105,7 +106,7 @@ def run_one(
 
     try:
         proc.start()
-        _reset_agent_episode(agent)
+        _start_agent_episode(agent, seed=seed, character=character, ascension=ascension)
         state = proc.start_run(character=character, seed=seed, ascension=ascension, lang=lang)
         logger and logger.write(
             {
@@ -171,6 +172,7 @@ def run_one(
                 result.steps = step + 1
                 state = _apply_view_action(proc, state, action.command)
                 _record_agent_transition(agent, old_state, action, meta, state)
+                _drain_agent_auto_learn_records(agent, logger, step)
                 continue
 
             result.game_action_count += 1
@@ -185,6 +187,7 @@ def run_one(
                 return result
             state = _attach_last_action_result(old_state, next_state, action)
             _record_agent_transition(agent, old_state, action, meta, state)
+            _drain_agent_auto_learn_records(agent, logger, step)
 
         result.truncated = True
         result.extra["truncation_reason"] = f"max_steps exceeded ({max_steps})"
@@ -218,6 +221,17 @@ def _reset_agent_episode(agent: Agent) -> None:
         reset()
 
 
+def _start_agent_episode(agent: Agent, *, seed: str, character: str, ascension: int) -> None:
+    start = getattr(agent, "start_episode", None)
+    if callable(start):
+        try:
+            start(seed=seed, character=character, ascension=ascension)
+        except TypeError:
+            start()
+        return
+    _reset_agent_episode(agent)
+
+
 def _record_agent_transition(
     agent: Agent,
     state: dict[str, Any],
@@ -231,6 +245,15 @@ def _record_agent_transition(
             record(state, action, meta, next_state)
         except TypeError:
             record(state, action, meta)
+
+
+def _drain_agent_auto_learn_records(agent: Agent, logger: JsonlLogger | None, step: int) -> None:
+    pop_records = getattr(agent, "pop_auto_learn_records", None)
+    if not callable(pop_records):
+        return
+    records = pop_records()
+    for record in records:
+        logger and logger.write({"type": "experience_auto_learn", "step": step, **record})
 
 
 def _apply_view_action(proc: Sts2Process, state: dict[str, Any], command: dict[str, Any]) -> dict[str, Any]:
@@ -429,6 +452,7 @@ def _agent_meta_summary(meta: dict[str, Any]) -> dict[str, Any]:
         "fallback_action_id",
         "error",
         "usage",
+        "experience_memory",
     ):
         if key in meta and meta[key] is not None:
             summary[key] = meta[key]
@@ -519,10 +543,30 @@ def agent_from_args(
     turn_chat_update_mode: TurnChatUpdateMode = "delta",
     turn_chat_assistant_history: TurnChatAssistantHistory = "compact",
     turn_chat_plan_enabled: bool = False,
+    experience_memory_enabled: bool = False,
+    experience_memory_mode: str = "frozen",
+    experience_memory_store_path: str = "sts2_bench/experience/memory/active.jsonl",
+    experience_memory_top_k: int = 5,
+    experience_memory_token_budget: int = 700,
+    experience_memory_min_confidence: float = 0.35,
+    experience_memory_include_global: bool = True,
+    experience_memory_allow_cross_character: bool = False,
+    experience_memory_allow_cross_ascension: bool = True,
+    experience_event_trace_path: str = "",
+    experience_auto_learn_enabled: bool = False,
+    experience_auto_learn_trigger: str = "act_end",
+    experience_auto_learn_candidate_path: str = "sts2_bench/experience/memory/candidates.jsonl",
+    experience_auto_learn_max_candidates_per_span: int = 2,
+    experience_auto_learn_max_events_per_span: int = 40,
+    experience_auto_learn_min_confidence: float = 0.35,
+    experience_auto_learn_promote: bool = True,
+    experience_auto_learn_promote_on_death: bool = False,
 ) -> Agent:
     if kind == "random":
         if conversation_mode != "single_turn":
             raise ValueError("turn_chat context management is only supported by the llm agent")
+        if experience_memory_enabled:
+            raise ValueError("experience_memory is only supported by the llm agent")
         return RandomAgent(
             seed=0,
             include_json_state=include_json_state,
@@ -539,7 +583,29 @@ def agent_from_args(
             raise ValueError(
                 "Set --api-key, DEEPSEEK_API_KEY, or OPENAI_API_KEY for non-local LLM endpoints"
             )
-        return OpenAICompatAgent(
+        agent_class = ExperienceOpenAICompatAgent if experience_memory_enabled else OpenAICompatAgent
+        extra_kwargs: dict[str, Any] = {}
+        if experience_memory_enabled:
+            extra_kwargs = {
+                "experience_memory_mode": experience_memory_mode,
+                "experience_memory_store_path": experience_memory_store_path,
+                "experience_memory_top_k": experience_memory_top_k,
+                "experience_memory_token_budget": experience_memory_token_budget,
+                "experience_memory_min_confidence": experience_memory_min_confidence,
+                "experience_memory_include_global": experience_memory_include_global,
+                "experience_memory_allow_cross_character": experience_memory_allow_cross_character,
+                "experience_memory_allow_cross_ascension": experience_memory_allow_cross_ascension,
+                "experience_event_trace_path": experience_event_trace_path,
+                "experience_auto_learn_enabled": experience_auto_learn_enabled,
+                "experience_auto_learn_trigger": experience_auto_learn_trigger,
+                "experience_auto_learn_candidate_path": experience_auto_learn_candidate_path,
+                "experience_auto_learn_max_candidates_per_span": experience_auto_learn_max_candidates_per_span,
+                "experience_auto_learn_max_events_per_span": experience_auto_learn_max_events_per_span,
+                "experience_auto_learn_min_confidence": experience_auto_learn_min_confidence,
+                "experience_auto_learn_promote": experience_auto_learn_promote,
+                "experience_auto_learn_promote_on_death": experience_auto_learn_promote_on_death,
+            }
+        return agent_class(
             base_url=base_url,
             model=model,
             api_key=api_key,
@@ -557,6 +623,7 @@ def agent_from_args(
             turn_chat_update_mode=turn_chat_update_mode,
             turn_chat_assistant_history=turn_chat_assistant_history,
             turn_chat_plan_enabled=turn_chat_plan_enabled,
+            **extra_kwargs,
         )
     raise ValueError(f"Unknown agent kind: {kind}")
 

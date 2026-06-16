@@ -28,7 +28,7 @@ include_json_state: false
 
 # 是否在 agent prompt 中加入局内短期记忆。这个记忆属于 agent 方法，不属于环境原始 state。
 # 如果 context_management.mode 设为 turn_chat，请把这里设为 false，避免两套上下文方法同时生效。
-memory_enabled: false
+memory_enabled: true
 
 # 短期记忆保留最近多少个已选择 action。数值越大越能记住近期操作，但 prompt 会更长。
 memory_window: 8
@@ -52,6 +52,31 @@ context_management:
     # 是否在每个玩家出牌回合的第一条 turn_chat prompt 中要求模型先给一个可修正的 turn_plan。
     plan:
       enabled: true
+
+# 跨局经验库检索。默认关闭；开启后只读取冻结的 active.jsonl，不在线写入经验。
+experience_memory:
+  enabled: true
+  mode: frozen
+  store_path: sts2_bench/experience/memory/active.jsonl
+  top_k: 5
+  token_budget: 700
+  min_confidence: 0.35
+  include_global: true
+  allow_cross_character: false
+  allow_cross_ascension: true
+  # 可选：写出压缩 event trace，供离线 combat/act/run 反思使用。
+  event_trace_path: "sts2_bench/experience/memory/event_trace.jsonl"
+  # 自动学习：可在完成 Act 后反思；act_end_or_death 还会在死亡时反思当前 Act，避免冷启动空跑。
+  auto_learn:
+    enabled: true
+    trigger: act_end_or_death
+    candidate_path: sts2_bench/experience/memory/candidates.jsonl
+    max_candidates_per_span: 2
+    max_events_per_span: 40
+    min_confidence: 0.35
+    promote: true
+    # 死亡反思默认只进入 candidates，避免失败局未经筛选就污染下一次 active 检索。
+    promote_on_death: false
 
 # 选择角色。可选 Ironclad、Silent、Defect、Regent、Necrobinder。
 character: Ironclad

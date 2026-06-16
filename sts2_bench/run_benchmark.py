@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import sys
@@ -46,6 +47,28 @@ NESTED_CONFIG_ENV_KEYS = {
     ("context_management", "turn_chat", "update_mode"): "STS2_BENCH_TURN_CHAT_UPDATE_MODE",
     ("context_management", "turn_chat", "assistant_history"): "STS2_BENCH_TURN_CHAT_ASSISTANT_HISTORY",
     ("context_management", "turn_chat", "plan", "enabled"): "STS2_BENCH_TURN_CHAT_PLAN_ENABLED",
+    ("experience_memory", "enabled"): "STS2_BENCH_EXPERIENCE_MEMORY_ENABLED",
+    ("experience_memory", "mode"): "STS2_BENCH_EXPERIENCE_MEMORY_MODE",
+    ("experience_memory", "store_path"): "STS2_BENCH_EXPERIENCE_MEMORY_STORE_PATH",
+    ("experience_memory", "top_k"): "STS2_BENCH_EXPERIENCE_MEMORY_TOP_K",
+    ("experience_memory", "token_budget"): "STS2_BENCH_EXPERIENCE_MEMORY_TOKEN_BUDGET",
+    ("experience_memory", "min_confidence"): "STS2_BENCH_EXPERIENCE_MEMORY_MIN_CONFIDENCE",
+    ("experience_memory", "include_global"): "STS2_BENCH_EXPERIENCE_MEMORY_INCLUDE_GLOBAL",
+    ("experience_memory", "allow_cross_character"): "STS2_BENCH_EXPERIENCE_MEMORY_ALLOW_CROSS_CHARACTER",
+    ("experience_memory", "allow_cross_ascension"): "STS2_BENCH_EXPERIENCE_MEMORY_ALLOW_CROSS_ASCENSION",
+    ("experience_memory", "event_trace_path"): "STS2_BENCH_EXPERIENCE_EVENT_TRACE_PATH",
+    ("experience_memory", "auto_learn", "enabled"): "STS2_BENCH_EXPERIENCE_AUTO_LEARN_ENABLED",
+    ("experience_memory", "auto_learn", "trigger"): "STS2_BENCH_EXPERIENCE_AUTO_LEARN_TRIGGER",
+    ("experience_memory", "auto_learn", "candidate_path"): "STS2_BENCH_EXPERIENCE_AUTO_LEARN_CANDIDATE_PATH",
+    (
+        "experience_memory",
+        "auto_learn",
+        "max_candidates_per_span",
+    ): "STS2_BENCH_EXPERIENCE_AUTO_LEARN_MAX_CANDIDATES_PER_SPAN",
+    ("experience_memory", "auto_learn", "max_events_per_span"): "STS2_BENCH_EXPERIENCE_AUTO_LEARN_MAX_EVENTS_PER_SPAN",
+    ("experience_memory", "auto_learn", "min_confidence"): "STS2_BENCH_EXPERIENCE_AUTO_LEARN_MIN_CONFIDENCE",
+    ("experience_memory", "auto_learn", "promote"): "STS2_BENCH_EXPERIENCE_AUTO_LEARN_PROMOTE",
+    ("experience_memory", "auto_learn", "promote_on_death"): "STS2_BENCH_EXPERIENCE_AUTO_LEARN_PROMOTE_ON_DEATH",
 }
 
 
@@ -259,6 +282,29 @@ def build_run_config(args: argparse.Namespace, seeds: list[str], argv: list[str]
                     },
                 },
             },
+            "experience_memory": {
+                "enabled": args.experience_memory_enabled,
+                "mode": args.experience_memory_mode,
+                "store_path": args.experience_memory_store_path,
+                "store_digest": _file_sha256(args.experience_memory_store_path),
+                "top_k": args.experience_memory_top_k,
+                "token_budget": args.experience_memory_token_budget,
+                "min_confidence": args.experience_memory_min_confidence,
+                "include_global": args.experience_memory_include_global,
+                "allow_cross_character": args.experience_memory_allow_cross_character,
+                "allow_cross_ascension": args.experience_memory_allow_cross_ascension,
+                "event_trace_path": args.experience_event_trace_path,
+                "auto_learn": {
+                    "enabled": args.experience_auto_learn_enabled,
+                    "trigger": args.experience_auto_learn_trigger,
+                    "candidate_path": args.experience_auto_learn_candidate_path,
+                    "max_candidates_per_span": args.experience_auto_learn_max_candidates_per_span,
+                    "max_events_per_span": args.experience_auto_learn_max_events_per_span,
+                    "min_confidence": args.experience_auto_learn_min_confidence,
+                    "promote": args.experience_auto_learn_promote,
+                    "promote_on_death": args.experience_auto_learn_promote_on_death,
+                },
+            },
         },
         "game": {
             "character": args.character,
@@ -280,6 +326,19 @@ def build_run_config(args: argparse.Namespace, seeds: list[str], argv: list[str]
             "print_model_output": args.print_model_output,
         },
     }
+
+
+def _file_sha256(path: str | None) -> str:
+    if not path:
+        return ""
+    target = Path(path)
+    if not target.is_file():
+        return ""
+    digest = hashlib.sha256()
+    with target.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -382,6 +441,99 @@ def main(argv: list[str] | None = None) -> int:
         help="Ask the first turn_chat response in each player turn to include an advisory turn_plan",
     )
     parser.add_argument(
+        "--experience-memory-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=env_bool("STS2_BENCH_EXPERIENCE_MEMORY_ENABLED", False),
+        help="Use frozen experience-memory retrieval in the LLM prompt",
+    )
+    parser.add_argument(
+        "--experience-memory-mode",
+        choices=["frozen", "observe"],
+        default=env_str("STS2_BENCH_EXPERIENCE_MEMORY_MODE", "frozen"),
+    )
+    parser.add_argument(
+        "--experience-memory-store-path",
+        default=env_str("STS2_BENCH_EXPERIENCE_MEMORY_STORE_PATH", "sts2_bench/experience/memory/active.jsonl"),
+    )
+    parser.add_argument(
+        "--experience-memory-top-k",
+        type=int,
+        default=env_int("STS2_BENCH_EXPERIENCE_MEMORY_TOP_K", 5),
+    )
+    parser.add_argument(
+        "--experience-memory-token-budget",
+        type=int,
+        default=env_int("STS2_BENCH_EXPERIENCE_MEMORY_TOKEN_BUDGET", 700),
+    )
+    parser.add_argument(
+        "--experience-memory-min-confidence",
+        type=float,
+        default=env_float("STS2_BENCH_EXPERIENCE_MEMORY_MIN_CONFIDENCE", 0.35),
+    )
+    parser.add_argument(
+        "--experience-memory-include-global",
+        action=argparse.BooleanOptionalAction,
+        default=env_bool("STS2_BENCH_EXPERIENCE_MEMORY_INCLUDE_GLOBAL", True),
+    )
+    parser.add_argument(
+        "--experience-memory-allow-cross-character",
+        action=argparse.BooleanOptionalAction,
+        default=env_bool("STS2_BENCH_EXPERIENCE_MEMORY_ALLOW_CROSS_CHARACTER", False),
+    )
+    parser.add_argument(
+        "--experience-memory-allow-cross-ascension",
+        action=argparse.BooleanOptionalAction,
+        default=env_bool("STS2_BENCH_EXPERIENCE_MEMORY_ALLOW_CROSS_ASCENSION", True),
+    )
+    parser.add_argument(
+        "--experience-event-trace-path",
+        default=env_str("STS2_BENCH_EXPERIENCE_EVENT_TRACE_PATH", ""),
+        help="Optional compact event trace JSONL path for offline reflection",
+    )
+    parser.add_argument(
+        "--experience-auto-learn-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=env_bool("STS2_BENCH_EXPERIENCE_AUTO_LEARN_ENABLED", False),
+        help="Automatically reflect and update experience memory during the run",
+    )
+    parser.add_argument(
+        "--experience-auto-learn-trigger",
+        choices=["act_end", "act_end_or_death"],
+        default=env_str("STS2_BENCH_EXPERIENCE_AUTO_LEARN_TRIGGER", "act_end"),
+        help="When automatic experience learning runs",
+    )
+    parser.add_argument(
+        "--experience-auto-learn-candidate-path",
+        default=env_str("STS2_BENCH_EXPERIENCE_AUTO_LEARN_CANDIDATE_PATH", "sts2_bench/experience/memory/candidates.jsonl"),
+    )
+    parser.add_argument(
+        "--experience-auto-learn-max-candidates-per-span",
+        type=int,
+        default=env_int("STS2_BENCH_EXPERIENCE_AUTO_LEARN_MAX_CANDIDATES_PER_SPAN", 2),
+    )
+    parser.add_argument(
+        "--experience-auto-learn-max-events-per-span",
+        type=int,
+        default=env_int("STS2_BENCH_EXPERIENCE_AUTO_LEARN_MAX_EVENTS_PER_SPAN", 40),
+    )
+    parser.add_argument(
+        "--experience-auto-learn-min-confidence",
+        type=float,
+        default=env_float("STS2_BENCH_EXPERIENCE_AUTO_LEARN_MIN_CONFIDENCE", 0.35),
+    )
+    parser.add_argument(
+        "--experience-auto-learn-promote",
+        action=argparse.BooleanOptionalAction,
+        default=env_bool("STS2_BENCH_EXPERIENCE_AUTO_LEARN_PROMOTE", True),
+        help="Promote candidates generated by automatic learning into the active store",
+    )
+    parser.add_argument(
+        "--experience-auto-learn-promote-on-death",
+        action=argparse.BooleanOptionalAction,
+        default=env_bool("STS2_BENCH_EXPERIENCE_AUTO_LEARN_PROMOTE_ON_DEATH", False),
+        help="Also promote death-triggered automatic learning into the active store",
+    )
+    parser.add_argument(
         "--character",
         default=env_str("STS2_BENCH_CHARACTER", "Ironclad"),
         choices=["Ironclad", "Silent", "Defect", "Regent", "Necrobinder"],
@@ -457,6 +609,24 @@ def main(argv: list[str] | None = None) -> int:
             turn_chat_update_mode=args.turn_chat_update_mode,
             turn_chat_assistant_history=args.turn_chat_assistant_history,
             turn_chat_plan_enabled=args.turn_chat_plan,
+            experience_memory_enabled=args.experience_memory_enabled,
+            experience_memory_mode=args.experience_memory_mode,
+            experience_memory_store_path=args.experience_memory_store_path,
+            experience_memory_top_k=args.experience_memory_top_k,
+            experience_memory_token_budget=args.experience_memory_token_budget,
+            experience_memory_min_confidence=args.experience_memory_min_confidence,
+            experience_memory_include_global=args.experience_memory_include_global,
+            experience_memory_allow_cross_character=args.experience_memory_allow_cross_character,
+            experience_memory_allow_cross_ascension=args.experience_memory_allow_cross_ascension,
+            experience_event_trace_path=args.experience_event_trace_path,
+            experience_auto_learn_enabled=args.experience_auto_learn_enabled,
+            experience_auto_learn_trigger=args.experience_auto_learn_trigger,
+            experience_auto_learn_candidate_path=args.experience_auto_learn_candidate_path,
+            experience_auto_learn_max_candidates_per_span=args.experience_auto_learn_max_candidates_per_span,
+            experience_auto_learn_max_events_per_span=args.experience_auto_learn_max_events_per_span,
+            experience_auto_learn_min_confidence=args.experience_auto_learn_min_confidence,
+            experience_auto_learn_promote=args.experience_auto_learn_promote,
+            experience_auto_learn_promote_on_death=args.experience_auto_learn_promote_on_death,
         )
         for seed in seeds:
             result = run_one(

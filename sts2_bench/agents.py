@@ -18,6 +18,7 @@ from .context import (
     build_last_action_result,
     card_line,
     compact_state,
+    intent_label,
     name,
     power_label,
     render_state_text,
@@ -455,6 +456,11 @@ def _render_current_turn_state(state: dict[str, Any]) -> str:
             f"potions={_potion_count_text(player)}"
         )
     ]
+    lines.append(
+        "Shown combat values are current engine previews. Use enemy Attack shown_total and hand "
+        "shown_damage/shown_block exactly as printed; do not adjust them for visible Strength, "
+        "Dexterity, Frail, Weak, or temporary powers."
+    )
 
     powers = state.get("player_powers") or []
     if powers:
@@ -484,7 +490,7 @@ def _render_current_turn_state(state: dict[str, Any]) -> str:
     if not hand:
         lines.append("  empty")
     for card in hand:
-        lines.append("  " + card_line(card))
+        lines.append("  " + card_line(card, preview_labels=True))
 
     lines.append(
         f"Piles: draw={state.get('draw_pile_count', '?')} "
@@ -502,14 +508,7 @@ def _potion_count_text(player: dict[str, Any]) -> str:
 def _intent_text(enemy: dict[str, Any]) -> str:
     intents = []
     for intent in enemy.get("intents") or []:
-        if intent.get("type") == "Attack":
-            hits = intent.get("hits", 1)
-            if hits and hits > 1:
-                intents.append(f"Attack {intent.get('damage')}x{hits}")
-            else:
-                intents.append(f"Attack {intent.get('damage')}")
-        else:
-            intents.append(str(intent.get("type")))
+        intents.append(intent_label(intent))
     return ",".join(intents) or "none"
 
 
@@ -620,8 +619,8 @@ def _prompt_header(prompt_style: PromptStyle, *, turn_plan_enabled: bool = False
     shared = [
         "Each legal action is one atomic command, not a full-turn plan. After playing a card, using a potion, choosing a reward, or viewing information, you will receive a fresh state and may act again if the game still allows actions.",
         "In combat, end turn is the action that intentionally finishes the current turn; do not choose it while useful playable cards or potions remain unless passing is strategically better.",
-        "Enemy intent damage shown in the state is the engine-displayed damage after currently visible modifiers; do not add enemy Strength or other visible modifiers to that intent damage a second time.",
-        "Card damage and block values shown in the state are engine preview values after currently visible player modifiers such as Strength, Dexterity, Frail, Weak, and card-specific temporary effects; do not apply those visible modifiers to shown card damage or block a second time.",
+        "In combat, unused energy is not saved after ending the turn; next turn receives fresh energy from the engine.",
+        "In combat, printed attack intent and hand damage/block are current engine values; do not recompute visible powers into them.",
         "If all visible enemy intents are non-attack intents, enemies are not making attack damage this turn; block usually expires at end of turn, so avoid spending energy only for block unless another effect justifies it.",
         "View deck/map/pile actions do not advance the game state. They are information requests logged separately; use them when deck composition, pile contents, path context, or current position could affect the decision.",
     ]
@@ -630,7 +629,7 @@ def _prompt_header(prompt_style: PromptStyle, *, turn_plan_enabled: bool = False
     if prompt_style == "analysis":
         schema = (
             '{"situation":"<current objective and main risk>",'
-            '"calculations":["<damage/block/energy/path/reward calculation if relevant>"],'
+            '"calculations":["<shown-value damage/block/energy/path/reward check if relevant>"],'
             '"candidates":[{"action_id":<integer>,"label":"<legal action label>",'
             '"pros":"<why it helps>","cons":"<main risk or cost>"}],'
             '"action_id":<integer>,"reason":"<final concise reason>"}'
@@ -642,7 +641,7 @@ def _prompt_header(prompt_style: PromptStyle, *, turn_plan_enabled: bool = False
                 '"tentative_sequence":["<advisory card/order idea, not commands>"],'
                 '"replan_if":["<state change that invalidates the plan>"]},'
                 '"situation":"<current objective and main risk>",'
-                '"calculations":["<damage/block/energy/path/reward calculation if relevant>"],'
+                '"calculations":["<shown-value damage/block/energy/path/reward check if relevant>"],'
                 '"candidates":[{"action_id":<integer>,"label":"<legal action label>",'
                 '"pros":"<why it helps>","cons":"<main risk or cost>"}],'
                 '"action_id":<integer>,"reason":"<final concise reason>"}'
@@ -652,10 +651,10 @@ def _prompt_header(prompt_style: PromptStyle, *, turn_plan_enabled: bool = False
             "Choose exactly one legal action. Use only an action_id from the legal action list.",
             *shared,
             *turn_plan_rules,
-            "Before choosing, write a compact public analysis in JSON. Analyze the current situation, do any needed arithmetic, compare a few plausible legal actions, then choose.",
+            "Before choosing, write a compact public analysis in JSON. Analyze the current situation, do any needed arithmetic using printed current values, compare a few plausible legal actions, then choose.",
             "Return only valid JSON with this schema:",
             schema,
-            "For combat, compute enemy attacks from intents yourself and compare playable damage, block, energy, and lethal lines.",
+            "For combat, first check survival using enemy Attack shown_total, current block, HP, energy, and printed card shown_block/shown_damage. Treat shown_damage and shown_block as final current values: never reduce shown_block again for Frail/Dexterity, never add Strength/Weak/Vulnerable again to shown_damage, and never add enemy Strength again to shown_total.",
             "For map choices, compare path rewards and risks. For rewards, compare deck impact.",
         ]
 
@@ -685,7 +684,8 @@ def _turn_plan_header_rules() -> list[str]:
         ),
         (
             "The turn_plan should plan the visible hand in detail: incoming damage, lethal possibilities, "
-            "block needs, energy, card order, draw/random effects, modal risks, and conditions that require replanning."
+            "block needs, energy, card order, draw/random effects, modal risks, and conditions that require replanning, "
+            "using printed current combat values without recomputing visible powers into them."
         ),
         (
             'For later messages in the same player turn, follow the prior turn_plan when it is still valid; '

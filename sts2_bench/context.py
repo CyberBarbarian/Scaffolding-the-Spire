@@ -173,7 +173,12 @@ def card_cost_label(card: dict[str, Any]) -> Any:
     return card.get("cost", card.get("energy_cost", "?"))
 
 
-def card_line(card: dict[str, Any], state: dict[str, Any] | None = None) -> str:
+def card_line(
+    card: dict[str, Any],
+    state: dict[str, Any] | None = None,
+    *,
+    preview_labels: bool = False,
+) -> str:
     stats = card.get("stats") or {}
     bits = [
         f"[{card.get('index', '?')}]",
@@ -191,6 +196,8 @@ def card_line(card: dict[str, Any], state: dict[str, Any] | None = None) -> str:
         value = stats.get(key)
         if value is not None:
             label = "damage" if key == "calculateddamage" else key
+            if preview_labels and label in {"damage", "block"}:
+                label = f"shown_{label}"
             bits.append(f"{label}={value}")
     for key in ("cards", "vulnerablepower", "weakpower", "strengthpower", "dexteritypower"):
         value = stats.get(key)
@@ -208,6 +215,24 @@ def card_line(card: dict[str, Any], state: dict[str, Any] | None = None) -> str:
     if keywords:
         bits.append("keywords=" + ",".join(str(k) for k in keywords))
     return " ".join(bits)
+
+
+def intent_label(intent: dict[str, Any]) -> str:
+    intent_type = str(intent.get("type"))
+    if intent_type not in {"Attack", "DeathBlow"}:
+        return intent_type
+    damage = intent.get("damage")
+    hits = intent.get("hits", 1) or 1
+    total = _shown_attack_total(damage, hits)
+    if hits and hits > 1:
+        return f"{intent_type}(shown_damage={damage}x{hits},shown_total={total})"
+    return f"{intent_type}(shown_damage={damage},shown_total={total})"
+
+
+def _shown_attack_total(damage: Any, hits: Any) -> Any:
+    if isinstance(damage, (int, float)) and isinstance(hits, (int, float)):
+        return int(damage) * int(hits)
+    return "?"
 
 
 def one_line(value: Any) -> str:
@@ -437,8 +462,15 @@ def render_full_map(map_data: dict[str, Any], choices: list[dict[str, Any]]) -> 
     return out
 
 
-def append_card_lines(lines: list[str], card: dict[str, Any], *, prefix: str = "  ", suffix: str = "") -> None:
-    lines.append(prefix + card_line(card) + suffix)
+def append_card_lines(
+    lines: list[str],
+    card: dict[str, Any],
+    *,
+    prefix: str = "  ",
+    suffix: str = "",
+    preview_labels: bool = False,
+) -> None:
+    lines.append(prefix + card_line(card, preview_labels=preview_labels) + suffix)
     description = card_description(card)
     if description:
         lines.append(prefix + f"  description: {description}")
@@ -547,14 +579,9 @@ def power_label(power: dict[str, Any], *, include_type: bool = False) -> str:
 
 
 def power_description_text(power: dict[str, Any]) -> str:
-    amount = power.get("amount")
     power_name = name(power.get("name")).strip().lower()
-    if isinstance(amount, (int, float)) and amount < 0:
-        value = abs(int(amount))
-        if power_name == "dexterity":
-            return f"Reduces Block gained from cards by {value}."
-        if power_name == "strength":
-            return f"Decreases attack damage by {value}."
+    if power_name in {"strength", "dexterity", "frail", "weak", "vulnerable"}:
+        return "Already reflected in printed shown_* previews when applicable; do not adjust shown values again."
     return description_of(power)
 
 
@@ -853,6 +880,11 @@ def render_state_text(state: dict[str, Any]) -> str:
             f"Combat: round={state.get('round', '?')} energy={state.get('energy', '?')}/{state.get('max_energy', '?')} "
             f"draw_pile={state.get('draw_pile_count', '?')} discard_pile={state.get('discard_pile_count', '?')}"
         )
+        lines.append(
+            "Shown combat values are current engine previews. Use enemy Attack shown_total and hand "
+            "shown_damage/shown_block exactly as printed; do not adjust them for visible Strength, "
+            "Dexterity, Frail, Weak, or temporary powers."
+        )
         powers = state.get("player_powers") or []
         if powers:
             lines.append(f"Player powers ({len(powers)}):")
@@ -867,13 +899,7 @@ def render_state_text(state: dict[str, Any]) -> str:
         for enemy in enemies:
             intents = []
             for intent in enemy.get("intents") or []:
-                if intent.get("type") == "Attack":
-                    if intent.get("hits", 1) and intent.get("hits", 1) > 1:
-                        intents.append(f"Attack {intent.get('damage')}x{intent.get('hits')}")
-                    else:
-                        intents.append(f"Attack {intent.get('damage')}")
-                else:
-                    intents.append(str(intent.get("type")))
+                intents.append(intent_label(intent))
             powers = enemy.get("powers") or []
             power_text = ""
             if powers:
@@ -888,7 +914,7 @@ def render_state_text(state: dict[str, Any]) -> str:
         hand = state.get("hand", []) or []
         lines.append(f"Hand ({len(hand)}):")
         for card in hand:
-            append_card_lines(lines, card)
+            append_card_lines(lines, card, preview_labels=True)
 
     elif decision == "map_select":
         choices = state.get("choices", []) or []
