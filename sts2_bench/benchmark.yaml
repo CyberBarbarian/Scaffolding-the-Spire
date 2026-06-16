@@ -14,8 +14,12 @@ model: ""
 # 单次 LLM HTTP 请求超时时间，单位秒。调试 DeepSeek 卡住时可以先设为 15-30。
 llm_timeout: 30
 
-# LLM 请求或 JSON 解析失败后的重试次数。调试连通性时建议设为 0，避免每一步等待太久。
-llm_max_retries: 0
+# LLM 请求或 JSON 解析失败后的重试次数。正式 benchmark 至少保留 1 次严格纠错请求；
+# 调试连通性时可以临时设为 0，避免每一步等待太久。
+llm_max_retries: 1
+
+# 所有 LLM 重试失败后的处理。error 会停止当前 run 并记录错误；action 才会使用确定性动作回退。
+llm_fallback_mode: error
 
 # LLM 采样温度。严肃 benchmark 默认 0.0，避免模型采样随机性影响复现实验。
 llm_temperature: 0.0

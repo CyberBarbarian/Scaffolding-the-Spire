@@ -20,6 +20,7 @@ CONFIG_ENV_KEYS = {
     "model": "STS2_BENCH_MODEL",
     "llm_timeout": "STS2_BENCH_LLM_TIMEOUT",
     "llm_max_retries": "STS2_BENCH_LLM_MAX_RETRIES",
+    "llm_fallback_mode": "STS2_BENCH_LLM_FALLBACK_MODE",
     "llm_temperature": "STS2_BENCH_LLM_TEMPERATURE",
     "prompt_style": "STS2_BENCH_PROMPT_STYLE",
     "include_json_state": "STS2_BENCH_INCLUDE_JSON_STATE",
@@ -33,6 +34,7 @@ CONFIG_ENV_KEYS = {
     "seeds": "STS2_BENCH_SEEDS",
     "count": "STS2_BENCH_COUNT",
     "max_steps": "STS2_BENCH_MAX_STEPS",
+    "max_game_actions": "STS2_BENCH_MAX_GAME_ACTIONS",
     "out": "STS2_BENCH_OUT",
     "log_level": "STS2_BENCH_LOG_LEVEL",
     "print_prompts": "STS2_BENCH_PRINT_PROMPTS",
@@ -52,7 +54,7 @@ NESTED_CONFIG_ENV_KEYS = {
 def load_seeds(path: str | None, count: int) -> list[str]:
     if not path:
         return [f"bench_{i:04d}" for i in range(count)]
-    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    data = json.loads(Path(path).read_text(encoding="utf-8-sig"))
     if isinstance(data, list):
         seeds = []
         for item in data:
@@ -135,13 +137,20 @@ def _parse_config_scalar(value: str) -> object:
 def _load_simple_yaml_mapping(path: Path) -> dict[str, object]:
     """Parse the tracked benchmark config without requiring a YAML dependency.
 
-    The committed config intentionally uses only top-level scalar values, so a
-    small fallback parser keeps basic commands such as `--help` usable before
-    optional benchmark dependencies are installed.
+    The committed config intentionally uses only mapping nodes and scalar
+    values, so a small fallback parser keeps basic commands such as `--help`
+    usable before optional benchmark dependencies are installed.
     """
 
     data: dict[str, object] = {}
+    stack: list[tuple[int, dict[str, object]]] = [(-1, data)]
     for lineno, raw_line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+        if not raw_line.strip() or raw_line.lstrip().startswith("#"):
+            continue
+        if "\t" in raw_line[: len(raw_line) - len(raw_line.lstrip(" "))]:
+            raise ValueError(f"{path}:{lineno} must use spaces for indentation")
+
+        indent = len(raw_line) - len(raw_line.lstrip(" "))
         line = raw_line.strip()
         if not line or line.startswith("#"):
             continue
@@ -153,10 +162,21 @@ def _load_simple_yaml_mapping(path: Path) -> dict[str, object]:
         if not key:
             raise ValueError(f"{path}:{lineno} has an empty key")
 
+        while stack and indent <= stack[-1][0]:
+            stack.pop()
+        if not stack:
+            raise ValueError(f"{path}:{lineno} has invalid indentation")
+        parent = stack[-1][1]
+
         value = raw_value.strip()
+        if not value:
+            child: dict[str, object] = {}
+            parent[key] = child
+            stack.append((indent, child))
+            continue
         if value and not value.startswith(("'", '"')):
             value = value.split(" #", 1)[0].strip()
-        data[key] = _parse_config_scalar(value)
+        parent[key] = _parse_config_scalar(value)
     return data
 
 
@@ -279,6 +299,36 @@ def _redact_argv(argv: list[str]) -> list[str]:
 def build_run_config(args: argparse.Namespace, seeds: list[str], argv: list[str]) -> dict[str, object]:
     """Build a redacted, resolved benchmark config for logs and trace files."""
 
+    turn_chat_config = {
+        "window": args.turn_chat_window,
+        "update_mode": args.turn_chat_update_mode,
+        "assistant_history": args.turn_chat_assistant_history,
+        "plan": {
+            "enabled": args.turn_chat_plan,
+        },
+    }
+    if args.agent == "coordinator":
+        context_management: dict[str, object] = {
+            "mode": "coordinator",
+            "ca": {
+                "mode": "turn_chat",
+                "turn_chat": turn_chat_config,
+            },
+            "occ": {
+                "mode": "reference_turn",
+                "run_context": "rm_rp_slice",
+                "reference_context": {
+                    "window": args.turn_chat_window,
+                    "source": "rm_rp_slice_plus_short_occ_history",
+                },
+            },
+        }
+    else:
+        context_management = {
+            "mode": args.context_mode,
+            "turn_chat": turn_chat_config,
+        }
+
     return {
         "argv": _redact_argv(argv),
         "agent": {
@@ -287,6 +337,7 @@ def build_run_config(args: argparse.Namespace, seeds: list[str], argv: list[str]
             "model": args.model,
             "llm_timeout": args.llm_timeout,
             "llm_max_retries": args.llm_max_retries,
+            "llm_fallback_mode": args.llm_fallback_mode,
             "llm_temperature": args.llm_temperature,
             "prompt_style": args.prompt_style,
             "include_json_state": args.include_json_state,
@@ -296,17 +347,7 @@ def build_run_config(args: argparse.Namespace, seeds: list[str], argv: list[str]
                 "mode": args.memory_mode,
             },
             "run_summary_enabled": args.run_summary,
-            "context_management": {
-                "mode": args.context_mode,
-                "turn_chat": {
-                    "window": args.turn_chat_window,
-                    "update_mode": args.turn_chat_update_mode,
-                    "assistant_history": args.turn_chat_assistant_history,
-                    "plan": {
-                        "enabled": args.turn_chat_plan,
-                    },
-                },
-            },
+            "context_management": context_management,
         },
         "game": {
             "character": args.character,
@@ -318,6 +359,7 @@ def build_run_config(args: argparse.Namespace, seeds: list[str], argv: list[str]
             "seeds": list(seeds),
             "count": args.count,
             "max_steps": args.max_steps,
+            "max_game_actions": args.max_game_actions,
             "include_full_map": args.include_full_map,
             "allow_repeat_views": args.allow_repeat_views,
         },
@@ -334,7 +376,7 @@ def main(argv: list[str] | None = None) -> int:
     load_benchmark_env()
 
     parser = argparse.ArgumentParser(description="Run STS2 headless benchmark policies.")
-    parser.add_argument("--agent", choices=["random", "llm"], default=env_str("STS2_BENCH_AGENT", "random"))
+    parser.add_argument("--agent", choices=["random", "llm", "coordinator"], default=env_str("STS2_BENCH_AGENT", "random"))
     parser.add_argument(
         "--base-url",
         default=env_str("STS2_BENCH_BASE_URL"),
@@ -352,6 +394,12 @@ def main(argv: list[str] | None = None) -> int:
         type=int,
         default=env_int("STS2_BENCH_LLM_MAX_RETRIES", 2),
         help="Number of retries after an LLM request or parsing failure",
+    )
+    parser.add_argument(
+        "--llm-fallback-mode",
+        choices=["error", "action"],
+        default=env_str("STS2_BENCH_LLM_FALLBACK_MODE", "error"),
+        help="What to do after all LLM retries fail: error stops the run; action uses deterministic first-action fallback",
     )
     parser.add_argument(
         "--llm-temperature",
@@ -444,6 +492,12 @@ def main(argv: list[str] | None = None) -> int:
         default=env_int("STS2_BENCH_MAX_STEPS", 2000),
         help="Safety cap on decision steps per run; set high for floor benchmark",
     )
+    parser.add_argument(
+        "--max-game-actions",
+        type=int,
+        default=env_int("STS2_BENCH_MAX_GAME_ACTIONS", 0),
+        help="Optional cap on real game actions per run; benchmark-local view actions do not count",
+    )
     parser.add_argument("--out", default=env_str("STS2_BENCH_OUT"), help="JSONL trace output path")
     parser.add_argument(
         "--log-level",
@@ -493,6 +547,7 @@ def main(argv: list[str] | None = None) -> int:
             api_key=args.api_key,
             llm_timeout=args.llm_timeout,
             llm_max_retries=args.llm_max_retries,
+            llm_fallback_mode=args.llm_fallback_mode,
             llm_temperature=args.llm_temperature,
             include_json_state=args.include_json_state,
             prompt_style=args.prompt_style,
@@ -514,6 +569,7 @@ def main(argv: list[str] | None = None) -> int:
                 ascension=args.ascension,
                 lang=args.lang,
                 max_steps=args.max_steps,
+                max_game_actions=args.max_game_actions or None,
                 logger=logger,
                 print_prompts=args.print_prompts,
                 print_model_output=args.print_model_output,

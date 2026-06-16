@@ -22,6 +22,7 @@ from .context import (
     power_label,
     render_state_text,
 )
+from .sequences import normalize_card_sequence_payload
 
 
 PromptStyle = Literal["default", "analysis"]
@@ -29,6 +30,11 @@ MemoryMode = Literal["action_reason", "factual_diff"]
 ConversationMode = Literal["single_turn", "turn_chat"]
 TurnChatUpdateMode = Literal["delta"]
 TurnChatAssistantHistory = Literal["compact"]
+FallbackMode = Literal["action", "error"]
+
+
+class ModelActionError(RuntimeError):
+    """Raised when an LLM cannot produce a valid legal action after retries."""
 
 
 class Agent(Protocol):
@@ -216,6 +222,12 @@ class TurnChatBuffer:
         )
         self._trim()
 
+    def remember_user_feedback(self, feedback: str) -> None:
+        if self.active_turn_key is None:
+            return
+        self.messages.append({"role": "user", "content": feedback})
+        self._trim()
+
     def after_transition(self, action: LegalAction, next_state: dict[str, Any] | None) -> None:
         if action.kind == "combat_end_turn":
             self.reset()
@@ -389,13 +401,15 @@ def build_view_update_user_message(state: dict[str, Any], legal_actions: list[Le
 def build_compact_assistant_message(action: LegalAction, parsed: dict[str, Any]) -> str:
     reason = _one_line(parsed.get("reason") if isinstance(parsed, dict) else "")
     payload: dict[str, Any] = {
-        "action_id": action.action_id,
         "action": action.label,
+        "action_kind": action.kind,
     }
     if isinstance(parsed, dict):
         for key in ("turn_plan", "plan_update"):
             if key in parsed:
                 payload[key] = parsed[key]
+        if action.kind == "combat_custom_sequence" and "sequence" in parsed:
+            payload["sequence"] = parsed["sequence"]
     if reason:
         payload["reason"] = reason
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
@@ -618,7 +632,11 @@ def _has_enemy_attack_intent(state: dict[str, Any]) -> bool:
 
 def _prompt_header(prompt_style: PromptStyle, *, turn_plan_enabled: bool = False) -> list[str]:
     shared = [
-        "Each legal action is one atomic command, not a full-turn plan. After playing a card, using a potion, choosing a reward, or viewing information, you will receive a fresh state and may act again if the game still allows actions.",
+        "Each legal action is one atomic benchmark action, not an open-ended plan. Most legal actions execute one engine command; combat_card_sequence is an engine-side queued card sequence that may play multiple listed cards before the next LLM request.",
+        "Choose combat_card_sequence only for deterministic same-turn combat actions where every listed card is already in hand, currently playable, and does not rely on draw, random effects, discard/exhaust choices, generated cards, or other modal decisions.",
+        "If useful deterministic compression is not listed, you may choose combat_custom_sequence and include a sequence array of card steps like {\"card_index\":0,\"target_index\":0}; the benchmark validates it with the engine before execution.",
+        "For combat_custom_sequence, card_index values refer to the current visible hand snapshot; do not predict that indices will shift after earlier cards are played. If the sequence depends on post-play hand changes, use single legal actions instead.",
+        "After playing a card, using a potion, choosing a reward, viewing information, or executing a card sequence, you will receive a fresh state and may act again if the game still allows actions.",
         "In combat, end turn is the action that intentionally finishes the current turn; do not choose it while useful playable cards or potions remain unless passing is strategically better.",
         "Enemy intent damage shown in the state is the engine-displayed damage after currently visible modifiers; do not add enemy Strength or other visible modifiers to that intent damage a second time.",
         "Card damage and block values shown in the state are engine preview values after currently visible player modifiers such as Strength, Dexterity, Frail, Weak, and card-specific temporary effects; do not apply those visible modifiers to shown card damage or block a second time.",
@@ -633,7 +651,9 @@ def _prompt_header(prompt_style: PromptStyle, *, turn_plan_enabled: bool = False
             '"calculations":["<damage/block/energy/path/reward calculation if relevant>"],'
             '"candidates":[{"action_id":<integer>,"label":"<legal action label>",'
             '"pros":"<why it helps>","cons":"<main risk or cost>"}],'
-            '"action_id":<integer>,"reason":"<final concise reason>"}'
+            '"action_id":<integer>,"selected_action_label":"<copy exact chosen legal action label>",'
+            '"sequence":[{"card_index":<integer>,"target_index":<integer if needed>}],'
+            '"reason":"<final concise reason>"}'
         )
         if turn_plan_enabled:
             schema = (
@@ -645,11 +665,14 @@ def _prompt_header(prompt_style: PromptStyle, *, turn_plan_enabled: bool = False
                 '"calculations":["<damage/block/energy/path/reward calculation if relevant>"],'
                 '"candidates":[{"action_id":<integer>,"label":"<legal action label>",'
                 '"pros":"<why it helps>","cons":"<main risk or cost>"}],'
-                '"action_id":<integer>,"reason":"<final concise reason>"}'
+                '"action_id":<integer>,"selected_action_label":"<copy exact chosen legal action label>",'
+                '"sequence":[{"card_index":<integer>,"target_index":<integer if needed>}],'
+                '"reason":"<final concise reason>"}'
             )
         return [
             "You are playing Slay the Spire 2 through a headless benchmark environment.",
             "Choose exactly one legal action. Use only an action_id from the legal action list.",
+            "Also copy the selected legal action label exactly into selected_action_label; action ids are state-local, so never reuse an action_id from earlier messages without checking the current legal actions.",
             *shared,
             *turn_plan_rules,
             "Before choosing, write a compact public analysis in JSON. Analyze the current situation, do any needed arithmetic, compare a few plausible legal actions, then choose.",
@@ -659,19 +682,22 @@ def _prompt_header(prompt_style: PromptStyle, *, turn_plan_enabled: bool = False
             "For map choices, compare path rewards and risks. For rewards, compare deck impact.",
         ]
 
-    schema = '{"action_id": <integer>, "reason": "<short reason>"}'
+    schema = '{"action_id": <integer>, "selected_action_label": "<copy exact chosen legal action label>", "sequence": [{"card_index": <integer>, "target_index": <integer if needed>}], "reason": "<short reason>"}'
     if turn_plan_enabled:
         schema = (
             '{"turn_plan": {"objective": "<goal for this visible hand>", '
             '"survival_check": "<incoming damage and block/kill requirement>", '
             '"tentative_sequence": ["<advisory card/order idea, not commands>"], '
             '"replan_if": ["<state change that invalidates the plan>"]}, '
-            '"action_id": <integer>, "reason": "<short reason>"}'
+            '"action_id": <integer>, "selected_action_label": "<copy exact chosen legal action label>", '
+            '"sequence": [{"card_index": <integer>, "target_index": <integer if needed>}], '
+            '"reason": "<short reason>"}'
         )
     return [
         "You are playing Slay the Spire 2 through a headless benchmark environment.",
         "Choose exactly one legal action. Return only JSON with this schema:",
         *shared,
+        "Also copy the selected legal action label exactly into selected_action_label; action ids are state-local, so never reuse an action_id from earlier messages without checking the current legal actions.",
         *turn_plan_rules,
         schema,
     ]
@@ -775,7 +801,9 @@ class OpenAICompatAgent:
     turn_chat_update_mode: TurnChatUpdateMode = "delta"
     turn_chat_assistant_history: TurnChatAssistantHistory = "compact"
     turn_chat_plan_enabled: bool = False
+    fallback_mode: FallbackMode = "error"
     turn_chat_buffer: TurnChatBuffer = field(init=False)
+    pending_external_feedback: list[str] = field(default_factory=list, init=False)
 
     def __post_init__(self) -> None:
         if self.conversation_mode not in {"single_turn", "turn_chat"}:
@@ -784,6 +812,8 @@ class OpenAICompatAgent:
             raise ValueError(f"Unsupported turn_chat_update_mode: {self.turn_chat_update_mode}")
         if self.turn_chat_assistant_history != "compact":
             raise ValueError(f"Unsupported turn_chat_assistant_history: {self.turn_chat_assistant_history}")
+        if self.fallback_mode not in {"action", "error"}:
+            raise ValueError(f"Unsupported fallback_mode: {self.fallback_mode}")
         if self.turn_chat_window < 1:
             raise ValueError("turn_chat_window must be at least 1")
         if self.conversation_mode == "turn_chat" and self.memory_enabled:
@@ -836,6 +866,9 @@ class OpenAICompatAgent:
             },
             {"role": "user", "content": prompt},
         ]
+        if self.pending_external_feedback:
+            messages.append({"role": "user", "content": "\n".join(self.pending_external_feedback)})
+            self.pending_external_feedback.clear()
 
         last_error: str | None = None
         for attempt in range(self.max_retries + 1):
@@ -845,10 +878,8 @@ class OpenAICompatAgent:
                 elapsed = time.time() - started
                 text = response["choices"][0]["message"]["content"]
                 parsed = parse_json_object(text)
-                action_id = int(parsed.get("action_id"))
-                if action_id < 0 or action_id >= len(legal_actions):
-                    raise ValueError(f"action_id out of range: {action_id}")
-                return legal_actions[action_id], {
+                action, action_remap, resolved_from_label = _resolve_model_action(parsed, legal_actions)
+                return action, {
                     "agent": "openai_compat",
                     "model": self.model,
                     "conversation_mode": self.conversation_mode,
@@ -860,6 +891,7 @@ class OpenAICompatAgent:
                     "parsed": parsed,
                     "usage": response.get("usage"),
                     "prompt_chars": len(prompt),
+                    **_action_resolution_meta(action, action_remap, resolved_from_label),
                 }
             except Exception as exc:  # noqa: BLE001 - log and retry with stricter correction
                 last_error = str(exc)
@@ -868,14 +900,19 @@ class OpenAICompatAgent:
                         "role": "user",
                         "content": (
                             f"Your previous response was invalid: {last_error}. "
-                            f"Return only JSON with action_id between 0 and {len(legal_actions) - 1}."
+                            f"Return only JSON with action_id between 0 and {len(legal_actions) - 1}, "
+                            "selected_action_label copied exactly from that current legal action label, "
+                            "sequence included only when choosing combat_custom_sequence, "
+                            "and a reason describing the same selected action."
                         ),
                     }
                 )
 
-        # Deterministic fallback keeps long benchmark batches moving while
-        # still recording the invalid model behavior.  Prefer a real game
-        # action so parse failures do not degenerate into repeated view actions.
+        if self.fallback_mode == "error":
+            raise ModelActionError(_model_action_error_message(last_error, self.max_retries))
+
+        # Optional deterministic fallback keeps exploratory benchmark batches
+        # moving while still recording the invalid model behavior.
         fallback = first_non_view_action(legal_actions)
         return fallback, {
             "agent": "openai_compat",
@@ -913,10 +950,7 @@ class OpenAICompatAgent:
                 elapsed = time.time() - started
                 text = response["choices"][0]["message"]["content"]
                 parsed = parse_json_object(text)
-                action_id = int(parsed.get("action_id"))
-                if action_id < 0 or action_id >= len(legal_actions):
-                    raise ValueError(f"action_id out of range: {action_id}")
-                action = legal_actions[action_id]
+                action, action_remap, resolved_from_label = _resolve_model_action(parsed, legal_actions)
                 self.turn_chat_buffer.remember_assistant(action, parsed)
                 return action, {
                     "agent": "openai_compat",
@@ -932,6 +966,7 @@ class OpenAICompatAgent:
                     "raw_response": text,
                     "parsed": parsed,
                     "usage": response.get("usage"),
+                    **_action_resolution_meta(action, action_remap, resolved_from_label),
                 }
             except Exception as exc:  # noqa: BLE001 - log and retry with stricter correction
                 last_error = str(exc)
@@ -940,10 +975,16 @@ class OpenAICompatAgent:
                         "role": "user",
                         "content": (
                             f"Your previous response was invalid: {last_error}. "
-                            f"Return only JSON with action_id between 0 and {len(legal_actions) - 1}."
+                            f"Return only JSON with action_id between 0 and {len(legal_actions) - 1}, "
+                            "selected_action_label copied exactly from that current legal action label, "
+                            "sequence included only when choosing combat_custom_sequence, "
+                            "and a reason describing the same selected action."
                         ),
                     }
                 )
+
+        if self.fallback_mode == "error":
+            raise ModelActionError(_model_action_error_message(last_error, self.max_retries))
 
         fallback = first_non_view_action(legal_actions)
         self.turn_chat_buffer.remember_assistant(
@@ -968,6 +1009,20 @@ class OpenAICompatAgent:
         if self.memory:
             self.memory.reset()
         self.turn_chat_buffer.reset()
+        self.pending_external_feedback.clear()
+
+    def receive_external_feedback(
+        self,
+        state: dict[str, Any],
+        action: LegalAction,
+        meta: dict[str, Any],
+        feedback: str,
+        legal_actions: list[LegalAction],
+    ) -> None:
+        if self.conversation_mode == "turn_chat":
+            self.turn_chat_buffer.remember_user_feedback(feedback)
+            return
+        self.pending_external_feedback.append(feedback)
 
     def record_transition(
         self,
@@ -1016,16 +1071,218 @@ def parse_json_object(text: str) -> dict[str, Any]:
     if text.startswith("```"):
         text = re.sub(r"^```(?:json)?\s*", "", text)
         text = re.sub(r"\s*```$", "", text)
-    try:
-        value = json.loads(text)
-    except json.JSONDecodeError:
-        match = re.search(r"\{.*\}", text, flags=re.DOTALL)
-        if not match:
-            raise
-        value = json.loads(match.group(0))
+    value = _parse_first_json_object(text)
     if not isinstance(value, dict):
         raise ValueError(f"Expected JSON object, got {type(value).__name__}")
     return value
+
+
+def _parse_first_json_object(text: str) -> Any:
+    decoder = json.JSONDecoder()
+    try:
+        value, _end = decoder.raw_decode(text)
+        return value
+    except json.JSONDecodeError as first_error:
+        start = text.find("{")
+        if start < 0:
+            raise first_error
+        value, _end = decoder.raw_decode(text[start:])
+    return value
+
+
+def _resolve_model_action(
+    parsed: dict[str, Any],
+    legal_actions: list[LegalAction],
+) -> tuple[LegalAction, int | None, bool]:
+    selected_label = _selected_action_label(parsed)
+    label_action = _action_matching_selected_label(selected_label, legal_actions)
+    raw_action_id = parsed.get("action_id")
+
+    try:
+        action_id = int(raw_action_id)
+    except (TypeError, ValueError):
+        if label_action is not None:
+            _validate_model_action(parsed, label_action, legal_actions)
+            return label_action, None, True
+        raise ValueError("action_id must be an integer or selected_action_label must exactly match a current legal action")
+
+    if action_id < 0 or action_id >= len(legal_actions):
+        if label_action is not None:
+            _validate_model_action(parsed, label_action, legal_actions)
+            return label_action, action_id, True
+        raise ValueError(f"action_id out of range: {action_id}")
+
+    action = legal_actions[action_id]
+    remapped_from: int | None = None
+    if label_action is not None and label_action != action:
+        remapped_from = action.action_id
+        action = label_action
+
+    _validate_model_action(parsed, action, legal_actions)
+    return action, remapped_from, False
+
+
+def _action_resolution_meta(
+    action: LegalAction,
+    remapped_from: int | None,
+    resolved_from_label: bool,
+) -> dict[str, Any]:
+    meta: dict[str, Any] = {}
+    if remapped_from is not None:
+        meta["action_id_remapped_from"] = remapped_from
+    if remapped_from is not None or resolved_from_label:
+        meta["resolved_action_id"] = action.action_id
+    if resolved_from_label:
+        meta["action_id_resolved_from_label"] = True
+    return meta
+
+
+def _action_matching_selected_label(
+    selected_label: str,
+    legal_actions: list[LegalAction],
+) -> LegalAction | None:
+    if not selected_label:
+        return None
+    normalized_label = _normalize_for_action_match(selected_label)
+    matches = [
+        action
+        for action in legal_actions
+        if _normalize_for_action_match(action.label) == normalized_label
+    ]
+    if len(matches) == 1:
+        return matches[0]
+    return None
+
+
+def _validate_model_action(parsed: dict[str, Any], action: LegalAction, legal_actions: list[LegalAction]) -> None:
+    selected_label = _selected_action_label(parsed)
+    if selected_label:
+        if _normalize_for_action_match(selected_label) != _normalize_for_action_match(action.label):
+            raise ValueError(
+                "selected_action_label does not match selected action: "
+                f"action_id {action.action_id} is {action.label!r}, got {selected_label!r}"
+            )
+        if action.kind != "combat_custom_sequence":
+            return
+
+    if action.kind == "combat_custom_sequence":
+        normalize_card_sequence_payload(parsed.get("sequence"))
+        return
+
+    reason = _one_line(parsed.get("reason") if isinstance(parsed, dict) else "")
+    mismatched_action = _reason_mentions_different_action(reason, action, legal_actions)
+    if mismatched_action is not None:
+        raise ValueError(
+            "reason does not match selected action: "
+            f"action_id {action.action_id} is {action.label!r}, "
+            f"but reason appears to describe {mismatched_action.label!r}"
+        )
+
+
+def _selected_action_label(parsed: dict[str, Any]) -> str:
+    for key in ("selected_action_label", "action_label", "label", "action"):
+        value = parsed.get(key)
+        if isinstance(value, str):
+            return _one_line(value)
+    return ""
+
+
+def _reason_mentions_different_action(
+    reason: str,
+    selected_action: LegalAction,
+    legal_actions: list[LegalAction],
+) -> LegalAction | None:
+    normalized_reason = _normalize_for_action_match(reason)
+    if not normalized_reason:
+        return None
+
+    selected_phrases = _action_reason_phrases(selected_action)
+    if any(_contains_positive_phrase(normalized_reason, phrase) for phrase in selected_phrases):
+        return None
+
+    for candidate in legal_actions:
+        if candidate == selected_action or candidate.command.get("cmd") == "bench_view":
+            continue
+        for phrase in _action_reason_phrases(candidate):
+            if _contains_positive_phrase(normalized_reason, phrase):
+                return candidate
+    return None
+
+
+def _action_reason_phrases(action: LegalAction) -> set[str]:
+    label = action.label
+    normalized_label = _normalize_for_action_match(label)
+    phrases = {normalized_label}
+
+    if action.kind == "combat_end_turn":
+        phrases.update({"end turn", "end the turn", "finish turn", "finish the turn"})
+
+    if action.kind == "combat_card_sequence":
+        phrases.add("play sequence")
+        for part in label.split(":", 1)[-1].split("->"):
+            normalized_part = _normalize_for_action_match(part)
+            match = re.match(r"\d+\s+(.+?)(?:\s+on enemy\s+\d+)?$", normalized_part)
+            if match:
+                card_name = match.group(1)
+                phrases.update({f"play {card_name}", f"play card {card_name}"})
+
+    card_match = re.match(r"play card\s+\d+:\s*(.*?)(?:\s+on enemy\s+\d+:|$)", label, flags=re.IGNORECASE)
+    if card_match:
+        card_name = _normalize_for_action_match(card_match.group(1))
+        phrases.update({f"play {card_name}", f"play card {card_name}"})
+
+    for prefix, verbs in (
+        (r"(?:pick|select) card\s+\d+:\s*(.*)$", ("pick", "select", "take")),
+        (r"buy card\s+\d+:\s*(.*?)\s+for\s+\d+\s+gold$", ("buy", "purchase")),
+        (r"use potion\s+\d+:\s*(.*?)(?:\s+on enemy\s+\d+:|$)", ("use", "drink")),
+        (r"claim relic\s+\d+:\s*(.*)$", ("claim", "take")),
+        (r"claim reward\s+\d+:\s*(.*)$", ("claim", "take")),
+        (r"choose option\s+\d+:\s*(.*)$", ("choose", "select")),
+    ):
+        match = re.match(prefix, label, flags=re.IGNORECASE)
+        if match:
+            subject = _normalize_for_action_match(match.group(1))
+            phrases.update(f"{verb} {subject}" for verb in verbs)
+
+    return {phrase for phrase in phrases if len(phrase) >= 3}
+
+
+def _contains_positive_phrase(normalized_text: str, phrase: str) -> bool:
+    if not phrase:
+        return False
+    haystack = f" {normalized_text} "
+    needle = f" {phrase} "
+    start = haystack.find(needle)
+    while start >= 0:
+        prefix = haystack[max(0, start - 48) : start]
+        if not _negates_action_phrase(prefix):
+            return True
+        start = haystack.find(needle, start + 1)
+    return False
+
+
+def _negates_action_phrase(prefix: str) -> bool:
+    negation_markers = (
+        "cannot ",
+        "can t ",
+        "cant ",
+        "do not ",
+        "don t ",
+        "dont ",
+        "not ",
+        "no need to ",
+        "avoid ",
+        "skip ",
+        "without ",
+        "instead of ",
+        "rather than ",
+        "unable to ",
+    )
+    return any(marker in prefix for marker in negation_markers)
+
+
+def _normalize_for_action_match(text: str) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9]+", " ", text.lower())).strip()
 
 
 def first_non_view_action(legal_actions: list[LegalAction]) -> LegalAction:
@@ -1033,3 +1290,9 @@ def first_non_view_action(legal_actions: list[LegalAction]) -> LegalAction:
         (action for action in legal_actions if action.command.get("cmd") != "bench_view"),
         legal_actions[0],
     )
+
+
+def _model_action_error_message(last_error: str | None, max_retries: int) -> str:
+    attempts = max_retries + 1
+    reason = last_error or "unknown model action error"
+    return f"LLM failed after {attempts} attempt(s): {reason}"

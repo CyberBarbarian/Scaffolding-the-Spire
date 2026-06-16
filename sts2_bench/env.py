@@ -12,6 +12,7 @@ from typing import Any
 from .actions import LegalAction, build_legal_actions
 from .context import build_last_action_result, compact_state
 from .process import Sts2Process
+from .sequences import execute_card_sequence
 
 
 class Sts2Env:
@@ -47,7 +48,11 @@ class Sts2Env:
             seed=seed,
             lang=self.lang,
         )
-        self.legal_actions = build_legal_actions(self.state, allow_repeat_views=self.allow_repeat_views)
+        self.legal_actions = build_legal_actions(
+            self.state,
+            allow_repeat_views=self.allow_repeat_views,
+            allow_custom_sequences=False,
+        )
         return self.observation(), self.info()
 
     def step(self, action_index: int) -> tuple[dict[str, Any], float, bool, bool, dict[str, Any]]:
@@ -61,8 +66,40 @@ class Sts2Env:
         action = self.legal_actions[action_index]
         if action.command.get("cmd") == "bench_view":
             self.state = self._apply_view_action(action.command)
-            self.legal_actions = build_legal_actions(self.state, allow_repeat_views=self.allow_repeat_views)
+            self.legal_actions = build_legal_actions(
+                self.state,
+                allow_repeat_views=self.allow_repeat_views,
+                allow_custom_sequences=False,
+            )
             return self.observation(), 0.0, False, False, self.info()
+        if action.command.get("cmd") == "bench_sequence":
+            sequence_result = execute_card_sequence(self.state, action.command.get("sequence") or [], self.process.send)
+            next_state = sequence_result.state
+            if next_state.get("type") == "error":
+                self.state = next_state
+                self.legal_actions = []
+                return self.observation(), -5.0, True, False, {**self.info(), "engine_error": True}
+            self.state = {
+                **next_state,
+                "last_action_result": build_last_action_result(
+                    old_state,
+                    next_state,
+                    action_label=action.label,
+                    action_kind=action.kind,
+                ),
+            }
+            terminated = self.state.get("decision") == "game_over"
+            reward = shaped_reward(old_state, self.state, invalid=False)
+            self.legal_actions = build_legal_actions(
+                self.state,
+                allow_repeat_views=self.allow_repeat_views,
+                allow_custom_sequences=False,
+            )
+            return self.observation(), reward, terminated, False, {
+                **self.info(),
+                "sequence_steps": sequence_result.steps_executed,
+                "sequence_stop": sequence_result.stopped_reason,
+            }
 
         next_state = self.process.send(action.command)
         if next_state.get("type") == "error":
@@ -80,7 +117,11 @@ class Sts2Env:
         }
         terminated = self.state.get("decision") == "game_over"
         reward = shaped_reward(old_state, self.state, invalid=False)
-        self.legal_actions = build_legal_actions(self.state, allow_repeat_views=self.allow_repeat_views)
+        self.legal_actions = build_legal_actions(
+            self.state,
+            allow_repeat_views=self.allow_repeat_views,
+            allow_custom_sequences=False,
+        )
         return self.observation(), reward, terminated, False, self.info()
 
     def _apply_view_action(self, command: dict[str, Any]) -> dict[str, Any]:

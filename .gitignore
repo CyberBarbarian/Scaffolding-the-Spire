@@ -7,8 +7,9 @@ obj/
 .vs/
 .idea/
 *.DotSettings
-/python/__pycache__/
+__pycache__/
 *.pyc
+.tmp_*/
 .DS_Store
 .obsidian/
 .env
@@ -19,3 +20,7 @@ saves/*
 artifacts/
 .tools/
 results/
+
+# Local analysis/visualization reports
+docs/occ-ca-rm-rp-v1-plan.html
+docs/pa-ca-architecture-diagram.html

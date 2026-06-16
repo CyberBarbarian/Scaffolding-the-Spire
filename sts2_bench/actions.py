@@ -7,6 +7,22 @@ from dataclasses import dataclass
 from typing import Any
 
 
+MAX_CARD_SEQUENCE_LENGTH = 3
+MAX_CARD_SEQUENCE_ACTIONS = 24
+_UNSAFE_SEQUENCE_TEXT = (
+    "draw",
+    "random",
+    "discard",
+    "exhaust",
+    "choose",
+    "select",
+    "shuffle",
+    "generate",
+    "discover",
+)
+_UNSAFE_SEQUENCE_STATS = {"cards", "draw", "discard", "exhaust", "random"}
+
+
 @dataclass(frozen=True)
 class LegalAction:
     """One action exposed to a model or policy.
@@ -45,6 +61,22 @@ def _view_action(label: str, view: str, kind: str) -> dict[str, Any]:
     }
 
 
+def _sequence_action(label: str, sequence: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "label": label,
+        "command": {"cmd": "bench_sequence", "sequence": sequence},
+        "kind": "combat_card_sequence",
+    }
+
+
+def _custom_sequence_action() -> dict[str, Any]:
+    return {
+        "label": "propose custom deterministic card sequence",
+        "command": {"cmd": "bench_custom_sequence"},
+        "kind": "combat_custom_sequence",
+    }
+
+
 def _name(obj: Any) -> str:
     if isinstance(obj, dict):
         for key in ("en", "name", "title", "id"):
@@ -70,6 +102,68 @@ def _card_cost_value(card: dict[str, Any]) -> int:
     if isinstance(cost, str) and cost.upper() == "X":
         return 0
     return 99
+
+
+def _is_sequence_safe_card(card: dict[str, Any]) -> bool:
+    target_type = str(card.get("target_type") or "")
+    if target_type not in {"None", "AnyEnemy"}:
+        return False
+    stats = card.get("stats") or {}
+    if any(str(key).lower() in _UNSAFE_SEQUENCE_STATS for key in stats):
+        return False
+    text = " ".join(str(card.get(key) or "") for key in ("name", "description", "raw_description")).lower()
+    return not any(marker in text for marker in _UNSAFE_SEQUENCE_TEXT)
+
+
+def _sequence_step_label(card: dict[str, Any], enemy: dict[str, Any] | None = None) -> str:
+    label = f"{card.get('index')} {_name(card.get('name'))}"
+    if enemy is not None:
+        label += f" on enemy {enemy.get('index')}"
+    return label
+
+
+def _combat_card_sequence_actions(state: dict[str, Any], playable_cards: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    energy = int(state.get("energy", 0) or 0)
+    enemies = [enemy for enemy in state.get("enemies", []) if enemy.get("hp", 0) > 0]
+    candidates: list[dict[str, Any]] = []
+    for card in playable_cards:
+        if not _is_sequence_safe_card(card):
+            continue
+        target_type = str(card.get("target_type") or "")
+        if target_type == "AnyEnemy":
+            for enemy in enemies:
+                candidates.append(
+                    {
+                        "card": card,
+                        "cost": _card_cost_value(card),
+                        "step": {"card_index": card.get("index"), "target_index": enemy.get("index")},
+                        "label": _sequence_step_label(card, enemy),
+                    }
+                )
+        else:
+            candidates.append(
+                {
+                    "card": card,
+                    "cost": _card_cost_value(card),
+                    "step": {"card_index": card.get("index")},
+                    "label": _sequence_step_label(card),
+                }
+            )
+
+    actions: list[dict[str, Any]] = []
+    max_length = min(MAX_CARD_SEQUENCE_LENGTH, len({item["card"].get("index") for item in candidates}))
+    for length in range(2, max_length + 1):
+        for ordered in itertools.permutations(candidates, length):
+            card_indices = [item["card"].get("index") for item in ordered]
+            if len(set(card_indices)) != len(card_indices):
+                continue
+            if sum(int(item["cost"]) for item in ordered) > energy:
+                continue
+            label = "play sequence: " + " -> ".join(str(item["label"]) for item in ordered)
+            actions.append(_sequence_action(label, [dict(item["step"]) for item in ordered]))
+            if len(actions) >= MAX_CARD_SEQUENCE_ACTIONS:
+                return actions
+    return actions
 
 
 def _card_select_label(cards: list[dict[str, Any]]) -> str:
@@ -144,7 +238,12 @@ def _targeted_card_actions(state: dict[str, Any], card: dict[str, Any]) -> list[
     ]
 
 
-def build_legal_actions(state: dict[str, Any], *, allow_repeat_views: bool = False) -> list[LegalAction]:
+def build_legal_actions(
+    state: dict[str, Any],
+    *,
+    allow_repeat_views: bool = False,
+    allow_custom_sequences: bool = True,
+) -> list[LegalAction]:
     """Build legal actions from the current decision point.
 
     The resulting action ids are stable only for this one state.  Store the
@@ -180,12 +279,15 @@ def build_legal_actions(state: dict[str, Any], *, allow_repeat_views: bool = Fal
 
     elif decision == "combat_play":
         energy = state.get("energy", 0)
+        playable_cards: list[dict[str, Any]] = []
         for card in state.get("hand", []):
             if not card.get("can_play"):
                 continue
             if _card_cost_value(card) > energy:
                 continue
+            playable_cards.append(card)
             raw.extend(_targeted_card_actions(state, card))
+        raw.extend(_combat_card_sequence_actions(state, playable_cards))
 
         player = state.get("player") or {}
         for potion in player.get("potions", []) or state.get("potions", []) or []:
@@ -219,6 +321,8 @@ def build_legal_actions(state: dict[str, Any], *, allow_repeat_views: bool = Fal
                 )
 
         raw.append(_action("end turn", "end_turn", "combat_end_turn"))
+        if playable_cards and allow_custom_sequences:
+            raw.append(_custom_sequence_action())
 
     elif decision == "combat_reward":
         rewards = state.get("rewards") or []
@@ -344,6 +448,40 @@ def build_legal_actions(state: dict[str, Any], *, allow_repeat_views: bool = Fal
         if isinstance(removal_cost, (int, float)) and removal_cost <= player_gold:
             raw.append(_action(f"remove a card for {int(removal_cost)} gold", "remove_card", "shop_remove_card"))
         raw.append(_action("leave shop", "leave_room", "shop_leave"))
+
+    elif decision == "fake_merchant_shop":
+        player_gold = int((state.get("player") or {}).get("gold", 0) or 0)
+        for relic in state.get("relics", []) or []:
+            can_buy = relic.get("can_buy")
+            if can_buy is None:
+                can_buy = relic.get("is_stocked") and _price(relic) <= player_gold
+            if not can_buy:
+                continue
+            raw.append(
+                _action(
+                    f"buy fake merchant relic {relic.get('index')}: {_name(relic.get('name'))} for {_price(relic)} gold",
+                    "buy_relic",
+                    "fake_merchant_buy_relic",
+                    relic_index=relic.get("index"),
+                )
+            )
+
+        foul_potion_action = state.get("foul_potion_action")
+        if state.get("can_throw_foul_potion") and isinstance(foul_potion_action, dict):
+            action_name = foul_potion_action.get("action")
+            potion_index = foul_potion_action.get("potion_index")
+            if action_name and potion_index is not None:
+                raw.append(
+                    _action(
+                        "throw foul potion at fake merchant",
+                        str(action_name),
+                        "fake_merchant_throw_foul_potion",
+                        potion_index=potion_index,
+                    )
+                )
+
+        if state.get("can_leave"):
+            raw.append(_action("leave fake merchant", "leave_room", "fake_merchant_leave"))
 
     elif decision == "card_select":
         cards = state.get("cards") or []

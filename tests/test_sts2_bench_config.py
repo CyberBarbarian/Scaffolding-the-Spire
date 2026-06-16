@@ -1,7 +1,7 @@
 import os
 import sys
 
-from sts2_bench.run_benchmark import load_benchmark_config, load_env_file
+from sts2_bench.run_benchmark import load_benchmark_config, load_env_file, load_seeds
 
 
 def test_load_benchmark_config_falls_back_to_simple_scalar_parser(tmp_path, monkeypatch):
@@ -44,6 +44,40 @@ def test_load_benchmark_config_falls_back_to_simple_scalar_parser(tmp_path, monk
     assert os.environ["STS2_BENCH_OUT"] == "results/random_ironclad_a0.jsonl"
 
 
+def test_load_benchmark_config_falls_back_to_simple_nested_parser(tmp_path, monkeypatch):
+    config = tmp_path / "benchmark.yaml"
+    config.write_text(
+        """
+context_management:
+  mode: turn_chat
+  turn_chat:
+    window: 3
+    update_mode: delta
+    assistant_history: compact
+    plan:
+      enabled: true
+""",
+        encoding="utf-8",
+    )
+    for key in (
+        "STS2_BENCH_CONTEXT_MODE",
+        "STS2_BENCH_TURN_CHAT_WINDOW",
+        "STS2_BENCH_TURN_CHAT_UPDATE_MODE",
+        "STS2_BENCH_TURN_CHAT_ASSISTANT_HISTORY",
+        "STS2_BENCH_TURN_CHAT_PLAN_ENABLED",
+    ):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setitem(sys.modules, "omegaconf", None)
+
+    load_benchmark_config(config)
+
+    assert os.environ["STS2_BENCH_CONTEXT_MODE"] == "turn_chat"
+    assert os.environ["STS2_BENCH_TURN_CHAT_WINDOW"] == "3"
+    assert os.environ["STS2_BENCH_TURN_CHAT_UPDATE_MODE"] == "delta"
+    assert os.environ["STS2_BENCH_TURN_CHAT_ASSISTANT_HISTORY"] == "compact"
+    assert os.environ["STS2_BENCH_TURN_CHAT_PLAN_ENABLED"] == "true"
+
+
 def test_load_env_file_handles_utf8_bom(tmp_path, monkeypatch):
     env_file = tmp_path / ".env"
     env_file.write_text(
@@ -57,3 +91,10 @@ def test_load_env_file_handles_utf8_bom(tmp_path, monkeypatch):
 
     assert os.environ["DEEPSEEK_API_KEY"] == "secret"
     assert os.environ["STS2_BENCH_MODEL"] == "deepseek-v4-flash"
+
+
+def test_load_seeds_handles_utf8_bom(tmp_path):
+    seed_file = tmp_path / "seeds.json"
+    seed_file.write_text('\ufeff["ironclad_a0_3407"]\n', encoding="utf-8")
+
+    assert load_seeds(str(seed_file), count=1) == ["ironclad_a0_3407"]

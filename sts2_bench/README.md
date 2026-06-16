@@ -143,10 +143,27 @@ Agent context management:
   each player turn to include a hand-level `turn_plan`.  Compact assistant
   history keeps that plan for later actions in the same turn; the runner still
   executes exactly one `action_id` per request.
+- `--agent coordinator` records `context_management.mode: coordinator`: CA uses
+  combat `turn_chat`; OCC uses `reference_turn`, which combines the current
+  out-of-combat state, the RM/RP slice, and a bounded short history of recent
+  OCC decisions.  The OCC inner LLM call is still one request per decision, but
+  it is not a memoryless `single_turn` policy.
 
 `turn_chat` is parallel to the existing episode memory method.  Disable
 `memory_enabled` when using `turn_chat` so benchmark runs measure one context
 method at a time.
+
+LLM failure handling:
+
+- `llm_max_retries` controls how many correction requests are sent after an LLM
+  timeout, parse failure, or illegal `action_id`.  The tracked benchmark config
+  keeps this at `1` so strict runs get one correction attempt before stopping.
+- `llm_fallback_mode: error` is the benchmark default.  If every retry fails,
+  the runner stops the current run and records the current floor/HP/error
+  instead of sending a fallback game action.
+- `llm_fallback_mode: action` preserves the old exploratory behavior: after all
+  retries fail, the agent chooses the first non-view legal action and logs
+  `fallback: true`.  Do not use this for strict CA-vs-coordinator comparisons.
 
 JSONL logging uses `log_level`:
 
