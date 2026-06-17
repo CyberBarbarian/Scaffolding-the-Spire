@@ -1,5 +1,6 @@
 import json
 import os
+import urllib.error
 
 import pytest
 
@@ -676,7 +677,32 @@ def _turn_chat_agent(responses, **kwargs):
 
     def fake_chat(messages):
         sent_messages.append([dict(message) for message in messages])
-        return {"choices": [{"message": {"content": json.dumps(next(response_iter))}}]}
+        response = next(response_iter)
+        if isinstance(response, BaseException):
+            raise response
+        return {"choices": [{"message": {"content": json.dumps(response)}}]}
+
+    agent._chat = fake_chat
+    return agent, sent_messages
+
+
+def _single_turn_agent(responses, **kwargs):
+    max_retries = kwargs.pop("max_retries", 0)
+    agent = OpenAICompatAgent(
+        base_url="http://127.0.0.1:1",
+        model="test",
+        max_retries=max_retries,
+        **kwargs,
+    )
+    sent_messages = []
+    response_iter = iter(responses)
+
+    def fake_chat(messages):
+        sent_messages.append([dict(message) for message in messages])
+        response = next(response_iter)
+        if isinstance(response, BaseException):
+            raise response
+        return {"choices": [{"message": {"content": json.dumps(response)}}]}
 
     agent._chat = fake_chat
     return agent, sent_messages
@@ -700,6 +726,48 @@ def test_openai_compat_agent_retries_invalid_action_before_strict_error():
     assert len(sent_messages) == 2
     assert "previous response was invalid" in sent_messages[1][-1]["content"]
     assert "between 0 and" in sent_messages[1][-1]["content"]
+
+
+def test_openai_compat_agent_single_turn_retries_transport_error_without_prompt_correction(monkeypatch):
+    monkeypatch.setattr("sts2_bench.agents.time.sleep", lambda _seconds: None)
+    state = _combat_turn_state()
+    agent, sent_messages = _single_turn_agent(
+        [
+            urllib.error.URLError("temporary EOF"),
+            {"action_id": 5, "reason": "Recovered after transport retry."},
+        ],
+        max_retries=1,
+        fallback_mode="error",
+    )
+
+    action, meta = agent.choose(state, build_legal_actions(state), prompt="choose an action")
+
+    assert action.action_id == 5
+    assert meta["attempt"] == 1
+    assert len(sent_messages) == 2
+    assert sent_messages[1] == sent_messages[0]
+    assert "previous response was invalid" not in "\n".join(message["content"] for message in sent_messages[1])
+
+
+def test_openai_compat_agent_turn_chat_retries_transport_error_without_prompt_correction(monkeypatch):
+    monkeypatch.setattr("sts2_bench.agents.time.sleep", lambda _seconds: None)
+    state = _combat_turn_state()
+    agent, sent_messages = _turn_chat_agent(
+        [
+            urllib.error.URLError("temporary EOF"),
+            {"action_id": 5, "reason": "Recovered after transport retry."},
+        ],
+        max_retries=1,
+        fallback_mode="error",
+    )
+
+    action, meta = agent.choose(state, build_legal_actions(state))
+
+    assert action.action_id == 5
+    assert meta["attempt"] == 1
+    assert len(sent_messages) == 2
+    assert sent_messages[1] == sent_messages[0]
+    assert "previous response was invalid" not in "\n".join(message["content"] for message in sent_messages[1])
 
 
 def test_openai_compat_agent_remaps_when_selected_label_matches_current_action():

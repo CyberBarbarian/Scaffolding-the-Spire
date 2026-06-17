@@ -1,0 +1,246 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="2556" height="560" viewBox="0 0 2556 560">
+<style>
+text { font-family: Arial, sans-serif; font-size: 13px; fill: #222; }
+.axis { stroke: #333; stroke-width: 1.2; }
+.grid { stroke: #ddd; stroke-width: 1; }
+.exit-line { fill: none; stroke: #2166ac; stroke-width: 2; stroke-dasharray: 4 4; opacity: .7; }
+.room-hp-segment { stroke-linecap: round; }
+.loss-leader { stroke: #b9bec8; stroke-width: 1; stroke-dasharray: 3 3; }
+.loss-label { font-size: 11px; font-weight: 700; fill: #222; paint-order: stroke; stroke: white; stroke-width: 3px; }
+.hp-transition-label { font-size: 10px; fill: #555; paint-order: stroke; stroke: white; stroke-width: 3px; }
+.room-index-label { font-size: 10px; font-weight: 700; }
+.room-type-label { font-size: 10px; fill: #555; }
+.panel-title { font-size: 14px; font-weight: 700; }
+.panel-label { font-size: 12px; font-weight: 700; }
+.panel-muted { font-size: 11px; fill: #555; }
+</style>
+<rect width="100%" height="100%" fill="#fff"/>
+<text x="72" y="25" font-size="18" font-weight="700">Room HP loss</text>
+<text x="72" y="44" font-size="12">rooms=23; total loss=124; large loss rooms=3</text>
+<rect x="72" y="257.2" width="2180" height="226.8" fill="#fddbc7" opacity="0.45"/>
+<line class="axis" x1="72" y1="484" x2="2252" y2="484"/>
+<line class="axis" x1="72" y1="106" x2="72" y2="484"/>
+<line class="axis" x1="2252" y1="106" x2="2252" y2="484"/>
+<line class="grid" x1="72" y1="106.0" x2="2252" y2="106.0"/>
+<line class="grid" x1="72" y1="257.2" x2="2252" y2="257.2"/>
+<text x="64" y="106.0" text-anchor="end">80</text>
+<text x="64" y="484" text-anchor="end">0</text>
+<text x="2260" y="106.0">80</text>
+<text x="2260" y="484">0</text>
+<text x="20" y="295.0" transform="rotate(-90 20 295.0)" text-anchor="middle">HP axis</text>
+<text x="1162.0" y="548" text-anchor="middle">room sequence</text>
+<polyline class="exit-line" points="72.0,106.0 171.1,120.2 270.2,120.2 369.3,120.2 468.4,120.2 567.5,120.2 666.5,120.2 765.6,120.2 864.7,162.7 963.8,162.7 1062.9,162.7 1162.0,195.8 1261.1,209.9 1360.2,186.3 1459.3,191.1 1558.4,191.1 1657.5,304.5 1756.5,120.2 1855.6,120.2 1954.7,124.9 2053.8,228.8 2152.9,228.8 2252.0,484.0"/>
+<line class="room-hp-segment no-loss" x1="72.0" y1="106.0" x2="72.0" y2="106.0" stroke="#1b9e77" stroke-width="4"><title>Room 1 A1F2 Monster | Entry 80/80 | Exit 80/80 | loss 0</title></line>
+<circle cx="72.0" cy="106.0" r="4" fill="#fff" stroke="#d55e00" stroke-width="2"/>
+<circle cx="72.0" cy="106.0" r="5.5" fill="#d55e00" stroke="#1b9e77" stroke-width="2"/>
+<line class="room-hp-segment small-loss" x1="171.1" y1="106.0" x2="171.1" y2="120.2" stroke="#e6ab02" stroke-width="4"><title>Room 2 A1F3 Event | Entry 80/80 | Exit 77/77 | loss 3</title></line>
+<circle cx="171.1" cy="106.0" r="4" fill="#fff" stroke="#7570b3" stroke-width="2"/>
+<circle cx="171.1" cy="120.2" r="5.5" fill="#7570b3" stroke="#e6ab02" stroke-width="2"/>
+<line class="room-hp-segment no-loss" x1="270.2" y1="120.2" x2="270.2" y2="120.2" stroke="#1b9e77" stroke-width="4"><title>Room 3 A1F4 Monster | Entry 77/77 | Exit 77/77 | loss 0</title></line>
+<circle cx="270.2" cy="120.2" r="4" fill="#fff" stroke="#d55e00" stroke-width="2"/>
+<circle cx="270.2" cy="120.2" r="5.5" fill="#d55e00" stroke="#1b9e77" stroke-width="2"/>
+<line class="room-hp-segment no-loss" x1="369.3" y1="120.2" x2="369.3" y2="120.2" stroke="#1b9e77" stroke-width="4"><title>Room 4 A1F5 Monster | Entry 77/77 | Exit 77/77 | loss 0</title></line>
+<circle cx="369.3" cy="120.2" r="4" fill="#fff" stroke="#d55e00" stroke-width="2"/>
+<circle cx="369.3" cy="120.2" r="5.5" fill="#d55e00" stroke="#1b9e77" stroke-width="2"/>
+<line class="room-hp-segment no-loss" x1="468.4" y1="120.2" x2="468.4" y2="120.2" stroke="#1b9e77" stroke-width="4"><title>Room 5 A1F6 Shop | Entry 77/77 | Exit 77/77 | loss 0</title></line>
+<circle cx="468.4" cy="120.2" r="4" fill="#fff" stroke="#2b8cbe" stroke-width="2"/>
+<circle cx="468.4" cy="120.2" r="5.5" fill="#2b8cbe" stroke="#1b9e77" stroke-width="2"/>
+<line class="room-hp-segment no-loss" x1="567.5" y1="120.2" x2="567.5" y2="120.2" stroke="#1b9e77" stroke-width="4"><title>Room 6 A1F7 RestSite | Entry 77/77 | Exit 77/77 | loss 0</title></line>
+<circle cx="567.5" cy="120.2" r="4" fill="#fff" stroke="#1b9e77" stroke-width="2"/>
+<circle cx="567.5" cy="120.2" r="5.5" fill="#1b9e77" stroke="#1b9e77" stroke-width="2"/>
+<line class="room-hp-segment no-loss" x1="666.5" y1="120.2" x2="666.5" y2="120.2" stroke="#1b9e77" stroke-width="4"><title>Room 7 A1F7 RestSite | Entry 77/77 | Exit 77/77 | loss 0</title></line>
+<circle cx="666.5" cy="120.2" r="4" fill="#fff" stroke="#1b9e77" stroke-width="2"/>
+<circle cx="666.5" cy="120.2" r="5.5" fill="#1b9e77" stroke="#1b9e77" stroke-width="2"/>
+<line class="room-hp-segment no-loss" x1="765.6" y1="120.2" x2="765.6" y2="120.2" stroke="#1b9e77" stroke-width="4"><title>Room 8 A1F8 Monster | Entry 77/77 | Exit 77/77 | loss 0</title></line>
+<circle cx="765.6" cy="120.2" r="4" fill="#fff" stroke="#d55e00" stroke-width="2"/>
+<circle cx="765.6" cy="120.2" r="5.5" fill="#d55e00" stroke="#1b9e77" stroke-width="2"/>
+<line class="room-hp-segment small-loss" x1="864.7" y1="120.2" x2="864.7" y2="162.7" stroke="#e6ab02" stroke-width="4"><title>Room 9 A1F9 Elite | Entry 77/77 | Exit 68/77 | loss 9</title></line>
+<circle cx="864.7" cy="120.2" r="4" fill="#fff" stroke="#b2182b" stroke-width="2"/>
+<circle cx="864.7" cy="162.7" r="5.5" fill="#b2182b" stroke="#e6ab02" stroke-width="2"/>
+<line class="room-hp-segment no-loss" x1="963.8" y1="162.7" x2="963.8" y2="162.7" stroke="#1b9e77" stroke-width="4"><title>Room 10 A1F10 Treasure | Entry 68/77 | Exit 68/77 | loss 0</title></line>
+<circle cx="963.8" cy="162.7" r="4" fill="#fff" stroke="#d8a600" stroke-width="2"/>
+<circle cx="963.8" cy="162.7" r="5.5" fill="#d8a600" stroke="#1b9e77" stroke-width="2"/>
+<line class="room-hp-segment no-loss" x1="1062.9" y1="162.7" x2="1062.9" y2="162.7" stroke="#1b9e77" stroke-width="4"><title>Room 11 A1F11 Monster | Entry 68/77 | Exit 68/77 | loss 0</title></line>
+<circle cx="1062.9" cy="162.7" r="4" fill="#fff" stroke="#d55e00" stroke-width="2"/>
+<circle cx="1062.9" cy="162.7" r="5.5" fill="#d55e00" stroke="#1b9e77" stroke-width="2"/>
+<line class="room-hp-segment small-loss" x1="1162.0" y1="162.7" x2="1162.0" y2="195.8" stroke="#e6ab02" stroke-width="4"><title>Room 12 A1F12 Monster | Entry 68/77 | Exit 61/77 | loss 7</title></line>
+<circle cx="1162.0" cy="162.7" r="4" fill="#fff" stroke="#d55e00" stroke-width="2"/>
+<circle cx="1162.0" cy="195.8" r="5.5" fill="#d55e00" stroke="#e6ab02" stroke-width="2"/>
+<line class="room-hp-segment small-loss" x1="1261.1" y1="195.8" x2="1261.1" y2="209.9" stroke="#e6ab02" stroke-width="4"><title>Room 13 A1F13 Monster | Entry 61/77 | Exit 58/77 | loss 3</title></line>
+<circle cx="1261.1" cy="195.8" r="4" fill="#fff" stroke="#d55e00" stroke-width="2"/>
+<circle cx="1261.1" cy="209.9" r="5.5" fill="#d55e00" stroke="#e6ab02" stroke-width="2"/>
+<line class="room-hp-segment no-loss" x1="1360.2" y1="209.9" x2="1360.2" y2="186.3" stroke="#1b9e77" stroke-width="4"><title>Room 14 A1F14 Monster | Entry 58/77 | Exit 63/77 | loss 0</title></line>
+<circle cx="1360.2" cy="209.9" r="4" fill="#fff" stroke="#d55e00" stroke-width="2"/>
+<circle cx="1360.2" cy="186.3" r="5.5" fill="#d55e00" stroke="#1b9e77" stroke-width="2"/>
+<line class="room-hp-segment small-loss" x1="1459.3" y1="186.3" x2="1459.3" y2="191.1" stroke="#e6ab02" stroke-width="4"><title>Room 15 A1F15 Monster | Entry 63/77 | Exit 62/77 | loss 1</title></line>
+<circle cx="1459.3" cy="186.3" r="4" fill="#fff" stroke="#d55e00" stroke-width="2"/>
+<circle cx="1459.3" cy="191.1" r="5.5" fill="#d55e00" stroke="#e6ab02" stroke-width="2"/>
+<line class="room-hp-segment no-loss" x1="1558.4" y1="191.1" x2="1558.4" y2="191.1" stroke="#1b9e77" stroke-width="4"><title>Room 16 A1F16 RestSite | Entry 62/77 | Exit 62/77 | loss 0</title></line>
+<circle cx="1558.4" cy="191.1" r="4" fill="#fff" stroke="#1b9e77" stroke-width="2"/>
+<circle cx="1558.4" cy="191.1" r="5.5" fill="#1b9e77" stroke="#1b9e77" stroke-width="2"/>
+<line class="room-hp-segment large-loss" x1="1657.5" y1="191.1" x2="1657.5" y2="304.5" stroke="#b2182b" stroke-width="6"><title>Room 17 A1F17 Boss | Entry 62/77 | Exit 38/77 | loss 24 large loss</title></line>
+<circle cx="1657.5" cy="191.1" r="4" fill="#fff" stroke="#6a3d9a" stroke-width="2"/>
+<circle cx="1657.5" cy="304.5" r="5.5" fill="#6a3d9a" stroke="#b2182b" stroke-width="2"/>
+<line class="room-hp-segment no-loss" x1="1756.5" y1="120.2" x2="1756.5" y2="120.2" stroke="#1b9e77" stroke-width="4"><title>Room 18 A2F1 Event | Entry 77/77 | Exit 77/77 | loss 0</title></line>
+<circle cx="1756.5" cy="120.2" r="4" fill="#fff" stroke="#7570b3" stroke-width="2"/>
+<circle cx="1756.5" cy="120.2" r="5.5" fill="#7570b3" stroke="#1b9e77" stroke-width="2"/>
+<line class="room-hp-segment no-loss" x1="1855.6" y1="120.2" x2="1855.6" y2="120.2" stroke="#1b9e77" stroke-width="4"><title>Room 19 A2F2 Monster | Entry 77/77 | Exit 77/77 | loss 0</title></line>
+<circle cx="1855.6" cy="120.2" r="4" fill="#fff" stroke="#d55e00" stroke-width="2"/>
+<circle cx="1855.6" cy="120.2" r="5.5" fill="#d55e00" stroke="#1b9e77" stroke-width="2"/>
+<line class="room-hp-segment small-loss" x1="1954.7" y1="120.2" x2="1954.7" y2="124.9" stroke="#e6ab02" stroke-width="4"><title>Room 20 A2F3 Monster | Entry 77/77 | Exit 76/77 | loss 1</title></line>
+<circle cx="1954.7" cy="120.2" r="4" fill="#fff" stroke="#d55e00" stroke-width="2"/>
+<circle cx="1954.7" cy="124.9" r="5.5" fill="#d55e00" stroke="#e6ab02" stroke-width="2"/>
+<line class="room-hp-segment large-loss" x1="2053.8" y1="124.9" x2="2053.8" y2="228.8" stroke="#b2182b" stroke-width="6"><title>Room 21 A2F4 Monster | Entry 76/77 | Exit 54/77 | loss 22 large loss</title></line>
+<circle cx="2053.8" cy="124.9" r="4" fill="#fff" stroke="#d55e00" stroke-width="2"/>
+<circle cx="2053.8" cy="228.8" r="5.5" fill="#d55e00" stroke="#b2182b" stroke-width="2"/>
+<line class="room-hp-segment no-loss" x1="2152.9" y1="228.8" x2="2152.9" y2="228.8" stroke="#1b9e77" stroke-width="4"><title>Room 22 A2F5 Shop | Entry 54/77 | Exit 54/77 | loss 0</title></line>
+<circle cx="2152.9" cy="228.8" r="4" fill="#fff" stroke="#2b8cbe" stroke-width="2"/>
+<circle cx="2152.9" cy="228.8" r="5.5" fill="#2b8cbe" stroke="#1b9e77" stroke-width="2"/>
+<line class="room-hp-segment large-loss" x1="2252.0" y1="228.8" x2="2252.0" y2="484.0" stroke="#b2182b" stroke-width="6"><title>Room 23 A2F6 Monster | Entry 54/77 | Exit 0/77 | loss 54 large loss</title></line>
+<circle cx="2252.0" cy="228.8" r="4" fill="#fff" stroke="#d55e00" stroke-width="2"/>
+<circle cx="2252.0" cy="484.0" r="5.5" fill="#d55e00" stroke="#b2182b" stroke-width="2"/>
+<line class="loss-leader" x1="72.0" y1="82" x2="72.0" y2="106.0"/>
+<text class="loss-label" x="72.0" y="66" text-anchor="middle">F2 Monster -0<title>Room 1 A1F2 Monster | Entry 80/80 | Exit 80/80 | loss 0</title></text>
+<text class="hp-transition-label" x="72.0" y="82" text-anchor="middle">80-&gt;80</text>
+<text class="room-index-label" x="72.0" y="512" text-anchor="middle">Room #1</text>
+<text class="room-type-label" x="72.0" y="528" text-anchor="middle">M Monster</text>
+<line class="loss-leader" x1="171.1" y1="82" x2="171.1" y2="106.0"/>
+<text class="loss-label" x="171.1" y="66" text-anchor="middle">F3 Event -3<title>Room 2 A1F3 Event | Entry 80/80 | Exit 77/77 | loss 3</title></text>
+<text class="hp-transition-label" x="171.1" y="82" text-anchor="middle">80-&gt;77</text>
+<text class="room-index-label" x="171.1" y="512" text-anchor="middle">Room #2</text>
+<text class="room-type-label" x="171.1" y="528" text-anchor="middle">? Event</text>
+<line class="loss-leader" x1="270.2" y1="82" x2="270.2" y2="120.2"/>
+<text class="loss-label" x="270.2" y="66" text-anchor="middle">F4 Monster -0<title>Room 3 A1F4 Monster | Entry 77/77 | Exit 77/77 | loss 0</title></text>
+<text class="hp-transition-label" x="270.2" y="82" text-anchor="middle">77-&gt;77</text>
+<text class="room-index-label" x="270.2" y="512" text-anchor="middle">Room #3</text>
+<text class="room-type-label" x="270.2" y="528" text-anchor="middle">M Monster</text>
+<line class="loss-leader" x1="369.3" y1="82" x2="369.3" y2="120.2"/>
+<text class="loss-label" x="369.3" y="66" text-anchor="middle">F5 Monster -0<title>Room 4 A1F5 Monster | Entry 77/77 | Exit 77/77 | loss 0</title></text>
+<text class="hp-transition-label" x="369.3" y="82" text-anchor="middle">77-&gt;77</text>
+<text class="room-index-label" x="369.3" y="512" text-anchor="middle">Room #4</text>
+<text class="room-type-label" x="369.3" y="528" text-anchor="middle">M Monster</text>
+<line class="loss-leader" x1="468.4" y1="82" x2="468.4" y2="120.2"/>
+<text class="loss-label" x="468.4" y="66" text-anchor="middle">F6 Shop -0<title>Room 5 A1F6 Shop | Entry 77/77 | Exit 77/77 | loss 0</title></text>
+<text class="hp-transition-label" x="468.4" y="82" text-anchor="middle">77-&gt;77</text>
+<text class="room-index-label" x="468.4" y="512" text-anchor="middle">Room #5</text>
+<text class="room-type-label" x="468.4" y="528" text-anchor="middle">$ Shop</text>
+<line class="loss-leader" x1="567.5" y1="82" x2="567.5" y2="120.2"/>
+<text class="loss-label" x="567.5" y="66" text-anchor="middle">F7 RestSite -0<title>Room 6 A1F7 RestSite | Entry 77/77 | Exit 77/77 | loss 0</title></text>
+<text class="hp-transition-label" x="567.5" y="82" text-anchor="middle">77-&gt;77</text>
+<text class="room-index-label" x="567.5" y="512" text-anchor="middle">Room #6</text>
+<text class="room-type-label" x="567.5" y="528" text-anchor="middle">R RestSite</text>
+<line class="loss-leader" x1="666.5" y1="82" x2="666.5" y2="120.2"/>
+<text class="loss-label" x="666.5" y="66" text-anchor="middle">F7 RestSite -0<title>Room 7 A1F7 RestSite | Entry 77/77 | Exit 77/77 | loss 0</title></text>
+<text class="hp-transition-label" x="666.5" y="82" text-anchor="middle">77-&gt;77</text>
+<text class="room-index-label" x="666.5" y="512" text-anchor="middle">Room #7</text>
+<text class="room-type-label" x="666.5" y="528" text-anchor="middle">R RestSite</text>
+<line class="loss-leader" x1="765.6" y1="82" x2="765.6" y2="120.2"/>
+<text class="loss-label" x="765.6" y="66" text-anchor="middle">F8 Monster -0<title>Room 8 A1F8 Monster | Entry 77/77 | Exit 77/77 | loss 0</title></text>
+<text class="hp-transition-label" x="765.6" y="82" text-anchor="middle">77-&gt;77</text>
+<text class="room-index-label" x="765.6" y="512" text-anchor="middle">Room #8</text>
+<text class="room-type-label" x="765.6" y="528" text-anchor="middle">M Monster</text>
+<line class="loss-leader" x1="864.7" y1="82" x2="864.7" y2="120.2"/>
+<text class="loss-label" x="864.7" y="66" text-anchor="middle">F9 Elite -9<title>Room 9 A1F9 Elite | Entry 77/77 | Exit 68/77 | loss 9</title></text>
+<text class="hp-transition-label" x="864.7" y="82" text-anchor="middle">77-&gt;68</text>
+<text class="room-index-label" x="864.7" y="512" text-anchor="middle">Room #9</text>
+<text class="room-type-label" x="864.7" y="528" text-anchor="middle">E Elite</text>
+<line class="loss-leader" x1="963.8" y1="82" x2="963.8" y2="162.7"/>
+<text class="loss-label" x="963.8" y="66" text-anchor="middle">F10 Treasure -0<title>Room 10 A1F10 Treasure | Entry 68/77 | Exit 68/77 | loss 0</title></text>
+<text class="hp-transition-label" x="963.8" y="82" text-anchor="middle">68-&gt;68</text>
+<text class="room-index-label" x="963.8" y="512" text-anchor="middle">Room #10</text>
+<text class="room-type-label" x="963.8" y="528" text-anchor="middle">T Treasure</text>
+<line class="loss-leader" x1="1062.9" y1="82" x2="1062.9" y2="162.7"/>
+<text class="loss-label" x="1062.9" y="66" text-anchor="middle">F11 Monster -0<title>Room 11 A1F11 Monster | Entry 68/77 | Exit 68/77 | loss 0</title></text>
+<text class="hp-transition-label" x="1062.9" y="82" text-anchor="middle">68-&gt;68</text>
+<text class="room-index-label" x="1062.9" y="512" text-anchor="middle">Room #11</text>
+<text class="room-type-label" x="1062.9" y="528" text-anchor="middle">M Monster</text>
+<line class="loss-leader" x1="1162.0" y1="82" x2="1162.0" y2="162.7"/>
+<text class="loss-label" x="1162.0" y="66" text-anchor="middle">F12 Monster -7<title>Room 12 A1F12 Monster | Entry 68/77 | Exit 61/77 | loss 7</title></text>
+<text class="hp-transition-label" x="1162.0" y="82" text-anchor="middle">68-&gt;61</text>
+<text class="room-index-label" x="1162.0" y="512" text-anchor="middle">Room #12</text>
+<text class="room-type-label" x="1162.0" y="528" text-anchor="middle">M Monster</text>
+<line class="loss-leader" x1="1261.1" y1="82" x2="1261.1" y2="195.8"/>
+<text class="loss-label" x="1261.1" y="66" text-anchor="middle">F13 Monster -3<title>Room 13 A1F13 Monster | Entry 61/77 | Exit 58/77 | loss 3</title></text>
+<text class="hp-transition-label" x="1261.1" y="82" text-anchor="middle">61-&gt;58</text>
+<text class="room-index-label" x="1261.1" y="512" text-anchor="middle">Room #13</text>
+<text class="room-type-label" x="1261.1" y="528" text-anchor="middle">M Monster</text>
+<line class="loss-leader" x1="1360.2" y1="82" x2="1360.2" y2="209.9"/>
+<text class="loss-label" x="1360.2" y="66" text-anchor="middle">F14 Monster -0<title>Room 14 A1F14 Monster | Entry 58/77 | Exit 63/77 | loss 0</title></text>
+<text class="hp-transition-label" x="1360.2" y="82" text-anchor="middle">58-&gt;63</text>
+<text class="room-index-label" x="1360.2" y="512" text-anchor="middle">Room #14</text>
+<text class="room-type-label" x="1360.2" y="528" text-anchor="middle">M Monster</text>
+<line class="loss-leader" x1="1459.3" y1="82" x2="1459.3" y2="186.3"/>
+<text class="loss-label" x="1459.3" y="66" text-anchor="middle">F15 Monster -1<title>Room 15 A1F15 Monster | Entry 63/77 | Exit 62/77 | loss 1</title></text>
+<text class="hp-transition-label" x="1459.3" y="82" text-anchor="middle">63-&gt;62</text>
+<text class="room-index-label" x="1459.3" y="512" text-anchor="middle">Room #15</text>
+<text class="room-type-label" x="1459.3" y="528" text-anchor="middle">M Monster</text>
+<line class="loss-leader" x1="1558.4" y1="82" x2="1558.4" y2="191.1"/>
+<text class="loss-label" x="1558.4" y="66" text-anchor="middle">F16 RestSite -0<title>Room 16 A1F16 RestSite | Entry 62/77 | Exit 62/77 | loss 0</title></text>
+<text class="hp-transition-label" x="1558.4" y="82" text-anchor="middle">62-&gt;62</text>
+<text class="room-index-label" x="1558.4" y="512" text-anchor="middle">Room #16</text>
+<text class="room-type-label" x="1558.4" y="528" text-anchor="middle">R RestSite</text>
+<line class="loss-leader" x1="1657.5" y1="82" x2="1657.5" y2="191.1"/>
+<text class="loss-label" x="1657.5" y="66" text-anchor="middle">F17 Boss -24<title>Room 17 A1F17 Boss | Entry 62/77 | Exit 38/77 | loss 24 large loss</title></text>
+<text class="hp-transition-label" x="1657.5" y="82" text-anchor="middle">62-&gt;38</text>
+<text class="room-index-label" x="1657.5" y="512" text-anchor="middle">Room #17</text>
+<text class="room-type-label" x="1657.5" y="528" text-anchor="middle">B Boss</text>
+<line class="loss-leader" x1="1756.5" y1="82" x2="1756.5" y2="120.2"/>
+<text class="loss-label" x="1756.5" y="66" text-anchor="middle">F1 Event -0<title>Room 18 A2F1 Event | Entry 77/77 | Exit 77/77 | loss 0</title></text>
+<text class="hp-transition-label" x="1756.5" y="82" text-anchor="middle">77-&gt;77</text>
+<text class="room-index-label" x="1756.5" y="512" text-anchor="middle">Room #18</text>
+<text class="room-type-label" x="1756.5" y="528" text-anchor="middle">? Event</text>
+<line class="loss-leader" x1="1855.6" y1="82" x2="1855.6" y2="120.2"/>
+<text class="loss-label" x="1855.6" y="66" text-anchor="middle">F2 Monster -0<title>Room 19 A2F2 Monster | Entry 77/77 | Exit 77/77 | loss 0</title></text>
+<text class="hp-transition-label" x="1855.6" y="82" text-anchor="middle">77-&gt;77</text>
+<text class="room-index-label" x="1855.6" y="512" text-anchor="middle">Room #19</text>
+<text class="room-type-label" x="1855.6" y="528" text-anchor="middle">M Monster</text>
+<line class="loss-leader" x1="1954.7" y1="82" x2="1954.7" y2="120.2"/>
+<text class="loss-label" x="1954.7" y="66" text-anchor="middle">F3 Monster -1<title>Room 20 A2F3 Monster | Entry 77/77 | Exit 76/77 | loss 1</title></text>
+<text class="hp-transition-label" x="1954.7" y="82" text-anchor="middle">77-&gt;76</text>
+<text class="room-index-label" x="1954.7" y="512" text-anchor="middle">Room #20</text>
+<text class="room-type-label" x="1954.7" y="528" text-anchor="middle">M Monster</text>
+<line class="loss-leader" x1="2053.8" y1="82" x2="2053.8" y2="124.9"/>
+<text class="loss-label" x="2053.8" y="66" text-anchor="middle">F4 Monster -22<title>Room 21 A2F4 Monster | Entry 76/77 | Exit 54/77 | loss 22 large loss</title></text>
+<text class="hp-transition-label" x="2053.8" y="82" text-anchor="middle">76-&gt;54</text>
+<text class="room-index-label" x="2053.8" y="512" text-anchor="middle">Room #21</text>
+<text class="room-type-label" x="2053.8" y="528" text-anchor="middle">M Monster</text>
+<line class="loss-leader" x1="2152.9" y1="82" x2="2152.9" y2="228.8"/>
+<text class="loss-label" x="2152.9" y="66" text-anchor="middle">F5 Shop -0<title>Room 22 A2F5 Shop | Entry 54/77 | Exit 54/77 | loss 0</title></text>
+<text class="hp-transition-label" x="2152.9" y="82" text-anchor="middle">54-&gt;54</text>
+<text class="room-index-label" x="2152.9" y="512" text-anchor="middle">Room #22</text>
+<text class="room-type-label" x="2152.9" y="528" text-anchor="middle">$ Shop</text>
+<line class="loss-leader" x1="2252.0" y1="82" x2="2252.0" y2="228.8"/>
+<text class="loss-label" x="2252.0" y="66" text-anchor="middle">F6 Monster -54<title>Room 23 A2F6 Monster | Entry 54/77 | Exit 0/77 | loss 54 large loss</title></text>
+<text class="hp-transition-label" x="2252.0" y="82" text-anchor="middle">54-&gt;0</text>
+<text class="room-index-label" x="2252.0" y="512" text-anchor="middle">Room #23</text>
+<text class="room-type-label" x="2252.0" y="528" text-anchor="middle">M Monster</text>
+<g class="room-loss-panel">
+<rect x="2276" y="58" width="280" height="480" rx="6" fill="#f8f9fb" stroke="#d5d8de"/>
+<text class="panel-title" x="2290" y="84">Top room losses</text>
+<text class="panel-muted" x="2290" y="106">Low HP zone: &lt;= 48/80</text>
+<rect x="2290" y="119" width="8" height="8" fill="#b2182b"/>
+<text class="panel-label" x="2306" y="132">#23 M Monster: -54</text>
+<text class="panel-muted" x="2306" y="148">54/77 -&gt; 0/77; large loss</text>
+<rect x="2290" y="157" width="8" height="8" fill="#b2182b"/>
+<text class="panel-label" x="2306" y="170">#17 B Boss: -24</text>
+<text class="panel-muted" x="2306" y="186">62/77 -&gt; 38/77; large loss</text>
+<rect x="2290" y="195" width="8" height="8" fill="#b2182b"/>
+<text class="panel-label" x="2306" y="208">#21 M Monster: -22</text>
+<text class="panel-muted" x="2306" y="224">76/77 -&gt; 54/77; large loss</text>
+<rect x="2290" y="233" width="8" height="8" fill="#d55e00"/>
+<text class="panel-label" x="2306" y="246">#9 E Elite: -9</text>
+<text class="panel-muted" x="2306" y="262">77/77 -&gt; 68/77</text>
+<rect x="2290" y="271" width="8" height="8" fill="#d55e00"/>
+<text class="panel-label" x="2306" y="284">#12 M Monster: -7</text>
+<text class="panel-muted" x="2306" y="300">68/77 -&gt; 61/77</text>
+<rect x="2290" y="309" width="8" height="8" fill="#2166ac"/>
+<text class="panel-label" x="2306" y="322">#2 ? Event: -3</text>
+<text class="panel-muted" x="2306" y="338">80/80 -&gt; 77/77</text>
+<rect x="2290" y="347" width="8" height="8" fill="#2166ac"/>
+<text class="panel-label" x="2306" y="360">#13 M Monster: -3</text>
+<text class="panel-muted" x="2306" y="376">61/77 -&gt; 58/77</text>
+<rect x="2290" y="385" width="8" height="8" fill="#2166ac"/>
+<text class="panel-label" x="2306" y="398">#15 M Monster: -1</text>
+<text class="panel-muted" x="2306" y="414">63/77 -&gt; 62/77</text>
+</g>
+</svg>

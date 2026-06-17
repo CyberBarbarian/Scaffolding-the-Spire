@@ -1,0 +1,30 @@
+﻿{
+    "started_at":  "2026-06-17T09:58:46.4149805Z",
+    "pid":  23292,
+    "command":  [
+                    "python",
+                    "artifacts\\nightly_latest_20260617\\run_nightly_experiment.py",
+                    "--experiment-dir",
+                    "artifacts\\nightly_latest_20260617_one_seed",
+                    "--fixed-seed",
+                    "sts2bench_nightly_20260617_seed_a",
+                    "--target-valid-per-seed",
+                    "3",
+                    "--max-attempts-per-slot",
+                    "90",
+                    "--max-steps",
+                    "4000",
+                    "--llm-timeout",
+                    "180.0",
+                    "--llm-max-retries",
+                    "12",
+                    "--no-run-summary",
+                    "--turn-chat-window",
+                    "10",
+                    "--turn-chat-plan"
+                ],
+    "stdout":  "C:\\WorkSpace\\BG-Agent\\sts2-agent-bench\\artifacts\\nightly_latest_20260617_one_seed\\driver_logs\\resume_driver_20260617_175846.out.log",
+    "stderr":  "C:\\WorkSpace\\BG-Agent\\sts2-agent-bench\\artifacts\\nightly_latest_20260617_one_seed\\driver_logs\\resume_driver_20260617_175846.err.log",
+    "cwd":  "C:\\WorkSpace\\BG-Agent\\sts2-agent-bench",
+    "resume_goal":  "one seed, three valid replicates; preserve existing a01"
+}

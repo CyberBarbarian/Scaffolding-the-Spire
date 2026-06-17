@@ -79,6 +79,7 @@ On Windows:
 ```cmd
 .\setup-windows.bat
 .\sts2-cli.bat
+.\sts2-cli-zh.bat
 ```
 
 On macOS, Linux, or Git Bash:

@@ -1,0 +1,1 @@
+{"summary": {"seed": "sts2bench_nightly_20260617_seed_a", "character": "Ironclad", "ascension": 0, "victory": false, "terminal": {"decision": "game_over", "act": 2, "floor": 6, "room_type": "Monster", "hp": 0, "max_hp": 77, "error": null, "truncated": false}}, "out_dir": "artifacts\\nightly_latest_20260617_one_seed\\analysis\\sts2bench_nightly_20260617_seed_a_r01_a01"}

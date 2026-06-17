@@ -1,0 +1,8 @@
+﻿2026-06-17T16:56:09.6097667+08:00 watcher started driver=1284 run=sts2bench_nightly_20260617_seed_a_r01_a01
+2026-06-17T17:50:08.9423707+08:00 attempt row detected; stopping driver tree
+2026-06-17T17:50:09.5316254+08:00 stopped pid=21668
+2026-06-17T17:50:09.5436233+08:00 stopped pid=16256
+2026-06-17T17:50:09.5561221+08:00 stopped pid=35376
+2026-06-17T17:50:09.5655844+08:00 stopped pid=1284
+2026-06-17T17:50:10.6267634+08:00 manifest marked stopped_after_current_attempt
+2026-06-17T17:50:10.6287709+08:00 watcher finished

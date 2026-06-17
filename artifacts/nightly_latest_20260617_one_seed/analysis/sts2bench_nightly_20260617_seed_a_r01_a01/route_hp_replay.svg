@@ -1,0 +1,570 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="2368" height="1120" viewBox="0 0 2368 1120">
+<style>
+text { font-family: Arial, sans-serif; font-size: 15px; fill: #222; }
+.panel-title { font-size: 26px; font-weight: 700; }
+.section-title { font-size: 19px; font-weight: 700; }
+.axis { stroke: #333; stroke-width: 1.2; }
+.grid { stroke: #ddd; stroke-width: 1; }
+.map-route { fill: none; stroke: #2166ac; stroke-width: 3; stroke-linejoin: round; stroke-linecap: round; }
+.hp-route { fill: none; stroke: #2166ac; stroke-width: 2.4; stroke-dasharray: 4 4; }
+.route-topology-edge { stroke: #9f9687; stroke-width: 2; opacity: 0.72; }
+.route-topology-path { fill: none; stroke: #2166ac; stroke-width: 4; stroke-linejoin: round; stroke-linecap: round; opacity: 0.95; }
+.route-topology-path.route-plan-stage-1, .route-topology-node.selected.route-plan-stage-1 { stroke: #2166ac; }
+.route-topology-path.route-plan-stage-2, .route-topology-node.selected.route-plan-stage-2 { stroke: #b2182b; }
+.route-topology-path.route-plan-stage-3, .route-topology-node.selected.route-plan-stage-3 { stroke: #1b9e77; }
+.route-topology-path.route-plan-stage-4, .route-topology-node.selected.route-plan-stage-4 { stroke: #7570b3; }
+.route-topology-path.route-plan-stage-5, .route-topology-node.selected.route-plan-stage-5 { stroke: #e6ab02; }
+.route-stage-label.route-plan-stage-1, .route-stage-legend.route-plan-stage-1 { fill: #2166ac; }
+.route-stage-label.route-plan-stage-2, .route-stage-legend.route-plan-stage-2 { fill: #b2182b; }
+.route-stage-label.route-plan-stage-3, .route-stage-legend.route-plan-stage-3 { fill: #1b9e77; }
+.route-stage-label.route-plan-stage-4, .route-stage-legend.route-plan-stage-4 { fill: #7570b3; }
+.route-stage-label.route-plan-stage-5, .route-stage-legend.route-plan-stage-5 { fill: #e6ab02; }
+.route-topology-node { stroke-width: 1.4; }
+.route-topology-node.selected { stroke: #7f0000; stroke-width: 3; }
+.route-topology-node.option { stroke: #5f5548; opacity: 0.9; }
+.route-topology-node.current { stroke: #1466cc; stroke-width: 2.6; }
+.route-topology-act-label { font-size: 18px; font-weight: 700; paint-order: stroke; stroke: white; stroke-width: 4px; }
+.route-stage-label { fill: #111; font-size: 16px; font-weight: 700; paint-order: stroke; stroke: white; stroke-width: 5px; }
+.route-stage-legend { font-size: 15px; font-weight: 700; fill: #333; paint-order: stroke; stroke: white; stroke-width: 4px; }
+.replan-connector { stroke: #444; stroke-width: 1.4; stroke-dasharray: 3 3; }
+.replan-flag { fill: #fff; stroke: #b2182b; stroke-width: 2; }
+.replan-flag-title { font-size: 14px; font-weight: 700; fill: #111; }
+.replan-flag-reason { font-size: 13px; fill: #333; }
+.route-node-icon { font-size: 18px; font-weight: 700; dominant-baseline: central; alignment-baseline: central; pointer-events: none; }
+.route-node-small-label { font-size: 15px; fill: #222; paint-order: stroke; stroke: white; stroke-width: 4px; }
+.route-node-coordinate { font-size: 14px; fill: #555; paint-order: stroke; stroke: white; stroke-width: 4px; }
+.route-topology-coordinate { font-size: 15px; fill: #555; paint-order: stroke; stroke: white; stroke-width: 4px; }
+.same-floor-route-line { fill: none; stroke: #2166ac; stroke-width: 3.5; stroke-linejoin: round; stroke-linecap: round; }
+.same-floor-node { stroke-width: 1.4; }
+.same-floor-node.selected { stroke: #222; stroke-width: 2.2; }
+.same-floor-node.selected.large-loss { stroke: #7f0000; stroke-width: 3; }
+.same-floor-node.option { stroke: #888; opacity: 0.66; }
+.same-floor-col-guide { stroke: #e1e4e8; stroke-width: 1; stroke-dasharray: 3 4; }
+.same-floor-coordinate { font-size: 15px; fill: #555; paint-order: stroke; stroke: white; stroke-width: 4px; }
+.selected-room-badge { font-size: 18px; font-weight: 700; fill: #111; paint-order: stroke; stroke: white; stroke-width: 5px; }
+.room-hp-segment { stroke-linecap: round; }
+.loss-label { font-size: 18px; font-weight: 700; fill: #222; paint-order: stroke; stroke: white; stroke-width: 5px; }
+.hp-transition-label { font-size: 19px; fill: #555; paint-order: stroke; stroke: white; stroke-width: 5px; }
+.room-index-label { font-size: 18px; font-weight: 700; fill: #555; }
+.hp-axis-label { font-size: 14px; fill: #555; }
+</style>
+<rect width="100%" height="100%" fill="#fff"/>
+<text class="panel-title" x="76" y="34">Map route vs HP route</text>
+<g class="map-route-panel">
+<text class="section-title" x="76" y="66">Played map topology</text>
+
+<g class="route-topology-map" data-layout="horizontal" data-x-axis="row" data-y-axis="col">
+<text class="route-stage-legend" x="346.0" y="66.0">Route stages:</text>
+<text class="route-stage-legend route-plan-stage-1" x="458.0" y="66.0">R1</text>
+<text class="route-stage-legend route-plan-stage-2" x="492.0" y="66.0">R2</text>
+<text class="route-stage-legend route-plan-stage-3" x="526.0" y="66.0">R3</text>
+<text class="route-stage-legend route-plan-stage-4" x="560.0" y="66.0">R4</text>
+<text class="route-stage-legend route-plan-stage-5" x="594.0" y="66.0">R5</text>
+<rect class="route-topology-panel" fill="none" x="76.0" y="116.0" width="1077.0" height="524.0" stroke="#d5d0c6"/>
+<rect class="route-topology-panel" fill="none" x="1181.0" y="116.0" width="1077.0" height="524.0" stroke="#d5d0c6"/>
+<line class="route-topology-edge" x1="120.0" y1="370.0" x2="181.8" y2="223.3"/>
+<line class="route-topology-edge" x1="120.0" y1="370.0" x2="181.8" y2="296.7"/>
+<line class="route-topology-edge" x1="120.0" y1="370.0" x2="181.8" y2="443.3"/>
+<line class="route-topology-edge" x1="120.0" y1="370.0" x2="181.8" y2="590.0"/>
+<line class="route-topology-edge" x1="181.8" y1="223.3" x2="243.6" y2="150.0"/>
+<line class="route-topology-edge" x1="181.8" y1="296.7" x2="243.6" y2="296.7"/>
+<line class="route-topology-edge" x1="181.8" y1="443.3" x2="243.6" y2="443.3"/>
+<line class="route-topology-edge" x1="181.8" y1="590.0" x2="243.6" y2="590.0"/>
+<line class="route-topology-edge" x1="243.6" y1="150.0" x2="305.4" y2="150.0"/>
+<line class="route-topology-edge" x1="243.6" y1="296.7" x2="305.4" y2="296.7"/>
+<line class="route-topology-edge" x1="243.6" y1="443.3" x2="305.4" y2="443.3"/>
+<line class="route-topology-edge" x1="243.6" y1="590.0" x2="305.4" y2="590.0"/>
+<line class="route-topology-edge" x1="305.4" y1="150.0" x2="367.2" y2="150.0"/>
+<line class="route-topology-edge" x1="305.4" y1="150.0" x2="367.2" y2="223.3"/>
+<line class="route-topology-edge" x1="305.4" y1="296.7" x2="367.2" y2="296.7"/>
+<line class="route-topology-edge" x1="305.4" y1="443.3" x2="367.2" y2="443.3"/>
+<line class="route-topology-edge" x1="305.4" y1="590.0" x2="367.2" y2="516.7"/>
+<line class="route-topology-edge" x1="367.2" y1="150.0" x2="429.1" y2="150.0"/>
+<line class="route-topology-edge" x1="367.2" y1="223.3" x2="429.1" y2="150.0"/>
+<line class="route-topology-edge" x1="367.2" y1="296.7" x2="429.1" y2="296.7"/>
+<line class="route-topology-edge" x1="367.2" y1="443.3" x2="429.1" y2="443.3"/>
+<line class="route-topology-edge" x1="367.2" y1="516.7" x2="429.1" y2="443.3"/>
+<line class="route-topology-edge" x1="367.2" y1="516.7" x2="429.1" y2="590.0"/>
+<line class="route-topology-edge" x1="429.1" y1="150.0" x2="490.9" y2="150.0"/>
+<line class="route-topology-edge" x1="429.1" y1="296.7" x2="490.9" y2="370.0"/>
+<line class="route-topology-edge" x1="429.1" y1="443.3" x2="490.9" y2="370.0"/>
+<line class="route-topology-edge" x1="429.1" y1="590.0" x2="490.9" y2="590.0"/>
+<line class="route-topology-edge" x1="490.9" y1="150.0" x2="552.7" y2="223.3"/>
+<line class="route-topology-edge" x1="490.9" y1="150.0" x2="552.7" y2="150.0"/>
+<line class="route-topology-edge" x1="490.9" y1="370.0" x2="552.7" y2="370.0"/>
+<line class="route-topology-edge" x1="490.9" y1="370.0" x2="552.7" y2="443.3"/>
+<line class="route-topology-edge" x1="490.9" y1="590.0" x2="552.7" y2="590.0"/>
+<line class="route-topology-edge" x1="552.7" y1="150.0" x2="614.5" y2="150.0"/>
+<line class="route-topology-edge" x1="552.7" y1="223.3" x2="614.5" y2="296.7"/>
+<line class="route-topology-edge" x1="552.7" y1="370.0" x2="614.5" y2="370.0"/>
+<line class="route-topology-edge" x1="552.7" y1="443.3" x2="614.5" y2="443.3"/>
+<line class="route-topology-edge" x1="552.7" y1="590.0" x2="614.5" y2="590.0"/>
+<line class="route-topology-edge" x1="614.5" y1="150.0" x2="676.3" y2="150.0"/>
+<line class="route-topology-edge" x1="614.5" y1="296.7" x2="676.3" y2="296.7"/>
+<line class="route-topology-edge" x1="614.5" y1="370.0" x2="676.3" y2="443.3"/>
+<line class="route-topology-edge" x1="614.5" y1="370.0" x2="676.3" y2="296.7"/>
+<line class="route-topology-edge" x1="614.5" y1="443.3" x2="676.3" y2="443.3"/>
+<line class="route-topology-edge" x1="614.5" y1="590.0" x2="676.3" y2="590.0"/>
+<line class="route-topology-edge" x1="676.3" y1="150.0" x2="738.1" y2="150.0"/>
+<line class="route-topology-edge" x1="676.3" y1="296.7" x2="738.1" y2="370.0"/>
+<line class="route-topology-edge" x1="676.3" y1="296.7" x2="738.1" y2="296.7"/>
+<line class="route-topology-edge" x1="676.3" y1="296.7" x2="738.1" y2="223.3"/>
+<line class="route-topology-edge" x1="676.3" y1="443.3" x2="738.1" y2="443.3"/>
+<line class="route-topology-edge" x1="676.3" y1="590.0" x2="738.1" y2="590.0"/>
+<line class="route-topology-edge" x1="738.1" y1="150.0" x2="799.9" y2="150.0"/>
+<line class="route-topology-edge" x1="738.1" y1="223.3" x2="799.9" y2="150.0"/>
+<line class="route-topology-edge" x1="738.1" y1="296.7" x2="799.9" y2="296.7"/>
+<line class="route-topology-edge" x1="738.1" y1="370.0" x2="799.9" y2="443.3"/>
+<line class="route-topology-edge" x1="738.1" y1="443.3" x2="799.9" y2="443.3"/>
+<line class="route-topology-edge" x1="738.1" y1="590.0" x2="799.9" y2="590.0"/>
+<line class="route-topology-edge" x1="799.9" y1="150.0" x2="861.8" y2="150.0"/>
+<line class="route-topology-edge" x1="799.9" y1="296.7" x2="861.8" y2="296.7"/>
+<line class="route-topology-edge" x1="799.9" y1="443.3" x2="861.8" y2="443.3"/>
+<line class="route-topology-edge" x1="799.9" y1="443.3" x2="861.8" y2="516.7"/>
+<line class="route-topology-edge" x1="799.9" y1="590.0" x2="861.8" y2="516.7"/>
+<line class="route-topology-edge" x1="861.8" y1="150.0" x2="923.6" y2="223.3"/>
+<line class="route-topology-edge" x1="861.8" y1="150.0" x2="923.6" y2="150.0"/>
+<line class="route-topology-edge" x1="861.8" y1="296.7" x2="923.6" y2="370.0"/>
+<line class="route-topology-edge" x1="861.8" y1="443.3" x2="923.6" y2="516.7"/>
+<line class="route-topology-edge" x1="861.8" y1="516.7" x2="923.6" y2="516.7"/>
+<line class="route-topology-edge" x1="923.6" y1="150.0" x2="985.4" y2="150.0"/>
+<line class="route-topology-edge" x1="923.6" y1="223.3" x2="985.4" y2="223.3"/>
+<line class="route-topology-edge" x1="923.6" y1="370.0" x2="985.4" y2="370.0"/>
+<line class="route-topology-edge" x1="923.6" y1="516.7" x2="985.4" y2="516.7"/>
+<line class="route-topology-edge" x1="985.4" y1="150.0" x2="1047.2" y2="150.0"/>
+<line class="route-topology-edge" x1="985.4" y1="223.3" x2="1047.2" y2="223.3"/>
+<line class="route-topology-edge" x1="985.4" y1="370.0" x2="1047.2" y2="370.0"/>
+<line class="route-topology-edge" x1="985.4" y1="516.7" x2="1047.2" y2="516.7"/>
+<line class="route-topology-edge" x1="1047.2" y1="150.0" x2="1109.0" y2="370.0"/>
+<line class="route-topology-edge" x1="1047.2" y1="223.3" x2="1109.0" y2="370.0"/>
+<line class="route-topology-edge" x1="1047.2" y1="370.0" x2="1109.0" y2="370.0"/>
+<line class="route-topology-edge" x1="1047.2" y1="516.7" x2="1109.0" y2="370.0"/>
+<line class="route-topology-edge" x1="1225.0" y1="370.0" x2="1422.8" y2="223.3"/>
+<line class="route-topology-edge" x1="1225.0" y1="370.0" x2="1422.8" y2="590.0"/>
+<line class="route-topology-edge" x1="1422.8" y1="223.3" x2="1620.6" y2="150.0"/>
+<line class="route-topology-edge" x1="1422.8" y1="223.3" x2="1620.6" y2="296.7"/>
+<line class="route-topology-edge" x1="1422.8" y1="590.0" x2="1620.6" y2="590.0"/>
+<line class="route-topology-edge" x1="1620.6" y1="150.0" x2="1818.4" y2="150.0"/>
+<line class="route-topology-edge" x1="1620.6" y1="296.7" x2="1818.4" y2="370.0"/>
+<line class="route-topology-edge" x1="1620.6" y1="296.7" x2="1818.4" y2="223.3"/>
+<line class="route-topology-edge" x1="1620.6" y1="590.0" x2="1818.4" y2="590.0"/>
+<line class="route-topology-edge" x1="1818.4" y1="150.0" x2="2016.2" y2="150.0"/>
+<line class="route-topology-edge" x1="1818.4" y1="223.3" x2="2016.2" y2="150.0"/>
+<line class="route-topology-edge" x1="1818.4" y1="370.0" x2="2016.2" y2="296.7"/>
+<line class="route-topology-edge" x1="1818.4" y1="370.0" x2="2016.2" y2="443.3"/>
+<line class="route-topology-edge" x1="1818.4" y1="590.0" x2="2016.2" y2="590.0"/>
+<line class="route-topology-edge" x1="2016.2" y1="150.0" x2="2214.0" y2="150.0"/>
+<line class="route-topology-edge" x1="2016.2" y1="296.7" x2="2214.0" y2="296.7"/>
+<line class="route-topology-edge" x1="2016.2" y1="296.7" x2="2214.0" y2="370.0"/>
+<line class="route-topology-edge" x1="2016.2" y1="443.3" x2="2214.0" y2="443.3"/>
+<line class="route-topology-edge" x1="2016.2" y1="590.0" x2="2214.0" y2="590.0"/>
+<line class="route-topology-path route-plan-stage-1" data-route-stage="1" x1="120.0" y1="370.0" x2="181.8" y2="443.3"><title>Route stage 1</title></line>
+<text class="route-stage-label route-plan-stage-1" x="150.9" y="394.7" text-anchor="middle">R1</text>
+<line class="route-topology-path route-plan-stage-2" data-route-stage="2" x1="181.8" y1="443.3" x2="243.6" y2="443.3"><title>Route stage 2</title></line>
+<text class="route-stage-label route-plan-stage-2" x="212.7" y="431.3" text-anchor="middle">R2</text>
+<line class="route-topology-path route-plan-stage-2" data-route-stage="2" x1="243.6" y1="443.3" x2="305.4" y2="443.3"><title>Route stage 2</title></line>
+<line class="route-topology-path route-plan-stage-2" data-route-stage="2" x1="305.4" y1="443.3" x2="367.2" y2="443.3"><title>Route stage 2</title></line>
+<line class="route-topology-path route-plan-stage-2" data-route-stage="2" x1="367.2" y1="443.3" x2="429.1" y2="443.3"><title>Route stage 2</title></line>
+<line class="route-topology-path route-plan-stage-3" data-route-stage="3" x1="429.1" y1="443.3" x2="490.9" y2="370.0"><title>Route stage 3</title></line>
+<text class="route-stage-label route-plan-stage-3" x="460.0" y="394.7" text-anchor="middle">R3</text>
+<line class="route-topology-path route-plan-stage-4" data-route-stage="4" x1="490.9" y1="370.0" x2="552.7" y2="443.3"><title>Route stage 4</title></line>
+<text class="route-stage-label route-plan-stage-4" x="521.8" y="394.7" text-anchor="middle">R4</text>
+<line class="route-topology-path route-plan-stage-5" data-route-stage="5" x1="552.7" y1="443.3" x2="614.5" y2="443.3"><title>Route stage 5</title></line>
+<text class="route-stage-label route-plan-stage-5" x="583.6" y="431.3" text-anchor="middle">R5</text>
+<line class="route-topology-path route-plan-stage-1" data-route-stage="6" x1="614.5" y1="443.3" x2="676.3" y2="443.3"><title>Route stage 6</title></line>
+<text class="route-stage-label route-plan-stage-1" x="645.4" y="431.3" text-anchor="middle">R6</text>
+<line class="route-topology-path route-plan-stage-2" data-route-stage="7" x1="676.3" y1="443.3" x2="738.1" y2="443.3"><title>Route stage 7</title></line>
+<text class="route-stage-label route-plan-stage-2" x="707.2" y="431.3" text-anchor="middle">R7</text>
+<line class="route-topology-path route-plan-stage-3" data-route-stage="8" x1="738.1" y1="443.3" x2="799.9" y2="443.3"><title>Route stage 8</title></line>
+<text class="route-stage-label route-plan-stage-3" x="769.0" y="431.3" text-anchor="middle">R8</text>
+<line class="route-topology-path route-plan-stage-4" data-route-stage="9" x1="799.9" y1="443.3" x2="861.8" y2="516.7"><title>Route stage 9</title></line>
+<text class="route-stage-label route-plan-stage-4" x="830.8" y="468.0" text-anchor="middle">R9</text>
+<line class="route-topology-path route-plan-stage-5" data-route-stage="10" x1="861.8" y1="516.7" x2="923.6" y2="516.7"><title>Route stage 10</title></line>
+<text class="route-stage-label route-plan-stage-5" x="892.7" y="504.7" text-anchor="middle">R10</text>
+<line class="route-topology-path route-plan-stage-5" data-route-stage="10" x1="923.6" y1="516.7" x2="985.4" y2="516.7"><title>Route stage 10</title></line>
+<line class="route-topology-path route-plan-stage-5" data-route-stage="10" x1="985.4" y1="516.7" x2="1047.2" y2="516.7"><title>Route stage 10</title></line>
+<line class="route-topology-path route-plan-stage-1" data-route-stage="11" x1="1047.2" y1="516.7" x2="1109.0" y2="370.0"><title>Route stage 11</title></line>
+<text class="route-stage-label route-plan-stage-1" x="1078.1" y="431.3" text-anchor="middle">R11</text>
+<line class="route-topology-path route-plan-stage-3" data-route-stage="13" x1="1225.0" y1="370.0" x2="1422.8" y2="223.3"><title>Route stage 13</title></line>
+<text class="route-stage-label route-plan-stage-3" x="1323.9" y="284.7" text-anchor="middle">R13</text>
+<line class="route-topology-path route-plan-stage-4" data-route-stage="14" x1="1422.8" y1="223.3" x2="1620.6" y2="296.7"><title>Route stage 14</title></line>
+<text class="route-stage-label route-plan-stage-4" x="1521.7" y="248.0" text-anchor="middle">R14</text>
+<line class="route-topology-path route-plan-stage-5" data-route-stage="15" x1="1620.6" y1="296.7" x2="1818.4" y2="370.0"><title>Route stage 15</title></line>
+<text class="route-stage-label route-plan-stage-5" x="1719.5" y="321.3" text-anchor="middle">R15</text>
+<line class="route-topology-path route-plan-stage-1" data-route-stage="16" x1="1818.4" y1="370.0" x2="2016.2" y2="296.7"><title>Route stage 16</title></line>
+<text class="route-stage-label route-plan-stage-1" x="1917.3" y="321.3" text-anchor="middle">R16</text>
+<line class="route-topology-path route-plan-stage-2" data-route-stage="17" x1="2016.2" y1="296.7" x2="2214.0" y2="370.0"><title>Route stage 17</title></line>
+<text class="route-stage-label route-plan-stage-2" x="2115.1" y="321.3" text-anchor="middle">R17</text>
+<circle class="route-topology-node current" cx="120.0" cy="370.0" r="17" fill="#8a7fdb"><title>act=1 floor=1 col=3 row=0 type=Ancient</title></circle>
+<text class="route-node-icon" x="120.0" y="370.0" text-anchor="middle" dominant-baseline="central">A</text>
+<circle class="route-topology-node option" cx="181.8" cy="223.3" r="14" fill="#f1c27d"><title>act=1 floor=2 col=1 row=1 type=Monster legal=true</title></circle>
+<text class="route-node-icon" x="181.8" y="223.3" text-anchor="middle" dominant-baseline="central">M</text>
+<circle class="route-topology-node option" cx="181.8" cy="296.7" r="14" fill="#f1c27d"><title>act=1 floor=2 col=2 row=1 type=Monster legal=true</title></circle>
+<text class="route-node-icon" x="181.8" y="296.7" text-anchor="middle" dominant-baseline="central">M</text>
+<circle class="route-topology-node selected route-plan-stage-1" cx="181.8" cy="443.3" r="20" fill="#f1c27d"><title>act=1 floor=2 col=4 row=1 type=Monster loss=0 legal=true</title></circle>
+<text class="route-node-icon" x="181.8" y="443.3" text-anchor="middle" dominant-baseline="central">M</text>
+<text class="selected-room-badge" x="181.8" y="416.3" text-anchor="middle">#1 -0</text>
+<text class="route-topology-coordinate" x="181.8" y="481.3" text-anchor="middle">F2 (4,1)</text>
+<circle class="route-topology-node option" cx="181.8" cy="590.0" r="14" fill="#f1c27d"><title>act=1 floor=2 col=6 row=1 type=Monster legal=true</title></circle>
+<text class="route-node-icon" x="181.8" y="590.0" text-anchor="middle" dominant-baseline="central">M</text>
+<circle class="route-topology-node option" cx="243.6" cy="150.0" r="14" fill="#f1c27d"><title>act=1 floor=3 col=0 row=2 type=Monster</title></circle>
+<text class="route-node-icon" x="243.6" y="150.0" text-anchor="middle" dominant-baseline="central">M</text>
+<circle class="route-topology-node option" cx="243.6" cy="296.7" r="14" fill="#f1c27d"><title>act=1 floor=3 col=2 row=2 type=Monster</title></circle>
+<text class="route-node-icon" x="243.6" y="296.7" text-anchor="middle" dominant-baseline="central">M</text>
+<circle class="route-topology-node selected route-plan-stage-2" cx="243.6" cy="443.3" r="20" fill="#c9c9c9"><title>act=1 floor=3 col=4 row=2 type=Unknown loss=3 legal=true</title></circle>
+<text class="route-node-icon" x="243.6" y="443.3" text-anchor="middle" dominant-baseline="central">?</text>
+<text class="selected-room-badge" x="243.6" y="416.3" text-anchor="middle">#2 -3</text>
+<text class="route-topology-coordinate" x="243.6" y="481.3" text-anchor="middle">F3 (4,2)</text>
+<circle class="route-topology-node option" cx="243.6" cy="590.0" r="14" fill="#f1c27d"><title>act=1 floor=3 col=6 row=2 type=Monster</title></circle>
+<text class="route-node-icon" x="243.6" y="590.0" text-anchor="middle" dominant-baseline="central">M</text>
+<circle class="route-topology-node option" cx="305.4" cy="150.0" r="14" fill="#f1c27d"><title>act=1 floor=4 col=0 row=3 type=Monster</title></circle>
+<text class="route-node-icon" x="305.4" y="150.0" text-anchor="middle" dominant-baseline="central">M</text>
+<circle class="route-topology-node option" cx="305.4" cy="296.7" r="14" fill="#f1c27d"><title>act=1 floor=4 col=2 row=3 type=Monster</title></circle>
+<text class="route-node-icon" x="305.4" y="296.7" text-anchor="middle" dominant-baseline="central">M</text>
+<circle class="route-topology-node selected route-plan-stage-2" cx="305.4" cy="443.3" r="20" fill="#f1c27d"><title>act=1 floor=4 col=4 row=3 type=Monster loss=0 legal=true</title></circle>
+<text class="route-node-icon" x="305.4" y="443.3" text-anchor="middle" dominant-baseline="central">M</text>
+<text class="selected-room-badge" x="305.4" y="416.3" text-anchor="middle">#3 -0</text>
+<text class="route-topology-coordinate" x="305.4" y="481.3" text-anchor="middle">F4 (4,3)</text>
+<circle class="route-topology-node option" cx="305.4" cy="590.0" r="14" fill="#f1c27d"><title>act=1 floor=4 col=6 row=3 type=Monster</title></circle>
+<text class="route-node-icon" x="305.4" y="590.0" text-anchor="middle" dominant-baseline="central">M</text>
+<circle class="route-topology-node option" cx="367.2" cy="150.0" r="14" fill="#f1c27d"><title>act=1 floor=5 col=0 row=4 type=Monster</title></circle>
+<text class="route-node-icon" x="367.2" y="150.0" text-anchor="middle" dominant-baseline="central">M</text>
+<circle class="route-topology-node option" cx="367.2" cy="223.3" r="14" fill="#c9c9c9"><title>act=1 floor=5 col=1 row=4 type=Unknown</title></circle>
+<text class="route-node-icon" x="367.2" y="223.3" text-anchor="middle" dominant-baseline="central">?</text>
+<circle class="route-topology-node option" cx="367.2" cy="296.7" r="14" fill="#f1c27d"><title>act=1 floor=5 col=2 row=4 type=Monster</title></circle>
+<text class="route-node-icon" x="367.2" y="296.7" text-anchor="middle" dominant-baseline="central">M</text>
+<circle class="route-topology-node selected route-plan-stage-2" cx="367.2" cy="443.3" r="20" fill="#f1c27d"><title>act=1 floor=5 col=4 row=4 type=Monster loss=0 legal=true</title></circle>
+<text class="route-node-icon" x="367.2" y="443.3" text-anchor="middle" dominant-baseline="central">M</text>
+<text class="selected-room-badge" x="367.2" y="416.3" text-anchor="middle">#4 -0</text>
+<text class="route-topology-coordinate" x="367.2" y="481.3" text-anchor="middle">F5 (4,4)</text>
+<circle class="route-topology-node option" cx="367.2" cy="516.7" r="14" fill="#c9c9c9"><title>act=1 floor=5 col=5 row=4 type=Unknown</title></circle>
+<text class="route-node-icon" x="367.2" y="516.7" text-anchor="middle" dominant-baseline="central">?</text>
+<circle class="route-topology-node option" cx="429.1" cy="150.0" r="14" fill="#f1c27d"><title>act=1 floor=6 col=0 row=5 type=Monster</title></circle>
+<text class="route-node-icon" x="429.1" y="150.0" text-anchor="middle" dominant-baseline="central">M</text>
+<circle class="route-topology-node option" cx="429.1" cy="296.7" r="14" fill="#f1c27d"><title>act=1 floor=6 col=2 row=5 type=Monster</title></circle>
+<text class="route-node-icon" x="429.1" y="296.7" text-anchor="middle" dominant-baseline="central">M</text>
+<circle class="route-topology-node selected route-plan-stage-2" cx="429.1" cy="443.3" r="20" fill="#6aaed6"><title>act=1 floor=6 col=4 row=5 type=Shop loss=0 legal=true</title></circle>
+<text class="route-node-icon" x="429.1" y="443.3" text-anchor="middle" dominant-baseline="central">$</text>
+<text class="selected-room-badge" x="429.1" y="416.3" text-anchor="middle">#5 -0</text>
+<text class="route-topology-coordinate" x="429.1" y="481.3" text-anchor="middle">F6 (4,5)</text>
+<circle class="route-topology-node option" cx="429.1" cy="590.0" r="14" fill="#f1c27d"><title>act=1 floor=6 col=6 row=5 type=Monster</title></circle>
+<text class="route-node-icon" x="429.1" y="590.0" text-anchor="middle" dominant-baseline="central">M</text>
+<circle class="route-topology-node option" cx="490.9" cy="150.0" r="14" fill="#c9c9c9"><title>act=1 floor=7 col=0 row=6 type=Unknown</title></circle>
+<text class="route-node-icon" x="490.9" y="150.0" text-anchor="middle" dominant-baseline="central">?</text>
+<circle class="route-topology-node selected route-plan-stage-3" cx="490.9" cy="370.0" r="20" fill="#70ad74"><title>act=1 floor=7 col=3 row=6 type=RestSite loss=0 legal=true</title></circle>
+<text class="route-node-icon" x="490.9" y="370.0" text-anchor="middle" dominant-baseline="central">R</text>
+<text class="selected-room-badge" x="490.9" y="343.0" text-anchor="middle">#7 -0</text>
+<text class="route-topology-coordinate" x="490.9" y="408.0" text-anchor="middle">F7 (3,6)</text>
+<circle class="route-topology-node option" cx="490.9" cy="590.0" r="14" fill="#f1c27d"><title>act=1 floor=7 col=6 row=6 type=Monster</title></circle>
+<text class="route-node-icon" x="490.9" y="590.0" text-anchor="middle" dominant-baseline="central">M</text>
+<circle class="route-topology-node option" cx="552.7" cy="150.0" r="14" fill="#6aaed6"><title>act=1 floor=8 col=0 row=7 type=Shop</title></circle>
+<text class="route-node-icon" x="552.7" y="150.0" text-anchor="middle" dominant-baseline="central">$</text>
+<circle class="route-topology-node option" cx="552.7" cy="223.3" r="14" fill="#c9c9c9"><title>act=1 floor=8 col=1 row=7 type=Unknown</title></circle>
+<text class="route-node-icon" x="552.7" y="223.3" text-anchor="middle" dominant-baseline="central">?</text>
+<circle class="route-topology-node option" cx="552.7" cy="370.0" r="14" fill="#c9c9c9"><title>act=1 floor=8 col=3 row=7 type=Unknown legal=true</title></circle>
+<text class="route-node-icon" x="552.7" y="370.0" text-anchor="middle" dominant-baseline="central">?</text>
+<circle class="route-topology-node selected route-plan-stage-4" cx="552.7" cy="443.3" r="20" fill="#f1c27d"><title>act=1 floor=8 col=4 row=7 type=Monster loss=0 legal=true</title></circle>
+<text class="route-node-icon" x="552.7" y="443.3" text-anchor="middle" dominant-baseline="central">M</text>
+<text class="selected-room-badge" x="552.7" y="416.3" text-anchor="middle">#8 -0</text>
+<text class="route-topology-coordinate" x="552.7" y="481.3" text-anchor="middle">F8 (4,7)</text>
+<circle class="route-topology-node option" cx="552.7" cy="590.0" r="14" fill="#70ad74"><title>act=1 floor=8 col=6 row=7 type=RestSite</title></circle>
+<text class="route-node-icon" x="552.7" y="590.0" text-anchor="middle" dominant-baseline="central">R</text>
+<circle class="route-topology-node option" cx="614.5" cy="150.0" r="14" fill="#d55e5e"><title>act=1 floor=9 col=0 row=8 type=Elite</title></circle>
+<text class="route-node-icon" x="614.5" y="150.0" text-anchor="middle" dominant-baseline="central">E</text>
+<circle class="route-topology-node option" cx="614.5" cy="296.7" r="14" fill="#d55e5e"><title>act=1 floor=9 col=2 row=8 type=Elite</title></circle>
+<text class="route-node-icon" x="614.5" y="296.7" text-anchor="middle" dominant-baseline="central">E</text>
+<circle class="route-topology-node option" cx="614.5" cy="370.0" r="14" fill="#70ad74"><title>act=1 floor=9 col=3 row=8 type=RestSite</title></circle>
+<text class="route-node-icon" x="614.5" y="370.0" text-anchor="middle" dominant-baseline="central">R</text>
+<circle class="route-topology-node selected route-plan-stage-5" cx="614.5" cy="443.3" r="20" fill="#d55e5e"><title>act=1 floor=9 col=4 row=8 type=Elite loss=9 legal=true</title></circle>
+<text class="route-node-icon" x="614.5" y="443.3" text-anchor="middle" dominant-baseline="central">E</text>
+<text class="selected-room-badge" x="614.5" y="416.3" text-anchor="middle">#9 -9</text>
+<text class="route-topology-coordinate" x="614.5" y="481.3" text-anchor="middle">F9 (4,8)</text>
+<circle class="route-topology-node option" cx="614.5" cy="590.0" r="14" fill="#f1c27d"><title>act=1 floor=9 col=6 row=8 type=Monster</title></circle>
+<text class="route-node-icon" x="614.5" y="590.0" text-anchor="middle" dominant-baseline="central">M</text>
+<circle class="route-topology-node option" cx="676.3" cy="150.0" r="14" fill="#d8b84e"><title>act=1 floor=10 col=0 row=9 type=Treasure</title></circle>
+<text class="route-node-icon" x="676.3" y="150.0" text-anchor="middle" dominant-baseline="central">T</text>
+<circle class="route-topology-node option" cx="676.3" cy="296.7" r="14" fill="#d8b84e"><title>act=1 floor=10 col=2 row=9 type=Treasure</title></circle>
+<text class="route-node-icon" x="676.3" y="296.7" text-anchor="middle" dominant-baseline="central">T</text>
+<circle class="route-topology-node selected route-plan-stage-1" cx="676.3" cy="443.3" r="20" fill="#d8b84e"><title>act=1 floor=10 col=4 row=9 type=Treasure loss=0 legal=true</title></circle>
+<text class="route-node-icon" x="676.3" y="443.3" text-anchor="middle" dominant-baseline="central">T</text>
+<text class="selected-room-badge" x="676.3" y="416.3" text-anchor="middle">#10 -0</text>
+<text class="route-topology-coordinate" x="676.3" y="481.3" text-anchor="middle">F10 (4,9)</text>
+<circle class="route-topology-node option" cx="676.3" cy="590.0" r="14" fill="#d8b84e"><title>act=1 floor=10 col=6 row=9 type=Treasure</title></circle>
+<text class="route-node-icon" x="676.3" y="590.0" text-anchor="middle" dominant-baseline="central">T</text>
+<circle class="route-topology-node option" cx="738.1" cy="150.0" r="14" fill="#70ad74"><title>act=1 floor=11 col=0 row=10 type=RestSite</title></circle>
+<text class="route-node-icon" x="738.1" y="150.0" text-anchor="middle" dominant-baseline="central">R</text>
+<circle class="route-topology-node option" cx="738.1" cy="223.3" r="14" fill="#70ad74"><title>act=1 floor=11 col=1 row=10 type=RestSite</title></circle>
+<text class="route-node-icon" x="738.1" y="223.3" text-anchor="middle" dominant-baseline="central">R</text>
+<circle class="route-topology-node option" cx="738.1" cy="296.7" r="14" fill="#d55e5e"><title>act=1 floor=11 col=2 row=10 type=Elite</title></circle>
+<text class="route-node-icon" x="738.1" y="296.7" text-anchor="middle" dominant-baseline="central">E</text>
+<circle class="route-topology-node option" cx="738.1" cy="370.0" r="14" fill="#f1c27d"><title>act=1 floor=11 col=3 row=10 type=Monster</title></circle>
+<text class="route-node-icon" x="738.1" y="370.0" text-anchor="middle" dominant-baseline="central">M</text>
+<circle class="route-topology-node selected route-plan-stage-2" cx="738.1" cy="443.3" r="20" fill="#c9c9c9"><title>act=1 floor=11 col=4 row=10 type=Unknown loss=0 legal=true</title></circle>
+<text class="route-node-icon" x="738.1" y="443.3" text-anchor="middle" dominant-baseline="central">?</text>
+<text class="selected-room-badge" x="738.1" y="416.3" text-anchor="middle">#11 -0</text>
+<text class="route-topology-coordinate" x="738.1" y="481.3" text-anchor="middle">F11 (4,10)</text>
+<circle class="route-topology-node option" cx="738.1" cy="590.0" r="14" fill="#f1c27d"><title>act=1 floor=11 col=6 row=10 type=Monster</title></circle>
+<text class="route-node-icon" x="738.1" y="590.0" text-anchor="middle" dominant-baseline="central">M</text>
+<circle class="route-topology-node option" cx="799.9" cy="150.0" r="14" fill="#f1c27d"><title>act=1 floor=12 col=0 row=11 type=Monster</title></circle>
+<text class="route-node-icon" x="799.9" y="150.0" text-anchor="middle" dominant-baseline="central">M</text>
+<circle class="route-topology-node option" cx="799.9" cy="296.7" r="14" fill="#70ad74"><title>act=1 floor=12 col=2 row=11 type=RestSite</title></circle>
+<text class="route-node-icon" x="799.9" y="296.7" text-anchor="middle" dominant-baseline="central">R</text>
+<circle class="route-topology-node selected route-plan-stage-3" cx="799.9" cy="443.3" r="20" fill="#f1c27d"><title>act=1 floor=12 col=4 row=11 type=Monster loss=7 legal=true</title></circle>
+<text class="route-node-icon" x="799.9" y="443.3" text-anchor="middle" dominant-baseline="central">M</text>
+<text class="selected-room-badge" x="799.9" y="416.3" text-anchor="middle">#12 -7</text>
+<text class="route-topology-coordinate" x="799.9" y="481.3" text-anchor="middle">F12 (4,11)</text>
+<circle class="route-topology-node option" cx="799.9" cy="590.0" r="14" fill="#f1c27d"><title>act=1 floor=12 col=6 row=11 type=Monster</title></circle>
+<text class="route-node-icon" x="799.9" y="590.0" text-anchor="middle" dominant-baseline="central">M</text>
+<circle class="route-topology-node option" cx="861.8" cy="150.0" r="14" fill="#c9c9c9"><title>act=1 floor=13 col=0 row=12 type=Unknown</title></circle>
+<text class="route-node-icon" x="861.8" y="150.0" text-anchor="middle" dominant-baseline="central">?</text>
+<circle class="route-topology-node option" cx="861.8" cy="296.7" r="14" fill="#f1c27d"><title>act=1 floor=13 col=2 row=12 type=Monster</title></circle>
+<text class="route-node-icon" x="861.8" y="296.7" text-anchor="middle" dominant-baseline="central">M</text>
+<circle class="route-topology-node option" cx="861.8" cy="443.3" r="14" fill="#70ad74"><title>act=1 floor=13 col=4 row=12 type=RestSite legal=true</title></circle>
+<text class="route-node-icon" x="861.8" y="443.3" text-anchor="middle" dominant-baseline="central">R</text>
+<circle class="route-topology-node selected route-plan-stage-4" cx="861.8" cy="516.7" r="20" fill="#f1c27d"><title>act=1 floor=13 col=5 row=12 type=Monster loss=3 legal=true</title></circle>
+<text class="route-node-icon" x="861.8" y="516.7" text-anchor="middle" dominant-baseline="central">M</text>
+<text class="selected-room-badge" x="861.8" y="489.7" text-anchor="middle">#13 -3</text>
+<text class="route-topology-coordinate" x="861.8" y="554.7" text-anchor="middle">F13 (5,12)</text>
+<circle class="route-topology-node option" cx="923.6" cy="150.0" r="14" fill="#c9c9c9"><title>act=1 floor=14 col=0 row=13 type=Unknown</title></circle>
+<text class="route-node-icon" x="923.6" y="150.0" text-anchor="middle" dominant-baseline="central">?</text>
+<circle class="route-topology-node option" cx="923.6" cy="223.3" r="14" fill="#f1c27d"><title>act=1 floor=14 col=1 row=13 type=Monster</title></circle>
+<text class="route-node-icon" x="923.6" y="223.3" text-anchor="middle" dominant-baseline="central">M</text>
+<circle class="route-topology-node option" cx="923.6" cy="370.0" r="14" fill="#6aaed6"><title>act=1 floor=14 col=3 row=13 type=Shop</title></circle>
+<text class="route-node-icon" x="923.6" y="370.0" text-anchor="middle" dominant-baseline="central">$</text>
+<circle class="route-topology-node selected route-plan-stage-5" cx="923.6" cy="516.7" r="20" fill="#f1c27d"><title>act=1 floor=14 col=5 row=13 type=Monster loss=0 legal=true</title></circle>
+<text class="route-node-icon" x="923.6" y="516.7" text-anchor="middle" dominant-baseline="central">M</text>
+<text class="selected-room-badge" x="923.6" y="489.7" text-anchor="middle">#14 -0</text>
+<text class="route-topology-coordinate" x="923.6" y="554.7" text-anchor="middle">F14 (5,13)</text>
+<circle class="route-topology-node option" cx="985.4" cy="150.0" r="14" fill="#f1c27d"><title>act=1 floor=15 col=0 row=14 type=Monster</title></circle>
+<text class="route-node-icon" x="985.4" y="150.0" text-anchor="middle" dominant-baseline="central">M</text>
+<circle class="route-topology-node option" cx="985.4" cy="223.3" r="14" fill="#c9c9c9"><title>act=1 floor=15 col=1 row=14 type=Unknown</title></circle>
+<text class="route-node-icon" x="985.4" y="223.3" text-anchor="middle" dominant-baseline="central">?</text>
+<circle class="route-topology-node option" cx="985.4" cy="370.0" r="14" fill="#d55e5e"><title>act=1 floor=15 col=3 row=14 type=Elite</title></circle>
+<text class="route-node-icon" x="985.4" y="370.0" text-anchor="middle" dominant-baseline="central">E</text>
+<circle class="route-topology-node selected route-plan-stage-5" cx="985.4" cy="516.7" r="20" fill="#f1c27d"><title>act=1 floor=15 col=5 row=14 type=Monster loss=1 legal=true</title></circle>
+<text class="route-node-icon" x="985.4" y="516.7" text-anchor="middle" dominant-baseline="central">M</text>
+<text class="selected-room-badge" x="985.4" y="489.7" text-anchor="middle">#15 -1</text>
+<text class="route-topology-coordinate" x="985.4" y="554.7" text-anchor="middle">F15 (5,14)</text>
+<circle class="route-topology-node option" cx="1047.2" cy="150.0" r="14" fill="#70ad74"><title>act=1 floor=16 col=0 row=15 type=RestSite</title></circle>
+<text class="route-node-icon" x="1047.2" y="150.0" text-anchor="middle" dominant-baseline="central">R</text>
+<circle class="route-topology-node option" cx="1047.2" cy="223.3" r="14" fill="#70ad74"><title>act=1 floor=16 col=1 row=15 type=RestSite</title></circle>
+<text class="route-node-icon" x="1047.2" y="223.3" text-anchor="middle" dominant-baseline="central">R</text>
+<circle class="route-topology-node option" cx="1047.2" cy="370.0" r="14" fill="#70ad74"><title>act=1 floor=16 col=3 row=15 type=RestSite</title></circle>
+<text class="route-node-icon" x="1047.2" y="370.0" text-anchor="middle" dominant-baseline="central">R</text>
+<circle class="route-topology-node selected route-plan-stage-5" cx="1047.2" cy="516.7" r="20" fill="#70ad74"><title>act=1 floor=16 col=5 row=15 type=RestSite loss=0 legal=true</title></circle>
+<text class="route-node-icon" x="1047.2" y="516.7" text-anchor="middle" dominant-baseline="central">R</text>
+<text class="selected-room-badge" x="1047.2" y="489.7" text-anchor="middle">#16 -0</text>
+<text class="route-topology-coordinate" x="1047.2" y="554.7" text-anchor="middle">F16 (5,15)</text>
+<circle class="route-topology-node selected route-plan-stage-1" cx="1109.0" cy="370.0" r="20" fill="#6b4c9a"><title>act=1 floor=17 col=3 row=16 type=Boss loss=24 legal=true</title></circle>
+<text class="route-node-icon" x="1109.0" y="370.0" text-anchor="middle" dominant-baseline="central">B</text>
+<text class="selected-room-badge" x="1109.0" y="343.0" text-anchor="middle">#17 -24</text>
+<text class="route-topology-coordinate" x="1109.0" y="408.0" text-anchor="middle">F17 (3,16)</text>
+<circle class="route-topology-node selected route-plan-stage-2" cx="1225.0" cy="370.0" r="20" fill="#8a7fdb"><title>act=2 floor=1 col=3 row=0 type=Ancient loss=0 legal=true</title></circle>
+<text class="route-node-icon" x="1225.0" y="370.0" text-anchor="middle" dominant-baseline="central">A</text>
+<text class="selected-room-badge" x="1225.0" y="343.0" text-anchor="middle">#18 -0</text>
+<text class="route-topology-coordinate" x="1225.0" y="408.0" text-anchor="middle">F1 (3,0)</text>
+<circle class="route-topology-node selected route-plan-stage-3" cx="1422.8" cy="223.3" r="20" fill="#f1c27d"><title>act=2 floor=2 col=1 row=1 type=Monster loss=0 legal=true</title></circle>
+<text class="route-node-icon" x="1422.8" y="223.3" text-anchor="middle" dominant-baseline="central">M</text>
+<text class="selected-room-badge" x="1422.8" y="196.3" text-anchor="middle">#19 -0</text>
+<text class="route-topology-coordinate" x="1422.8" y="261.3" text-anchor="middle">F2 (1,1)</text>
+<circle class="route-topology-node option" cx="1422.8" cy="590.0" r="14" fill="#f1c27d"><title>act=2 floor=2 col=6 row=1 type=Monster legal=true</title></circle>
+<text class="route-node-icon" x="1422.8" y="590.0" text-anchor="middle" dominant-baseline="central">M</text>
+<circle class="route-topology-node option" cx="1620.6" cy="150.0" r="14" fill="#c9c9c9"><title>act=2 floor=3 col=0 row=2 type=Unknown legal=true</title></circle>
+<text class="route-node-icon" x="1620.6" y="150.0" text-anchor="middle" dominant-baseline="central">?</text>
+<circle class="route-topology-node selected route-plan-stage-4" cx="1620.6" cy="296.7" r="20" fill="#f1c27d"><title>act=2 floor=3 col=2 row=2 type=Monster loss=1 legal=true</title></circle>
+<text class="route-node-icon" x="1620.6" y="296.7" text-anchor="middle" dominant-baseline="central">M</text>
+<text class="selected-room-badge" x="1620.6" y="269.7" text-anchor="middle">#20 -1</text>
+<text class="route-topology-coordinate" x="1620.6" y="334.7" text-anchor="middle">F3 (2,2)</text>
+<circle class="route-topology-node option" cx="1620.6" cy="590.0" r="14" fill="#f1c27d"><title>act=2 floor=3 col=6 row=2 type=Monster</title></circle>
+<text class="route-node-icon" x="1620.6" y="590.0" text-anchor="middle" dominant-baseline="central">M</text>
+<circle class="route-topology-node option" cx="1818.4" cy="150.0" r="14" fill="#f1c27d"><title>act=2 floor=4 col=0 row=3 type=Monster</title></circle>
+<text class="route-node-icon" x="1818.4" y="150.0" text-anchor="middle" dominant-baseline="central">M</text>
+<circle class="route-topology-node option" cx="1818.4" cy="223.3" r="14" fill="#f1c27d"><title>act=2 floor=4 col=1 row=3 type=Monster legal=true</title></circle>
+<text class="route-node-icon" x="1818.4" y="223.3" text-anchor="middle" dominant-baseline="central">M</text>
+<circle class="route-topology-node selected route-plan-stage-5" cx="1818.4" cy="370.0" r="20" fill="#f1c27d"><title>act=2 floor=4 col=3 row=3 type=Monster loss=22 legal=true</title></circle>
+<text class="route-node-icon" x="1818.4" y="370.0" text-anchor="middle" dominant-baseline="central">M</text>
+<text class="selected-room-badge" x="1818.4" y="343.0" text-anchor="middle">#21 -22</text>
+<text class="route-topology-coordinate" x="1818.4" y="408.0" text-anchor="middle">F4 (3,3)</text>
+<circle class="route-topology-node option" cx="1818.4" cy="590.0" r="14" fill="#f1c27d"><title>act=2 floor=4 col=6 row=3 type=Monster</title></circle>
+<text class="route-node-icon" x="1818.4" y="590.0" text-anchor="middle" dominant-baseline="central">M</text>
+<circle class="route-topology-node option" cx="2016.2" cy="150.0" r="14" fill="#f1c27d"><title>act=2 floor=5 col=0 row=4 type=Monster</title></circle>
+<text class="route-node-icon" x="2016.2" y="150.0" text-anchor="middle" dominant-baseline="central">M</text>
+<circle class="route-topology-node selected route-plan-stage-1" cx="2016.2" cy="296.7" r="20" fill="#6aaed6"><title>act=2 floor=5 col=2 row=4 type=Shop loss=0 legal=true</title></circle>
+<text class="route-node-icon" x="2016.2" y="296.7" text-anchor="middle" dominant-baseline="central">$</text>
+<text class="selected-room-badge" x="2016.2" y="269.7" text-anchor="middle">#22 -0</text>
+<text class="route-topology-coordinate" x="2016.2" y="334.7" text-anchor="middle">F5 (2,4)</text>
+<circle class="route-topology-node option" cx="2016.2" cy="443.3" r="14" fill="#c9c9c9"><title>act=2 floor=5 col=4 row=4 type=Unknown legal=true</title></circle>
+<text class="route-node-icon" x="2016.2" y="443.3" text-anchor="middle" dominant-baseline="central">?</text>
+<circle class="route-topology-node option" cx="2016.2" cy="590.0" r="14" fill="#f1c27d"><title>act=2 floor=5 col=6 row=4 type=Monster</title></circle>
+<text class="route-node-icon" x="2016.2" y="590.0" text-anchor="middle" dominant-baseline="central">M</text>
+<circle class="route-topology-node option" cx="2214.0" cy="150.0" r="14" fill="#f1c27d"><title>act=2 floor=6 col=0 row=5 type=Monster</title></circle>
+<text class="route-node-icon" x="2214.0" y="150.0" text-anchor="middle" dominant-baseline="central">M</text>
+<circle class="route-topology-node option" cx="2214.0" cy="296.7" r="14" fill="#c9c9c9"><title>act=2 floor=6 col=2 row=5 type=Unknown legal=true</title></circle>
+<text class="route-node-icon" x="2214.0" y="296.7" text-anchor="middle" dominant-baseline="central">?</text>
+<circle class="route-topology-node selected route-plan-stage-2" cx="2214.0" cy="370.0" r="20" fill="#f1c27d"><title>act=2 floor=6 col=3 row=5 type=Monster loss=54 legal=true</title></circle>
+<text class="route-node-icon" x="2214.0" y="370.0" text-anchor="middle" dominant-baseline="central">M</text>
+<text class="selected-room-badge" x="2214.0" y="343.0" text-anchor="middle">#23 -54</text>
+<text class="route-topology-coordinate" x="2214.0" y="408.0" text-anchor="middle">F6 (3,5)</text>
+<circle class="route-topology-node option" cx="2214.0" cy="443.3" r="14" fill="#6aaed6"><title>act=2 floor=6 col=4 row=5 type=Shop</title></circle>
+<text class="route-node-icon" x="2214.0" y="443.3" text-anchor="middle" dominant-baseline="central">$</text>
+<circle class="route-topology-node option" cx="2214.0" cy="590.0" r="14" fill="#f1c27d"><title>act=2 floor=6 col=6 row=5 type=Monster</title></circle>
+<text class="route-node-icon" x="2214.0" y="590.0" text-anchor="middle" dominant-baseline="central">M</text>
+
+<text class="route-topology-act-label" x="76.0" y="104.0">Act 1</text>
+<text class="route-topology-act-label" x="1181.0" y="104.0">Act 2</text>
+</g>
+
+</g>
+<g class="hp-route-panel">
+<text class="section-title" x="76" y="672">HP route by room</text>
+<rect x="76" y="880.0" width="2182" height="180.0" fill="#fddbc7" opacity="0.45"/>
+<line class="axis" x1="76" y1="1060" x2="2258" y2="1060"/>
+<line class="axis" x1="76" y1="760" x2="76" y2="1060"/>
+<line class="axis" x1="2258" y1="760" x2="2258" y2="1060"/>
+<line class="grid" x1="76" y1="760.0" x2="2258" y2="760.0"/>
+<line class="grid" x1="76" y1="880.0" x2="2258" y2="880.0"/>
+<text class="hp-axis-label" x="68" y="760.0" text-anchor="end">80</text>
+<text class="hp-axis-label" x="68" y="1060" text-anchor="end">0</text>
+<text class="hp-axis-label" x="2266" y="760.0">80</text>
+<text class="hp-axis-label" x="2266" y="1060">0</text>
+<polyline class="hp-route" points="76.0,760.0 175.2,771.2 274.4,771.2 373.5,771.2 472.7,771.2 571.9,771.2 671.1,771.2 770.3,771.2 869.5,805.0 968.6,805.0 1067.8,805.0 1167.0,831.2 1266.2,842.5 1365.4,823.8 1464.5,827.5 1563.7,827.5 1662.9,917.5 1762.1,771.2 1861.3,771.2 1960.5,775.0 2059.6,857.5 2158.8,857.5 2258.0,1060.0"/>
+<line class="room-hp-segment no-loss" x1="76.0" y1="760.0" x2="76.0" y2="760.0" stroke="#1b9e77" stroke-width="4"><title>Room 1 A1F2 Monster | Entry 80/80 | Exit 80/80 | loss 0</title></line>
+<circle cx="76.0" cy="760.0" r="5.5" fill="#fff" stroke="#d55e00" stroke-width="2.4"/>
+<circle cx="76.0" cy="760.0" r="7" fill="#d55e00" stroke="#1b9e77" stroke-width="2.4"/>
+<line class="room-hp-segment small-loss" x1="175.2" y1="760.0" x2="175.2" y2="771.2" stroke="#e6ab02" stroke-width="4"><title>Room 2 A1F3 Event | Entry 80/80 | Exit 77/77 | loss 3</title></line>
+<circle cx="175.2" cy="760.0" r="5.5" fill="#fff" stroke="#7570b3" stroke-width="2.4"/>
+<circle cx="175.2" cy="771.2" r="7" fill="#7570b3" stroke="#e6ab02" stroke-width="2.4"/>
+<line class="room-hp-segment no-loss" x1="274.4" y1="771.2" x2="274.4" y2="771.2" stroke="#1b9e77" stroke-width="4"><title>Room 3 A1F4 Monster | Entry 77/77 | Exit 77/77 | loss 0</title></line>
+<circle cx="274.4" cy="771.2" r="5.5" fill="#fff" stroke="#d55e00" stroke-width="2.4"/>
+<circle cx="274.4" cy="771.2" r="7" fill="#d55e00" stroke="#1b9e77" stroke-width="2.4"/>
+<line class="room-hp-segment no-loss" x1="373.5" y1="771.2" x2="373.5" y2="771.2" stroke="#1b9e77" stroke-width="4"><title>Room 4 A1F5 Monster | Entry 77/77 | Exit 77/77 | loss 0</title></line>
+<circle cx="373.5" cy="771.2" r="5.5" fill="#fff" stroke="#d55e00" stroke-width="2.4"/>
+<circle cx="373.5" cy="771.2" r="7" fill="#d55e00" stroke="#1b9e77" stroke-width="2.4"/>
+<line class="room-hp-segment no-loss" x1="472.7" y1="771.2" x2="472.7" y2="771.2" stroke="#1b9e77" stroke-width="4"><title>Room 5 A1F6 Shop | Entry 77/77 | Exit 77/77 | loss 0</title></line>
+<circle cx="472.7" cy="771.2" r="5.5" fill="#fff" stroke="#2b8cbe" stroke-width="2.4"/>
+<circle cx="472.7" cy="771.2" r="7" fill="#2b8cbe" stroke="#1b9e77" stroke-width="2.4"/>
+<line class="room-hp-segment no-loss" x1="571.9" y1="771.2" x2="571.9" y2="771.2" stroke="#1b9e77" stroke-width="4"><title>Room 6 A1F7 RestSite | Entry 77/77 | Exit 77/77 | loss 0</title></line>
+<circle cx="571.9" cy="771.2" r="5.5" fill="#fff" stroke="#1b9e77" stroke-width="2.4"/>
+<circle cx="571.9" cy="771.2" r="7" fill="#1b9e77" stroke="#1b9e77" stroke-width="2.4"/>
+<line class="room-hp-segment no-loss" x1="671.1" y1="771.2" x2="671.1" y2="771.2" stroke="#1b9e77" stroke-width="4"><title>Room 7 A1F7 RestSite | Entry 77/77 | Exit 77/77 | loss 0</title></line>
+<circle cx="671.1" cy="771.2" r="5.5" fill="#fff" stroke="#1b9e77" stroke-width="2.4"/>
+<circle cx="671.1" cy="771.2" r="7" fill="#1b9e77" stroke="#1b9e77" stroke-width="2.4"/>
+<line class="room-hp-segment no-loss" x1="770.3" y1="771.2" x2="770.3" y2="771.2" stroke="#1b9e77" stroke-width="4"><title>Room 8 A1F8 Monster | Entry 77/77 | Exit 77/77 | loss 0</title></line>
+<circle cx="770.3" cy="771.2" r="5.5" fill="#fff" stroke="#d55e00" stroke-width="2.4"/>
+<circle cx="770.3" cy="771.2" r="7" fill="#d55e00" stroke="#1b9e77" stroke-width="2.4"/>
+<line class="room-hp-segment small-loss" x1="869.5" y1="771.2" x2="869.5" y2="805.0" stroke="#e6ab02" stroke-width="4"><title>Room 9 A1F9 Elite | Entry 77/77 | Exit 68/77 | loss 9</title></line>
+<circle cx="869.5" cy="771.2" r="5.5" fill="#fff" stroke="#b2182b" stroke-width="2.4"/>
+<circle cx="869.5" cy="805.0" r="7" fill="#b2182b" stroke="#e6ab02" stroke-width="2.4"/>
+<line class="room-hp-segment no-loss" x1="968.6" y1="805.0" x2="968.6" y2="805.0" stroke="#1b9e77" stroke-width="4"><title>Room 10 A1F10 Treasure | Entry 68/77 | Exit 68/77 | loss 0</title></line>
+<circle cx="968.6" cy="805.0" r="5.5" fill="#fff" stroke="#d8a600" stroke-width="2.4"/>
+<circle cx="968.6" cy="805.0" r="7" fill="#d8a600" stroke="#1b9e77" stroke-width="2.4"/>
+<line class="room-hp-segment no-loss" x1="1067.8" y1="805.0" x2="1067.8" y2="805.0" stroke="#1b9e77" stroke-width="4"><title>Room 11 A1F11 Monster | Entry 68/77 | Exit 68/77 | loss 0</title></line>
+<circle cx="1067.8" cy="805.0" r="5.5" fill="#fff" stroke="#d55e00" stroke-width="2.4"/>
+<circle cx="1067.8" cy="805.0" r="7" fill="#d55e00" stroke="#1b9e77" stroke-width="2.4"/>
+<line class="room-hp-segment small-loss" x1="1167.0" y1="805.0" x2="1167.0" y2="831.2" stroke="#e6ab02" stroke-width="4"><title>Room 12 A1F12 Monster | Entry 68/77 | Exit 61/77 | loss 7</title></line>
+<circle cx="1167.0" cy="805.0" r="5.5" fill="#fff" stroke="#d55e00" stroke-width="2.4"/>
+<circle cx="1167.0" cy="831.2" r="7" fill="#d55e00" stroke="#e6ab02" stroke-width="2.4"/>
+<line class="room-hp-segment small-loss" x1="1266.2" y1="831.2" x2="1266.2" y2="842.5" stroke="#e6ab02" stroke-width="4"><title>Room 13 A1F13 Monster | Entry 61/77 | Exit 58/77 | loss 3</title></line>
+<circle cx="1266.2" cy="831.2" r="5.5" fill="#fff" stroke="#d55e00" stroke-width="2.4"/>
+<circle cx="1266.2" cy="842.5" r="7" fill="#d55e00" stroke="#e6ab02" stroke-width="2.4"/>
+<line class="room-hp-segment no-loss" x1="1365.4" y1="842.5" x2="1365.4" y2="823.8" stroke="#1b9e77" stroke-width="4"><title>Room 14 A1F14 Monster | Entry 58/77 | Exit 63/77 | loss 0</title></line>
+<circle cx="1365.4" cy="842.5" r="5.5" fill="#fff" stroke="#d55e00" stroke-width="2.4"/>
+<circle cx="1365.4" cy="823.8" r="7" fill="#d55e00" stroke="#1b9e77" stroke-width="2.4"/>
+<line class="room-hp-segment small-loss" x1="1464.5" y1="823.8" x2="1464.5" y2="827.5" stroke="#e6ab02" stroke-width="4"><title>Room 15 A1F15 Monster | Entry 63/77 | Exit 62/77 | loss 1</title></line>
+<circle cx="1464.5" cy="823.8" r="5.5" fill="#fff" stroke="#d55e00" stroke-width="2.4"/>
+<circle cx="1464.5" cy="827.5" r="7" fill="#d55e00" stroke="#e6ab02" stroke-width="2.4"/>
+<line class="room-hp-segment no-loss" x1="1563.7" y1="827.5" x2="1563.7" y2="827.5" stroke="#1b9e77" stroke-width="4"><title>Room 16 A1F16 RestSite | Entry 62/77 | Exit 62/77 | loss 0</title></line>
+<circle cx="1563.7" cy="827.5" r="5.5" fill="#fff" stroke="#1b9e77" stroke-width="2.4"/>
+<circle cx="1563.7" cy="827.5" r="7" fill="#1b9e77" stroke="#1b9e77" stroke-width="2.4"/>
+<line class="room-hp-segment large-loss" x1="1662.9" y1="827.5" x2="1662.9" y2="917.5" stroke="#b2182b" stroke-width="6"><title>Room 17 A1F17 Boss | Entry 62/77 | Exit 38/77 | loss 24 large loss</title></line>
+<circle cx="1662.9" cy="827.5" r="5.5" fill="#fff" stroke="#6a3d9a" stroke-width="2.4"/>
+<circle cx="1662.9" cy="917.5" r="7" fill="#6a3d9a" stroke="#b2182b" stroke-width="2.4"/>
+<line class="room-hp-segment no-loss" x1="1762.1" y1="771.2" x2="1762.1" y2="771.2" stroke="#1b9e77" stroke-width="4"><title>Room 18 A2F1 Event | Entry 77/77 | Exit 77/77 | loss 0</title></line>
+<circle cx="1762.1" cy="771.2" r="5.5" fill="#fff" stroke="#7570b3" stroke-width="2.4"/>
+<circle cx="1762.1" cy="771.2" r="7" fill="#7570b3" stroke="#1b9e77" stroke-width="2.4"/>
+<line class="room-hp-segment no-loss" x1="1861.3" y1="771.2" x2="1861.3" y2="771.2" stroke="#1b9e77" stroke-width="4"><title>Room 19 A2F2 Monster | Entry 77/77 | Exit 77/77 | loss 0</title></line>
+<circle cx="1861.3" cy="771.2" r="5.5" fill="#fff" stroke="#d55e00" stroke-width="2.4"/>
+<circle cx="1861.3" cy="771.2" r="7" fill="#d55e00" stroke="#1b9e77" stroke-width="2.4"/>
+<line class="room-hp-segment small-loss" x1="1960.5" y1="771.2" x2="1960.5" y2="775.0" stroke="#e6ab02" stroke-width="4"><title>Room 20 A2F3 Monster | Entry 77/77 | Exit 76/77 | loss 1</title></line>
+<circle cx="1960.5" cy="771.2" r="5.5" fill="#fff" stroke="#d55e00" stroke-width="2.4"/>
+<circle cx="1960.5" cy="775.0" r="7" fill="#d55e00" stroke="#e6ab02" stroke-width="2.4"/>
+<line class="room-hp-segment large-loss" x1="2059.6" y1="775.0" x2="2059.6" y2="857.5" stroke="#b2182b" stroke-width="6"><title>Room 21 A2F4 Monster | Entry 76/77 | Exit 54/77 | loss 22 large loss</title></line>
+<circle cx="2059.6" cy="775.0" r="5.5" fill="#fff" stroke="#d55e00" stroke-width="2.4"/>
+<circle cx="2059.6" cy="857.5" r="7" fill="#d55e00" stroke="#b2182b" stroke-width="2.4"/>
+<line class="room-hp-segment no-loss" x1="2158.8" y1="857.5" x2="2158.8" y2="857.5" stroke="#1b9e77" stroke-width="4"><title>Room 22 A2F5 Shop | Entry 54/77 | Exit 54/77 | loss 0</title></line>
+<circle cx="2158.8" cy="857.5" r="5.5" fill="#fff" stroke="#2b8cbe" stroke-width="2.4"/>
+<circle cx="2158.8" cy="857.5" r="7" fill="#2b8cbe" stroke="#1b9e77" stroke-width="2.4"/>
+<line class="room-hp-segment large-loss" x1="2258.0" y1="857.5" x2="2258.0" y2="1060.0" stroke="#b2182b" stroke-width="6"><title>Room 23 A2F6 Monster | Entry 54/77 | Exit 0/77 | loss 54 large loss</title></line>
+<circle cx="2258.0" cy="857.5" r="5.5" fill="#fff" stroke="#d55e00" stroke-width="2.4"/>
+<circle cx="2258.0" cy="1060.0" r="7" fill="#d55e00" stroke="#b2182b" stroke-width="2.4"/>
+<text class="loss-label" x="76.0" y="726" text-anchor="middle">F2 Monster -0</text>
+<text class="hp-transition-label" x="76.0" y="746" text-anchor="middle">80-&gt;80</text>
+<text class="room-index-label" x="76.0" y="1096" text-anchor="middle">#1</text>
+<text class="loss-label" x="175.2" y="726" text-anchor="middle">F3 Event -3</text>
+<text class="hp-transition-label" x="175.2" y="746" text-anchor="middle">80-&gt;77</text>
+<text class="room-index-label" x="175.2" y="1096" text-anchor="middle">#2</text>
+<text class="loss-label" x="274.4" y="726" text-anchor="middle">F4 Monster -0</text>
+<text class="hp-transition-label" x="274.4" y="746" text-anchor="middle">77-&gt;77</text>
+<text class="room-index-label" x="274.4" y="1096" text-anchor="middle">#3</text>
+<text class="loss-label" x="373.5" y="726" text-anchor="middle">F5 Monster -0</text>
+<text class="hp-transition-label" x="373.5" y="746" text-anchor="middle">77-&gt;77</text>
+<text class="room-index-label" x="373.5" y="1096" text-anchor="middle">#4</text>
+<text class="loss-label" x="472.7" y="726" text-anchor="middle">F6 Shop -0</text>
+<text class="hp-transition-label" x="472.7" y="746" text-anchor="middle">77-&gt;77</text>
+<text class="room-index-label" x="472.7" y="1096" text-anchor="middle">#5</text>
+<text class="loss-label" x="571.9" y="726" text-anchor="middle">F7 RestSite -0</text>
+<text class="hp-transition-label" x="571.9" y="746" text-anchor="middle">77-&gt;77</text>
+<text class="room-index-label" x="571.9" y="1096" text-anchor="middle">#6</text>
+<text class="loss-label" x="671.1" y="726" text-anchor="middle">F7 RestSite -0</text>
+<text class="hp-transition-label" x="671.1" y="746" text-anchor="middle">77-&gt;77</text>
+<text class="room-index-label" x="671.1" y="1096" text-anchor="middle">#7</text>
+<text class="loss-label" x="770.3" y="726" text-anchor="middle">F8 Monster -0</text>
+<text class="hp-transition-label" x="770.3" y="746" text-anchor="middle">77-&gt;77</text>
+<text class="room-index-label" x="770.3" y="1096" text-anchor="middle">#8</text>
+<text class="loss-label" x="869.5" y="726" text-anchor="middle">F9 Elite -9</text>
+<text class="hp-transition-label" x="869.5" y="746" text-anchor="middle">77-&gt;68</text>
+<text class="room-index-label" x="869.5" y="1096" text-anchor="middle">#9</text>
+<text class="loss-label" x="968.6" y="726" text-anchor="middle">F10 Treasure -0</text>
+<text class="hp-transition-label" x="968.6" y="746" text-anchor="middle">68-&gt;68</text>
+<text class="room-index-label" x="968.6" y="1096" text-anchor="middle">#10</text>
+<text class="loss-label" x="1067.8" y="726" text-anchor="middle">F11 Monster -0</text>
+<text class="hp-transition-label" x="1067.8" y="746" text-anchor="middle">68-&gt;68</text>
+<text class="room-index-label" x="1067.8" y="1096" text-anchor="middle">#11</text>
+<text class="loss-label" x="1167.0" y="726" text-anchor="middle">F12 Monster -7</text>
+<text class="hp-transition-label" x="1167.0" y="746" text-anchor="middle">68-&gt;61</text>
+<text class="room-index-label" x="1167.0" y="1096" text-anchor="middle">#12</text>
+<text class="loss-label" x="1266.2" y="726" text-anchor="middle">F13 Monster -3</text>
+<text class="hp-transition-label" x="1266.2" y="746" text-anchor="middle">61-&gt;58</text>
+<text class="room-index-label" x="1266.2" y="1096" text-anchor="middle">#13</text>
+<text class="loss-label" x="1365.4" y="726" text-anchor="middle">F14 Monster -0</text>
+<text class="hp-transition-label" x="1365.4" y="746" text-anchor="middle">58-&gt;63</text>
+<text class="room-index-label" x="1365.4" y="1096" text-anchor="middle">#14</text>
+<text class="loss-label" x="1464.5" y="726" text-anchor="middle">F15 Monster -1</text>
+<text class="hp-transition-label" x="1464.5" y="746" text-anchor="middle">63-&gt;62</text>
+<text class="room-index-label" x="1464.5" y="1096" text-anchor="middle">#15</text>
+<text class="loss-label" x="1563.7" y="726" text-anchor="middle">F16 RestSite -0</text>
+<text class="hp-transition-label" x="1563.7" y="746" text-anchor="middle">62-&gt;62</text>
+<text class="room-index-label" x="1563.7" y="1096" text-anchor="middle">#16</text>
+<text class="loss-label" x="1662.9" y="726" text-anchor="middle">F17 Boss -24</text>
+<text class="hp-transition-label" x="1662.9" y="746" text-anchor="middle">62-&gt;38</text>
+<text class="room-index-label" x="1662.9" y="1096" text-anchor="middle">#17</text>
+<text class="loss-label" x="1762.1" y="726" text-anchor="middle">F1 Event -0</text>
+<text class="hp-transition-label" x="1762.1" y="746" text-anchor="middle">77-&gt;77</text>
+<text class="room-index-label" x="1762.1" y="1096" text-anchor="middle">#18</text>
+<text class="loss-label" x="1861.3" y="726" text-anchor="middle">F2 Monster -0</text>
+<text class="hp-transition-label" x="1861.3" y="746" text-anchor="middle">77-&gt;77</text>
+<text class="room-index-label" x="1861.3" y="1096" text-anchor="middle">#19</text>
+<text class="loss-label" x="1960.5" y="726" text-anchor="middle">F3 Monster -1</text>
+<text class="hp-transition-label" x="1960.5" y="746" text-anchor="middle">77-&gt;76</text>
+<text class="room-index-label" x="1960.5" y="1096" text-anchor="middle">#20</text>
+<text class="loss-label" x="2059.6" y="726" text-anchor="middle">F4 Monster -22</text>
+<text class="hp-transition-label" x="2059.6" y="746" text-anchor="middle">76-&gt;54</text>
+<text class="room-index-label" x="2059.6" y="1096" text-anchor="middle">#21</text>
+<text class="loss-label" x="2158.8" y="726" text-anchor="middle">F5 Shop -0</text>
+<text class="hp-transition-label" x="2158.8" y="746" text-anchor="middle">54-&gt;54</text>
+<text class="room-index-label" x="2158.8" y="1096" text-anchor="middle">#22</text>
+<text class="loss-label" x="2258.0" y="726" text-anchor="middle">F6 Monster -54</text>
+<text class="hp-transition-label" x="2258.0" y="746" text-anchor="middle">54-&gt;0</text>
+<text class="room-index-label" x="2258.0" y="1096" text-anchor="middle">#23</text>
+</g>
+</svg>

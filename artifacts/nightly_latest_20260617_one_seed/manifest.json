@@ -1,0 +1,94 @@
+﻿{
+    "status":  "stopped_by_user_correction",
+    "updated_at":  "2026-06-17T10:42:12.4454832Z",
+    "failure":  "Stopped because user reiterated that only one completed run should have been advanced; r02 is partial and excluded.",
+    "config":  {
+                   "experiment":  "nightly_latest_20260617_one_seed",
+                   "agent":  "coordinator",
+                   "model_source":  "STS2_BENCH_MODEL from .env/env",
+                   "base_url_source":  "STS2_BENCH_BASE_URL from .env/env",
+                   "fixed_seeds":  [
+                                       "sts2bench_nightly_20260617_seed_a"
+                                   ],
+                   "target_valid_per_seed":  3,
+                   "max_attempts_per_slot":  90,
+                   "max_steps":  4000,
+                   "llm_timeout":  180.0,
+                   "llm_max_retries":  12,
+                   "run_summary":  false,
+                   "turn_chat_window":  10,
+                   "turn_chat_plan":  true,
+                   "validity_rule":  "returncode==0 and trace result exists and error is null and truncated is false and decision==\u0027game_over\u0027 and analysis_returncode==0"
+               },
+    "valid_count":  1,
+    "target_valid_count":  3,
+    "invalid_attempt_count":  0,
+    "by_seed":  {
+                    "sts2bench_nightly_20260617_seed_a":  {
+                                                              "valid":  1,
+                                                              "target":  3,
+                                                              "replicates":  [
+                                                                                 1
+                                                                             ]
+                                                          }
+                },
+    "valid_runs":  [
+                       {
+                           "run_id":  "sts2bench_nightly_20260617_seed_a_r01_a01",
+                           "seed":  "sts2bench_nightly_20260617_seed_a",
+                           "replicate":  1,
+                           "attempt":  1,
+                           "valid":  true,
+                           "invalid_reason":  null,
+                           "started_at":  "2026-06-17T05:00:15.483670+00:00",
+                           "ended_at":  "2026-06-17T09:50:08.744766+00:00",
+                           "wall_time_sec":  17393.261,
+                           "returncode":  0,
+                           "analysis_returncode":  0,
+                           "trace":  "artifacts\\nightly_latest_20260617_one_seed\\traces\\sts2bench_nightly_20260617_seed_a_r01_a01.jsonl",
+                           "analysis_dir":  "artifacts\\nightly_latest_20260617_one_seed\\analysis\\sts2bench_nightly_20260617_seed_a_r01_a01",
+                           "console_log":  "artifacts\\nightly_latest_20260617_one_seed\\logs\\sts2bench_nightly_20260617_seed_a_r01_a01.console.log",
+                           "result":  {
+                                          "seed":  "sts2bench_nightly_20260617_seed_a",
+                                          "character":  "Ironclad",
+                                          "ascension":  0,
+                                          "victory":  false,
+                                          "decision":  "game_over",
+                                          "act":  2,
+                                          "floor":  6,
+                                          "room_type":  "Monster",
+                                          "hp":  0,
+                                          "max_hp":  77,
+                                          "gold":  8,
+                                          "deck_size":  29,
+                                          "steps":  300,
+                                          "game_action_count":  283,
+                                          "view_deck_count":  5,
+                                          "view_map_count":  1,
+                                          "view_draw_pile_count":  7,
+                                          "view_discard_pile_count":  4,
+                                          "view_exhaust_pile_count":  0,
+                                          "repeated_view_count":  0,
+                                          "model_fallback_count":  0,
+                                          "invalid_states":  0,
+                                          "truncated":  false,
+                                          "wall_time_sec":  17392.514547109604,
+                                          "error":  null,
+                                          "extra":  {
+                                                        "route_plan_event_count":  22,
+                                                        "last_sequence_validation":  {
+                                                                                         "validated":  true,
+                                                                                         "reason":  "",
+                                                                                         "steps_executed":  4
+                                                                                     },
+                                                        "custom_sequence_validation_retry_count":  13,
+                                                        "last_sequence_steps":  4,
+                                                        "route_plan_validation_retry_count":  1
+                                                    }
+                                      }
+                       }
+                   ],
+    "invalid_attempts":  [
+
+                         ]
+}

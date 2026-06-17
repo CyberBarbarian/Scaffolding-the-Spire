@@ -191,6 +191,53 @@ rates, game-action counts, view-action counts, repeated-view counts, and model
 fallback counts.  Treat floors from truncated runs as safety-cap results rather
 than natural death/victory outcomes.
 
+## Trace Analysis And Replay Artifacts
+
+After a run, generate a compact replay and failure-analysis bundle from its
+JSONL trace:
+
+```bash
+python3 -m sts2_bench.trace_analysis \
+  results/deepseek_floor_benchmark.jsonl \
+  --out-dir artifacts/trace_analysis/deepseek_floor_benchmark
+```
+
+The analyzer is offline: it does not change benchmark execution or the runner
+hot path.  It writes:
+
+- `summary.json` - machine-readable route, room, card reward, shop, rest-site,
+  HP, and high-risk route events.
+- `replay.md` - human-readable compact replay, including card offers and
+  selected/skip choices, Rest/Smith choices, Smith upgrade targets, shop
+  purchases, and shop removals.
+- `hp_by_action.svg` - HP curve by real game action, colored by room type, with
+  room bands and direct HP-drop labels; benchmark-local view actions are not
+  counted as game actions.
+- `hp_by_room.svg` - room-sequence HP route.  Each room column shows entry HP,
+  exit HP, direct `floor/type/loss` labels, room indexes, and loss-severity
+  colors.
+- `map_path.svg` - selected map route highlighted against full logged
+  `map_snapshot` topology when traces include `--include-full-map`; older logs
+  without snapshots fall back to all logged legal map choices, rendered in
+  separate panels per act.
+- `route_hp_replay.svg` - route-vs-HP overview.  When traces include
+  `map_snapshot`, the map panel renders the real map topology horizontally
+  with map rows on the x-axis and original map columns on the y-axis.  It is
+  clipped to rows already reached in the run and includes room-to-room edges,
+  unchosen rooms, the selected path, and selected-room HP-loss badges.  Older
+  logs without snapshots fall back to same-floor candidate rooms from logged
+  legal choices.  This is meant for manual failure inspection rather than
+  automatic attribution.
+- `large_loss_rooms/` - raw JSONL slices and short summaries for rooms that
+  lose at least 20 HP, lose at least 25 percent of max HP, or end in death.
+
+High-risk route events currently include:
+
+- low HP route choices that select an Elite while safer alternatives exist;
+- low HP route choices where a Rest Site or Shop is available but ignored;
+- low HP forced-Elite entries, linked back to the nearest earlier branch that
+  locked the run into that route.
+
 The prompt asks the model to return only:
 
 ```json

@@ -642,10 +642,24 @@ def _prompt_header(prompt_style: PromptStyle, *, turn_plan_enabled: bool = False
         "Card damage and block values shown in the state are engine preview values after currently visible player modifiers such as Strength, Dexterity, Frail, Weak, and card-specific temporary effects; do not apply those visible modifiers to shown card damage or block a second time.",
         "If all visible enemy intents are non-attack intents, enemies are not making attack damage this turn; block usually expires at end of turn, so avoid spending energy only for block unless another effect justifies it.",
         "View deck/map/pile actions do not advance the game state. They are information requests logged separately; use them when deck composition, pile contents, path context, or current position could affect the decision.",
+        'For map_select decisions with a selected map action, include a top-level "route_plan_event" object when creating, following, or changing a route plan. Missing route_plan_event on a map action is invalid.',
+        'Use route_plan_event {"type":"route_plan_created","new_plan":[{"col":<int>,"row":<int>,"type":"<room type>"}],"reason_tags":["<tag>"],"reason":"<why this route>"} when no active route exists.',
+        'Use route_plan_event {"type":"route_plan_followed","reason":"<why the active route is still valid>"} when selecting the active plan next node.',
+        'Use route_plan_event {"type":"route_plan_updated","new_plan":[{"col":<int>,"row":<int>,"type":"<room type>"}],"reason_tags":["low_hp|map_changed|avoid_elite|route_override"],"reason":"<why not follow the old route>"} before selecting a different route.',
+        "A route_plan_event new_plan may be a short verified prefix; if you are not certain about later topology, include only the selected legal map node.",
+        "If your previous new_plan only contained the selected node, that plan has no remaining active next node after the move; on the next map_select, emit route_plan_created again, not route_plan_followed or route_plan_updated.",
+        "Every node you include in new_plan must be copied exactly from the current full map snapshot: exact col, row, and type strings such as Unknown or RestSite. Do not infer hidden room types and do not rename RestSite to Rest or Unknown to Event.",
+        "The first route_plan_event new_plan node must match the selected legal map action. Current legal_actions are the final execution authority; non-topological route moves are allowed only when the selected map action is currently legal. If a newly exposed map changes the route, include reason_tags containing map_changed.",
     ]
     turn_plan_rules = _turn_plan_header_rules() if turn_plan_enabled else []
 
     if prompt_style == "analysis":
+        route_plan_schema = (
+            '"route_plan_event":{"type":"<required for map_select map actions: '
+            'route_plan_created|route_plan_followed|route_plan_updated>",'
+            '"new_plan":[{"col":<integer>,"row":<integer>,"type":"<exact current map type>"}],'
+            '"reason_tags":["<tag>"],"reason":"<route reason>"}'
+        )
         schema = (
             '{"situation":"<current objective and main risk>",'
             '"calculations":["<damage/block/energy/path/reward calculation if relevant>"],'
@@ -653,6 +667,7 @@ def _prompt_header(prompt_style: PromptStyle, *, turn_plan_enabled: bool = False
             '"pros":"<why it helps>","cons":"<main risk or cost>"}],'
             '"action_id":<integer>,"selected_action_label":"<copy exact chosen legal action label>",'
             '"sequence":[{"card_index":<integer>,"target_index":<integer if needed>}],'
+            f"{route_plan_schema},"
             '"reason":"<final concise reason>"}'
         )
         if turn_plan_enabled:
@@ -667,6 +682,7 @@ def _prompt_header(prompt_style: PromptStyle, *, turn_plan_enabled: bool = False
                 '"pros":"<why it helps>","cons":"<main risk or cost>"}],'
                 '"action_id":<integer>,"selected_action_label":"<copy exact chosen legal action label>",'
                 '"sequence":[{"card_index":<integer>,"target_index":<integer if needed>}],'
+                f"{route_plan_schema},"
                 '"reason":"<final concise reason>"}'
             )
         return [
@@ -682,7 +698,18 @@ def _prompt_header(prompt_style: PromptStyle, *, turn_plan_enabled: bool = False
             "For map choices, compare path rewards and risks. For rewards, compare deck impact.",
         ]
 
-    schema = '{"action_id": <integer>, "selected_action_label": "<copy exact chosen legal action label>", "sequence": [{"card_index": <integer>, "target_index": <integer if needed>}], "reason": "<short reason>"}'
+    route_plan_schema = (
+        '"route_plan_event": {"type": "<required for map_select map actions: '
+        'route_plan_created|route_plan_followed|route_plan_updated>", '
+        '"new_plan": [{"col": <integer>, "row": <integer>, "type": "<exact current map type>"}], '
+        '"reason_tags": ["<tag>"], "reason": "<route reason>"}'
+    )
+    schema = (
+        '{"action_id": <integer>, "selected_action_label": "<copy exact chosen legal action label>", '
+        '"sequence": [{"card_index": <integer>, "target_index": <integer if needed>}], '
+        f"{route_plan_schema}, "
+        '"reason": "<short reason>"}'
+    )
     if turn_plan_enabled:
         schema = (
             '{"turn_plan": {"objective": "<goal for this visible hand>", '
@@ -691,6 +718,7 @@ def _prompt_header(prompt_style: PromptStyle, *, turn_plan_enabled: bool = False
             '"replan_if": ["<state change that invalidates the plan>"]}, '
             '"action_id": <integer>, "selected_action_label": "<copy exact chosen legal action label>", '
             '"sequence": [{"card_index": <integer>, "target_index": <integer if needed>}], '
+            f"{route_plan_schema}, "
             '"reason": "<short reason>"}'
         )
     return [
@@ -895,6 +923,10 @@ class OpenAICompatAgent:
                 }
             except Exception as exc:  # noqa: BLE001 - log and retry with stricter correction
                 last_error = str(exc)
+                if _is_transport_error(exc):
+                    if attempt < self.max_retries:
+                        time.sleep(_transport_retry_delay(attempt))
+                    continue
                 messages.append(
                     {
                         "role": "user",
@@ -970,6 +1002,10 @@ class OpenAICompatAgent:
                 }
             except Exception as exc:  # noqa: BLE001 - log and retry with stricter correction
                 last_error = str(exc)
+                if _is_transport_error(exc):
+                    if attempt < self.max_retries:
+                        time.sleep(_transport_retry_delay(attempt))
+                    continue
                 messages.append(
                     {
                         "role": "user",
@@ -1296,3 +1332,11 @@ def _model_action_error_message(last_error: str | None, max_retries: int) -> str
     attempts = max_retries + 1
     reason = last_error or "unknown model action error"
     return f"LLM failed after {attempts} attempt(s): {reason}"
+
+
+def _is_transport_error(exc: Exception) -> bool:
+    return isinstance(exc, (urllib.error.URLError, TimeoutError, ConnectionError))
+
+
+def _transport_retry_delay(attempt: int) -> float:
+    return min(2.0**attempt, 15.0)

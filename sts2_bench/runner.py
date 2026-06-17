@@ -24,6 +24,7 @@ from .agents import (
 from .context import build_last_action_result, compact_state
 from .multi_agent import CoordinatorAgent, OutOfCombatContextAgent
 from .process import Sts2Process
+from .route_plan import RoutePlanTracker
 from .sequences import execute_card_sequence
 from .sequence_validation import validate_custom_sequence
 from .run_context import RunContextStore
@@ -31,6 +32,7 @@ from .run_context import RunContextStore
 
 LogLevel = Literal["metrics", "decisions", "full"]
 CUSTOM_SEQUENCE_VALIDATION_RETRIES = 2
+ROUTE_PLAN_VALIDATION_RETRIES = 2
 
 
 @dataclass
@@ -113,6 +115,7 @@ def run_one(
     started = time.time()
     result = RunResult(seed=seed, character=character, ascension=ascension)
     action_tape: list[dict[str, Any]] = []
+    route_plan_tracker = RoutePlanTracker()
 
     state: dict[str, Any] | None = None
     try:
@@ -189,10 +192,14 @@ def run_one(
                 ascension=ascension,
                 lang=lang,
                 sequence_probe_factory=sequence_probe_factory,
+                route_plan_tracker=route_plan_tracker,
             )
             if validation_error:
                 result.invalid_states += 1
-                result.error = f"custom sequence validation failed: {validation_error}"
+                if validation_error.startswith("route plan validation failed:"):
+                    result.error = validation_error
+                else:
+                    result.error = f"custom sequence validation failed: {validation_error}"
                 _fill_result(result, state)
                 return result
 
@@ -277,8 +284,10 @@ def _choose_action_with_runner_validation(
     ascension: int,
     lang: str,
     sequence_probe_factory: Callable[[], Sts2Process] | None,
+    route_plan_tracker: RoutePlanTracker,
 ) -> tuple[LegalAction, dict[str, Any], str | None]:
     validation_retries = 0
+    route_plan_validation_retries = 0
     while True:
         action, meta = agent.choose(state, legal_actions, prompt=prompt)
         if not isinstance(action, LegalAction):
@@ -291,6 +300,44 @@ def _choose_action_with_runner_validation(
 
         if logger:
             logger.write(_action_log_entry(log_level=log_level, step=step, decision=decision, action=action, meta=meta))
+
+        route_plan_result = route_plan_tracker.validate_and_apply(
+            state=state,
+            legal_actions=legal_actions,
+            action=action,
+            meta=meta,
+            step=step,
+        )
+        if route_plan_result.error is not None:
+            error = route_plan_result.error
+            if logger:
+                logger.write(
+                    {
+                        "type": "route_plan_validation_error",
+                        "step": step,
+                        "code": error.code,
+                        "reason": error.message,
+                        "event": error.event,
+                        "retry": route_plan_validation_retries,
+                        "retryable": route_plan_validation_retries < ROUTE_PLAN_VALIDATION_RETRIES,
+                    }
+                )
+            if route_plan_validation_retries >= ROUTE_PLAN_VALIDATION_RETRIES:
+                return action, meta, f"route plan validation failed: {error.code}: {error.message}"
+
+            route_plan_validation_retries += 1
+            result.extra["route_plan_validation_retry_count"] = (
+                int(result.extra.get("route_plan_validation_retry_count") or 0) + 1
+            )
+            _send_external_feedback(agent, state, action, meta, error.feedback, legal_actions)
+            continue
+
+        if route_plan_result.events:
+            for event in route_plan_result.events:
+                logger and logger.write(event)
+            result.extra["route_plan_event_count"] = int(result.extra.get("route_plan_event_count") or 0) + len(
+                route_plan_result.events
+            )
 
         if action.command.get("cmd") != "bench_custom_sequence":
             return action, meta, None
@@ -616,6 +663,9 @@ def _decision_log_entry(
         "step": step,
         "decision": state.get("decision"),
     }
+    map_snapshot = _map_snapshot_for_trace(state)
+    if map_snapshot is not None:
+        entry["map_snapshot"] = map_snapshot
     if log_level == "full":
         entry["state"] = compact_state(state)
         entry["legal_actions"] = [action.to_prompt_dict() for action in legal_actions]
@@ -626,6 +676,15 @@ def _decision_log_entry(
     entry["state"] = _state_summary(state)
     entry["legal_actions"] = [_legal_action_summary(action) for action in legal_actions]
     return entry
+
+
+def _map_snapshot_for_trace(state: dict[str, Any]) -> dict[str, Any] | None:
+    if state.get("decision") != "map_select":
+        return None
+    full_map = state.get("full_map")
+    if isinstance(full_map, dict) and full_map.get("type") == "map":
+        return full_map
+    return None
 
 
 def _action_log_entry(
@@ -737,7 +796,7 @@ def _agent_meta_summary(meta: dict[str, Any]) -> dict[str, Any]:
     if isinstance(parsed, dict):
         summary["parsed"] = {
             key: parsed[key]
-            for key in ("action_id", "reason")
+            for key in ("action_id", "reason", "route_plan_event")
             if key in parsed
         }
     return summary
