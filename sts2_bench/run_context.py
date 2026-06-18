@@ -256,11 +256,11 @@ def render_out_of_combat_context(store: RunContextStore, state: dict[str, Any]) 
         [
             "",
             "OCC output contract:",
-            "Return one legal action_id and include run_plan_patch plus run_memory_facts in every OCC response.",
+            "Return one legal action_id, selected_action_label, reason, evidence_refs, run_plan_patch, run_memory_facts, and no_context_change_reason.",
             'Use "run_plan_patch": {} and "run_memory_facts": [] when nothing should change.',
-            "Do not leave run_plan_patch empty for a real OCC game action unless the action is forced or no strategic state changes.",
+            "When run_plan_patch is empty for a real OCC non-view action, include no_context_change_reason instead of inventing a plan update.",
             "For map/event choices, update route_plan, resource_policy, open_threads, delayed_effects, or pending_mandates as relevant.",
-            "For card rewards and shops, update build_plan and resource_policy as relevant.",
+            "For shops, update resource_policy as relevant. Card reward decisions use a separate history-free reward context and do not update build_plan.",
             "Allowed run_plan_patch keys: route_plan, build_plan, resource_policy, open_threads, delayed_effects, pending_mandates.",
             "Do not mutate RM/RP directly; the coordinator validates and commits patches.",
         ]

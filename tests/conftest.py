@@ -20,6 +20,13 @@ else:
     DOTNET = shutil.which("dotnet") or str(MAC_ARM_DOTNET)
 PROJECT = str(STS2_CLI_ROOT / "src" / "Sts2Headless" / "Sts2Headless.csproj")
 HEADLESS_DLL = STS2_CLI_ROOT / "src" / "Sts2Headless" / "bin" / "Debug" / "net9.0" / "Sts2Headless.dll"
+HEADLESS_RUNTIME_CONFIG = HEADLESS_DLL.with_name("Sts2Headless.runtimeconfig.json")
+
+
+def headless_command():
+    if HEADLESS_DLL.is_file() and HEADLESS_RUNTIME_CONFIG.is_file():
+        return [DOTNET, str(HEADLESS_DLL)]
+    return [DOTNET, "run", "--project", PROJECT]
 
 
 def run_headless_jsonl(commands, timeout=90):
@@ -30,7 +37,7 @@ def run_headless_jsonl(commands, timeout=90):
     env["STS2_GAME_DIR"] = str(STS2_CLI_ROOT / "lib")
     payload = "".join(json.dumps(command) + "\n" for command in commands)
     result = subprocess.run(
-        [DOTNET, str(HEADLESS_DLL)],
+        headless_command(),
         input=payload,
         cwd=STS2_CLI_ROOT,
         env=env,
@@ -62,9 +69,7 @@ class Game:
                            os.path.expanduser("~/Library/Application Support/Steam/steamapps/common/"
                                               "Slay the Spire 2/SlayTheSpire2.app/Contents/Resources/"
                                               "data_sts2_macos_arm64"))
-        command = [DOTNET, str(HEADLESS_DLL)] if HEADLESS_DLL.is_file() else [
-            DOTNET, "run", "--no-build", "--project", PROJECT
-        ]
+        command = headless_command()
         self.proc = subprocess.Popen(
             command,
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,

@@ -39,7 +39,7 @@
 - `src/GodotStubs/`：无头适配器需要的窄 Godot 呈现层桩件。
 - `python/`：交互式命令行玩家、日志工具和完整运行冒烟工具。
 - `localization_eng/` 与 `localization_zhs/`：运行时和提示词使用的引擎导出本地化数据。
-- `tests/`：CLI/运行时和评测回归覆盖。
+- `tests/`：评测回归覆盖，以及少量运行时冒烟测试。
 - `docs/`：运行时说明、评测计划和研究笔记。
 - `logs/`、`results/`、`artifacts/`、`lib/`、`.tools/`、`saves/`：本地运行时或实验产物。除非明确提升为交付物，否则不要提交。
 
@@ -131,30 +131,27 @@ python -m sts2_bench.run_benchmark ^
 
 ## 测试
 
-构建无头适配器：
+运行本仓库的完整评测测试：
 
 ```bash
-.\.tools\dotnet\dotnet.exe build src\Sts2Headless\Sts2Headless.csproj
+python -m pytest -q
 ```
 
-运行聚焦的评测测试：
+这组测试覆盖 `sts2_bench` 的策略、动作、上下文、轨迹分析等行为，只保留少量嵌入式无头运行时冒烟测试。完整的 CLI/运行时详细回归测试维护在单独的 `sts2-cli` 仓库中；公开运行时适配器改动应在那里修改并验证。
+
+迭代时运行聚焦的评测测试：
 
 ```bash
 python -m pytest tests/test_sts2_bench_actions.py tests/test_sts2_bench_context.py tests/test_sts2_bench_config.py -q
 ```
 
-运行聚焦的命令行/运行时测试：
+触碰本地工具链或进程启动逻辑时，运行保留的运行时冒烟检查：
 
 ```bash
-python -m pytest tests/test_event.py tests/test_dynamic_card_stats.py tests/test_combat.py -q
+python -m pytest tests/test_local_tools.py tests/test_process_reuse.py tests/test_runtime_smoke.py tests/test_godot_stubs.py -q
 ```
 
-在 Windows 上，构建类测试和长运行时测试最好分开运行，避免临时 `.dll` 文件锁互相影响：
-
-```bash
-python -m pytest tests/test_godot_stubs.py -q
-python -m pytest -m "not slow" --ignore=tests/test_godot_stubs.py -q
-```
+移植或发布运行时适配器改动前，应到 `C:\WorkSpace\BG-Agent\sts2-cli` 运行完整 runtime gate，而不是在这个评测仓库里重复维护详细 runtime 测试。
 
 ## 发布边界
 

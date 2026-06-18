@@ -6,6 +6,8 @@ import json
 from collections import Counter
 from typing import Any
 
+from .route_graph import build_route_graph
+
 
 DROP_KEYS = {
     "enchantment_description",
@@ -121,6 +123,9 @@ def compact_state(state: dict[str, Any]) -> dict[str, Any]:
 
     data = _compact_obj(state)
     viewed = []
+    full_map = state.get("full_map")
+    if isinstance(full_map, dict) and full_map.get("type") == "map":
+        data["route_graph"] = build_route_graph(full_map, state.get("choices", []) or [])
 
     if state.get("view_deck"):
         player = state.get("player") or {}

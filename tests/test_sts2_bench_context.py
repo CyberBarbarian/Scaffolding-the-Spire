@@ -1,4 +1,4 @@
-from sts2_bench.context import build_last_action_result, compact_state, render_state_text
+from sts2_bench.context import build_last_action_result, compact_state, render_full_map, render_state_text
 
 
 def test_view_deck_uses_full_card_rendering():
@@ -236,6 +236,56 @@ def test_view_discard_pile_with_hidden_details_matches_cli_message():
     assert "Viewed discard pile:" in text
     assert "Discard pile (4):" in text
     assert "Card details are only available during combat." in text
+
+
+def test_full_map_render_keeps_ascii_separate_from_route_graph_json():
+    state = {
+        "decision": "map_select",
+        "context": {"act": 1, "floor": 1, "room_type": "Map"},
+        "player": {"hp": 72, "max_hp": 80, "gold": 30, "deck_size": 10},
+        "choices": [
+            {"col": 1, "row": 1, "type": "Monster"},
+            {"col": 3, "row": 1, "type": "Monster"},
+        ],
+        "full_map": {
+            "type": "map",
+            "current_coord": {"col": 3, "row": 0},
+            "rows": [
+                [
+                    {
+                        "col": 3,
+                        "row": 0,
+                        "type": "Ancient",
+                        "children": [{"col": 1, "row": 1}, {"col": 3, "row": 1}],
+                    }
+                ],
+                [
+                    {"col": 1, "row": 1, "type": "Monster", "children": [{"col": 2, "row": 2}]},
+                    {"col": 3, "row": 1, "type": "Monster", "children": [{"col": 4, "row": 2}]},
+                ],
+                [
+                    {"col": 2, "row": 2, "type": "RestSite", "children": [{"col": 3, "row": 3}]},
+                    {"col": 4, "row": 2, "type": "Elite", "children": [{"col": 3, "row": 3}]},
+                ],
+                [{"col": 3, "row": 3, "type": "Boss", "children": []}],
+            ],
+            "boss": {"col": 3, "row": 3, "type": "Boss"},
+        },
+        "view_map": True,
+    }
+
+    text = render_state_text(state)
+    ascii_map = "\n".join(render_full_map(state["full_map"], state["choices"]))
+    compact = compact_state(state)
+
+    assert "Full map:" in text
+    assert "Route graph exact nodes:" not in text
+    assert "Route graph exact nodes:" not in ascii_map
+    assert "route_graph" in compact
+    assert compact["route_graph"]["legal_starts"][0]["node_key"] == "1:1"
+    assert compact["route_graph"]["nodes"][1]["children"] == [
+        {"col": 2, "row": 2, "type": "RestSite", "node_key": "2:2"}
+    ]
 
 
 def test_last_action_result_is_rendered_as_transition_diff():

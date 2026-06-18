@@ -52,7 +52,7 @@ not contain or redistribute game DLLs.
 - `python/` - interactive CLI player, log helpers, and full-run smoke tools.
 - `localization_eng/` and `localization_zhs/` - engine-derived localization
   data used by the runtime and prompts.
-- `tests/` - CLI/runtime and benchmark regression coverage.
+- `tests/` - benchmark regression coverage plus a small runtime smoke surface.
 - `docs/` - runtime notes, benchmark plans, and research notes.
 - `logs/`, `results/`, `artifacts/`, `lib/`, `.tools/`, and `saves/` - local
   runtime or experiment artifacts. They should stay out of commits unless a
@@ -150,31 +150,33 @@ available so changes can be compared against a stable floor.
 
 ## Testing
 
-Build the headless adapter:
+Run the full benchmark repository suite:
 
 ```bash
-.\.tools\dotnet\dotnet.exe build src\Sts2Headless\Sts2Headless.csproj
+python -m pytest -q
 ```
 
-Run focused benchmark tests:
+That suite covers `sts2_bench` policy/action/context/trace behavior and keeps
+only a small smoke surface for the embedded headless runtime. The exhaustive
+CLI/runtime regression suite is maintained in the separate `sts2-cli` checkout,
+where public runtime adapter changes should be made and validated.
+
+Run focused benchmark tests while iterating:
 
 ```bash
 python -m pytest tests/test_sts2_bench_actions.py tests/test_sts2_bench_context.py tests/test_sts2_bench_config.py -q
 ```
 
-Run focused CLI/runtime tests:
+Run the retained runtime smoke checks separately when touching local toolchain
+or process startup behavior:
 
 ```bash
-python -m pytest tests/test_event.py tests/test_dynamic_card_stats.py tests/test_combat.py -q
+python -m pytest tests/test_local_tools.py tests/test_process_reuse.py tests/test_runtime_smoke.py tests/test_godot_stubs.py -q
 ```
 
-On Windows, run build-oriented tests separately from long runtime tests to avoid
-temporary `.dll` file locks:
-
-```bash
-python -m pytest tests/test_godot_stubs.py -q
-python -m pytest -m "not slow" --ignore=tests/test_godot_stubs.py -q
-```
+Before porting or publishing runtime adapter changes, run the full runtime gate
+from `C:\WorkSpace\BG-Agent\sts2-cli` instead of duplicating those detailed
+tests in this benchmark repository.
 
 ## Publication Boundary
 

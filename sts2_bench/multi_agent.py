@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import hashlib
+import json
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from .actions import LegalAction
 from .agents import Agent, FallbackMode, ModelActionError, first_non_view_action
+from .evidence import build_evidence_bundle, render_evidence_context, render_reward_decision_context
+from .posterior import RewardPosteriorEvaluation
 from .routing import route_state
 from .run_context import RunContextStore, render_out_of_combat_context
 
@@ -18,13 +22,34 @@ class OutOfCombatContextAgent:
     inner: Agent
     store: RunContextStore
     history_window: int = 6
+    reward_posterior_evaluator: Any | None = None
     history: list[dict[str, str]] = field(default_factory=list)
+    _last_reward_context: dict[str, Any] = field(default_factory=dict, init=False, repr=False)
 
     def build_prompt(self, state: dict[str, Any], legal_actions: list[LegalAction]) -> str:
         base_prompt = self.inner.build_prompt(state, legal_actions)
+        evidence_bundle = build_evidence_bundle(state, legal_actions, store=self.store)
+        if _is_card_reward_decision(state):
+            evidence_bundle, posterior_meta = self._attach_reward_posterior_evaluation(
+                state,
+                legal_actions,
+                evidence_bundle,
+            )
+            self._last_reward_context = {
+                "base_evidence_bundle_hash": build_evidence_bundle(state, legal_actions, store=self.store).bundle_hash(),
+                "evidence_bundle": evidence_bundle,
+                "posterior_meta": posterior_meta,
+            }
+            return "\n\n".join(
+                [
+                    base_prompt,
+                    render_reward_decision_context(evidence_bundle),
+                ]
+            )
         return "\n\n".join(
             [
                 base_prompt,
+                render_evidence_context(evidence_bundle),
                 render_out_of_combat_context(self.store, state),
                 _render_occ_history(self.history),
             ]
@@ -37,14 +62,24 @@ class OutOfCombatContextAgent:
         *,
         prompt: str | None = None,
     ) -> tuple[LegalAction, dict[str, Any]]:
-        action, meta = self.inner.choose(state, legal_actions, prompt=prompt if prompt is not None else self.build_prompt(state, legal_actions))
+        chosen_prompt = prompt if prompt is not None else self.build_prompt(state, legal_actions)
+        action, meta = self.inner.choose(state, legal_actions, prompt=chosen_prompt)
         meta = dict(meta)
-        meta["occ_context_mode"] = "reference_turn"
+        evidence_bundle = build_evidence_bundle(state, legal_actions, store=self.store)
+        meta["evidence_bundle_hash"] = evidence_bundle.bundle_hash()
+        meta["deck_summary_visible"] = evidence_bundle.deck_summary_visible
+        meta["full_deck_details_visible"] = evidence_bundle.full_deck_details_visible
+        meta["deck_details_visible"] = evidence_bundle.deck_details_visible
+        meta["skip_action_visible"] = evidence_bundle.skip_action_visible
+        meta["occ_context_mode"] = "history_free_reward" if _is_card_reward_decision(state) else "reference_turn"
         meta["occ_history_turns"] = len(self.history)
+        if _is_card_reward_decision(state):
+            self._attach_reward_posterior_meta(meta, evidence_bundle)
         return action, meta
 
     def reset_episode(self) -> None:
         self.history.clear()
+        self._last_reward_context.clear()
         reset = getattr(self.inner, "reset_episode", None)
         if callable(reset):
             reset()
@@ -95,6 +130,36 @@ class OutOfCombatContextAgent:
         self.history.append(entry)
         if self.history_window > 0 and len(self.history) > self.history_window:
             del self.history[: len(self.history) - self.history_window]
+
+    def _attach_reward_posterior_evaluation(
+        self,
+        state: dict[str, Any],
+        legal_actions: list[LegalAction],
+        evidence_bundle,
+    ):
+        if self.reward_posterior_evaluator is None:
+            return evidence_bundle, {}
+        evaluation, posterior_meta = self.reward_posterior_evaluator.evaluate(state, legal_actions, evidence_bundle)
+        evaluation_data = _reward_posterior_evaluation_data(evaluation)
+        posterior_meta = dict(posterior_meta or {})
+        posterior_meta.setdefault("reward_posterior_evaluator", "unknown")
+        posterior_meta.setdefault("reward_posterior_evaluation_hash", _reward_posterior_evaluation_hash(evaluation_data))
+        enriched_bundle = replace(evidence_bundle, reward_posterior_evaluation=evaluation_data)
+        return enriched_bundle, {
+            **posterior_meta,
+            "reward_posterior_evaluation_visible": True,
+            "reward_posterior_evaluation": evaluation_data,
+        }
+
+    def _attach_reward_posterior_meta(self, meta: dict[str, Any], evidence_bundle) -> None:
+        context = self._last_reward_context
+        if context.get("base_evidence_bundle_hash") != evidence_bundle.bundle_hash():
+            if self.reward_posterior_evaluator is None:
+                meta["reward_posterior_evaluation_visible"] = False
+            return
+        posterior_meta = context.get("posterior_meta")
+        if isinstance(posterior_meta, dict):
+            meta.update(posterior_meta)
 
 
 @dataclass
@@ -149,7 +214,7 @@ class CoordinatorAgent:
 
         automatic_summary = self._apply_automatic_fact(parsed if isinstance(parsed, dict) else {}, route.active_agent, state, action)
         patch_summary = _merge_patch_summaries(patch_summary, automatic_summary)
-        if patch_summary["applied"] or "error" in patch_summary:
+        if patch_summary["applied"] or "error" in patch_summary or patch_summary.get("card_reward_history_free"):
             meta["run_context_patch"] = patch_summary
             meta["run_context_hash"] = self.store.snapshot_hash()
 
@@ -186,6 +251,7 @@ class CoordinatorAgent:
         meta: dict[str, Any],
         next_state: dict[str, Any] | None = None,
     ) -> None:
+        self._record_combat_fact_transition(state, action, meta, next_state)
         active_agent = meta.get("active_agent")
         delegate = self.ca_agent if active_agent == "ca" else self.occ_agent if active_agent == "occ" else None
         if delegate is None:
@@ -202,6 +268,11 @@ class CoordinatorAgent:
         state: dict[str, Any],
         action: LegalAction,
     ) -> dict[str, Any]:
+        if owner == "occ" and _is_card_reward_decision(state):
+            summary = self._empty_patch_summary()
+            summary["card_reward_history_free"] = True
+            summary["ignored_patch_keys"] = sorted(_present_context_patch_keys(parsed))
+            return summary
         try:
             return self.store.apply_agent_patch(parsed, owner=owner, state=state, action=action)
         except ValueError as exc:
@@ -218,7 +289,7 @@ class CoordinatorAgent:
         state: dict[str, Any],
         action: LegalAction,
     ) -> dict[str, Any]:
-        if owner != "occ" or action.command.get("cmd") == "bench_view":
+        if owner != "occ" or action.command.get("cmd") == "bench_view" or _is_card_reward_decision(state):
             return self._empty_patch_summary()
         reason = _one_line(parsed.get("reason"))
         text = reason or action.label
@@ -245,6 +316,29 @@ class CoordinatorAgent:
             "combat_reports_added": 0,
             "snapshot_hash": self.store.snapshot_hash(),
         }
+
+    def _record_combat_fact_transition(
+        self,
+        state: dict[str, Any],
+        action: LegalAction,
+        meta: dict[str, Any],
+        next_state: dict[str, Any] | None,
+    ) -> None:
+        if not _is_combat_decision(state) or not isinstance(next_state, dict):
+            return
+        parsed = meta.get("parsed") if isinstance(meta, dict) else None
+        notes = _combat_notes_from_parsed(parsed)
+        if _is_combat_decision(next_state):
+            return
+        report = _combat_fact_report(state, next_state, notes)
+        if report is None:
+            return
+        self.store.apply_agent_patch(
+            {"combat_reports": [report]},
+            owner="ca",
+            state=state,
+            action=action,
+        )
 
 
 def _guard_action(
@@ -282,6 +376,12 @@ def _merge_patch_summaries(first: dict[str, Any], second: dict[str, Any]) -> dic
         merged["error"] = first["error"]
     if "error" in second:
         merged["error"] = second["error"]
+    if first.get("card_reward_history_free") or second.get("card_reward_history_free"):
+        merged["card_reward_history_free"] = True
+        merged["ignored_patch_keys"] = [
+            *list(first.get("ignored_patch_keys") or []),
+            *list(second.get("ignored_patch_keys") or []),
+        ]
     return merged
 
 
@@ -291,6 +391,24 @@ def _one_line(value: Any) -> str:
     return " ".join(str(value).split())
 
 
+def _reward_posterior_evaluation_data(evaluation: Any) -> dict[str, Any]:
+    if isinstance(evaluation, RewardPosteriorEvaluation):
+        return evaluation.to_dict()
+    to_dict = getattr(evaluation, "to_dict", None)
+    if callable(to_dict):
+        data = to_dict()
+    else:
+        data = evaluation
+    if not isinstance(data, dict):
+        raise TypeError("reward posterior evaluator must return a dict-like evaluation")
+    return json.loads(json.dumps(data, ensure_ascii=False, default=str))
+
+
+def _reward_posterior_evaluation_hash(data: dict[str, Any]) -> str:
+    payload = json.dumps(data, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:12]
+
+
 def _transition_changes(next_state: dict[str, Any] | None) -> list[str]:
     if not isinstance(next_state, dict):
         return []
@@ -298,6 +416,85 @@ def _transition_changes(next_state: dict[str, Any] | None) -> list[str]:
     if not isinstance(result, dict):
         return []
     return [str(item) for item in result.get("changes") or []][:4]
+
+
+def _is_card_reward_decision(state: dict[str, Any]) -> bool:
+    return state.get("decision") == "card_reward"
+
+
+def _present_context_patch_keys(parsed: dict[str, Any]) -> set[str]:
+    keys: set[str] = set()
+    plan_patch = parsed.get("run_plan_patch")
+    if isinstance(plan_patch, dict):
+        keys.update(f"run_plan_patch.{key}" for key in plan_patch)
+    if parsed.get("run_memory_facts"):
+        keys.add("run_memory_facts")
+    if parsed.get("combat_reports"):
+        keys.add("combat_reports")
+    return keys
+
+
+def _is_combat_decision(state: dict[str, Any]) -> bool:
+    if state.get("decision") == "combat_play":
+        return True
+    return state.get("decision") == "card_select" and isinstance(state.get("combat"), dict)
+
+
+def _combat_notes_from_parsed(parsed: Any) -> list[str]:
+    if not isinstance(parsed, dict):
+        return []
+    raw_notes = parsed.get("combat_notes")
+    if raw_notes is None:
+        return []
+    values = raw_notes if isinstance(raw_notes, list) else [raw_notes]
+    return [_one_line(value) for value in values if _one_line(value)]
+
+
+def _combat_fact_report(
+    state: dict[str, Any],
+    next_state: dict[str, Any],
+    ca_observations: list[str],
+) -> dict[str, Any] | None:
+    player_before = state.get("player") or {}
+    player_after = next_state.get("player") or {}
+    hp_before = player_before.get("hp")
+    hp_after = player_after.get("hp")
+    hp_delta = None
+    if isinstance(hp_before, (int, float)) and isinstance(hp_after, (int, float)):
+        hp_delta = int(hp_after) - int(hp_before)
+    result = next_state.get("last_action_result") if isinstance(next_state.get("last_action_result"), dict) else {}
+    context = state.get("context") or {}
+    return {
+        "kind": "combat_fact_board",
+        "text": _combat_fact_text(hp_before, hp_after, hp_delta, state, next_state),
+        "act": state.get("act") or context.get("act"),
+        "floor": state.get("floor") or context.get("floor"),
+        "room_type": context.get("room_type"),
+        "final_round": state.get("round"),
+        "hp_before_final_transition": hp_before,
+        "hp_after_combat": hp_after,
+        "hp_delta_final_transition": hp_delta,
+        "next_decision": next_state.get("decision"),
+        "transition_changes": [str(item) for item in result.get("changes") or []][:8],
+        "ca_observations": ca_observations,
+        "source": "engine_transition_plus_ca_notes",
+    }
+
+
+def _combat_fact_text(
+    hp_before: Any,
+    hp_after: Any,
+    hp_delta: int | None,
+    state: dict[str, Any],
+    next_state: dict[str, Any],
+) -> str:
+    parts = [
+        f"combat ended into {next_state.get('decision')}",
+        f"final_round={state.get('round', '?')}",
+    ]
+    if hp_delta is not None:
+        parts.append(f"final_transition_hp={hp_before}->{hp_after} ({hp_delta})")
+    return "; ".join(parts)
 
 
 def _render_occ_history(history: list[dict[str, str]]) -> str:

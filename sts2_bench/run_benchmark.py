@@ -41,6 +41,7 @@ CONFIG_ENV_KEYS = {
     "print_model_output": "STS2_BENCH_PRINT_MODEL_OUTPUT",
     "include_full_map": "STS2_BENCH_INCLUDE_FULL_MAP",
     "allow_repeat_views": "STS2_BENCH_ALLOW_REPEAT_VIEWS",
+    "reward_posterior_evaluator": "STS2_BENCH_REWARD_POSTERIOR_EVALUATOR",
 }
 NESTED_CONFIG_ENV_KEYS = {
     ("context_management", "mode"): "STS2_BENCH_CONTEXT_MODE",
@@ -317,6 +318,7 @@ def build_run_config(args: argparse.Namespace, seeds: list[str], argv: list[str]
             "occ": {
                 "mode": "reference_turn",
                 "run_context": "rm_rp_slice",
+                "reward_posterior_evaluator": bool(getattr(args, "reward_posterior_evaluator", True)),
                 "reference_context": {
                     "window": args.turn_chat_window,
                     "source": "rm_rp_slice_plus_short_occ_history",
@@ -478,6 +480,12 @@ def main(argv: list[str] | None = None) -> int:
         help="Ask the first turn_chat response in each player turn to include an advisory turn_plan",
     )
     parser.add_argument(
+        "--reward-posterior-evaluator",
+        action=argparse.BooleanOptionalAction,
+        default=env_bool("STS2_BENCH_REWARD_POSTERIOR_EVALUATOR", True),
+        help="For coordinator card rewards, run an evidence-only LLM deck-state posterior evaluator before OCC chooses",
+    )
+    parser.add_argument(
         "--character",
         default=env_str("STS2_BENCH_CHARACTER", "Ironclad"),
         choices=["Ironclad", "Silent", "Defect", "Regent", "Necrobinder"],
@@ -560,6 +568,7 @@ def main(argv: list[str] | None = None) -> int:
             turn_chat_update_mode=args.turn_chat_update_mode,
             turn_chat_assistant_history=args.turn_chat_assistant_history,
             turn_chat_plan_enabled=args.turn_chat_plan,
+            reward_posterior_evaluator_enabled=args.reward_posterior_evaluator,
         )
         for seed in seeds:
             result = run_one(

@@ -22,6 +22,7 @@ from .context import (
     power_label,
     render_state_text,
 )
+from .route_graph import build_route_graph
 from .sequences import normalize_card_sequence_payload
 
 
@@ -314,6 +315,7 @@ def build_llm_prompt(
             json.dumps([action.to_prompt_dict() for action in legal_actions], ensure_ascii=False, separators=(",", ":")),
         ]
     )
+    parts.extend(_route_graph_prompt_lines(state, legal_actions))
     if include_json:
         parts.extend(
             [
@@ -347,6 +349,7 @@ def build_turn_initial_user_message(
             _legal_actions_text(legal_actions),
         ]
     )
+    parts.extend(_route_graph_prompt_lines(state, legal_actions))
     return "\n".join(parts)
 
 
@@ -378,6 +381,7 @@ def build_turn_update_user_message(state: dict[str, Any], legal_actions: list[Le
             _legal_actions_text(legal_actions),
         ]
     )
+    lines.extend(_route_graph_prompt_lines(state, legal_actions))
     return "\n".join(lines)
 
 
@@ -395,7 +399,20 @@ def build_view_update_user_message(state: dict[str, Any], legal_actions: list[Le
             _legal_actions_text(legal_actions),
         ]
     )
+    lines.extend(_route_graph_prompt_lines(state, legal_actions))
     return "\n".join(lines)
+
+
+def _route_graph_prompt_lines(state: dict[str, Any], legal_actions: list[LegalAction]) -> list[str]:
+    full_map = state.get("full_map")
+    if not isinstance(full_map, dict) or full_map.get("type") != "map":
+        return []
+    route_graph = build_route_graph(full_map, state.get("choices", []) or [], legal_actions=legal_actions)
+    return [
+        "",
+        "Route graph JSON:",
+        json.dumps(route_graph, ensure_ascii=False, separators=(",", ":")),
+    ]
 
 
 def build_compact_assistant_message(action: LegalAction, parsed: dict[str, Any]) -> str:
@@ -642,21 +659,21 @@ def _prompt_header(prompt_style: PromptStyle, *, turn_plan_enabled: bool = False
         "Card damage and block values shown in the state are engine preview values after currently visible player modifiers such as Strength, Dexterity, Frail, Weak, and card-specific temporary effects; do not apply those visible modifiers to shown card damage or block a second time.",
         "If all visible enemy intents are non-attack intents, enemies are not making attack damage this turn; block usually expires at end of turn, so avoid spending energy only for block unless another effect justifies it.",
         "View deck/map/pile actions do not advance the game state. They are information requests logged separately; use them when deck composition, pile contents, path context, or current position could affect the decision.",
-        'For map_select decisions with a selected map action, include a top-level "route_plan_event" object when creating, following, or changing a route plan. Missing route_plan_event on a map action is invalid.',
+        "Evidence context, when present, is advisory only. Evidence modules do not score, rank, recommend, or choose actions; current game state and legal_actions are always authoritative.",
+        'For map_select decisions with a selected map action, include a top-level "route_plan_event" object only when creating or changing a route plan. When executing the active plan next node, omit route_plan_event.',
         'Use route_plan_event {"type":"route_plan_created","new_plan":[{"col":<int>,"row":<int>,"type":"<room type>"}],"reason_tags":["<tag>"],"reason":"<why this route>"} when no active route exists.',
-        'Use route_plan_event {"type":"route_plan_followed","reason":"<why the active route is still valid>"} when selecting the active plan next node.',
-        'Use route_plan_event {"type":"route_plan_updated","new_plan":[{"col":<int>,"row":<int>,"type":"<room type>"}],"reason_tags":["low_hp|map_changed|avoid_elite|route_override"],"reason":"<why not follow the old route>"} before selecting a different route.',
-        "A route_plan_event new_plan may be a short verified prefix; if you are not certain about later topology, include only the selected legal map node.",
-        "If your previous new_plan only contained the selected node, that plan has no remaining active next node after the move; on the next map_select, emit route_plan_created again, not route_plan_followed or route_plan_updated.",
-        "Every node you include in new_plan must be copied exactly from the current full map snapshot: exact col, row, and type strings such as Unknown or RestSite. Do not infer hidden room types and do not rename RestSite to Rest or Unknown to Event.",
-        "The first route_plan_event new_plan node must match the selected legal map action. Current legal_actions are the final execution authority; non-topological route moves are allowed only when the selected map action is currently legal. If a newly exposed map changes the route, include reason_tags containing map_changed.",
+        'Use route_plan_event {"type":"route_plan_updated","old_plan_remaining":[{"col":<int>,"row":<int>,"type":"<room type>"}],"new_plan":[{"col":<int>,"row":<int>,"type":"<room type>"}],"reason_tags":["low_hp|map_changed|avoid_elite|route_override"],"reason":"<why not follow the old route>"} before selecting a different route.',
+        "A route_plan_event new_plan must be the complete visible route from the selected legal map node to a visible terminal node in the current Route graph JSON.",
+        "With Winged Boots, new_plan may contain at most three disconnected jumps, but every disconnected jump must still move forward to a later row.",
+        "Every node you include in new_plan must be copied exactly from Route graph JSON nodes: exact col, row, and type strings such as Unknown or RestSite. Do not infer hidden room types and do not rename RestSite to Rest or Unknown to Event.",
+        "The first route_plan_event new_plan node must match the selected legal map action. Current legal_actions are the final execution authority. If a newly exposed map changes the route, include reason_tags containing map_changed.",
     ]
     turn_plan_rules = _turn_plan_header_rules() if turn_plan_enabled else []
 
     if prompt_style == "analysis":
         route_plan_schema = (
-            '"route_plan_event":{"type":"<required for map_select map actions: '
-            'route_plan_created|route_plan_followed|route_plan_updated>",'
+            '"route_plan_event":{"type":"<for route plan changes: '
+            'route_plan_created|route_plan_updated; omit when executing active plan>",'
             '"new_plan":[{"col":<integer>,"row":<integer>,"type":"<exact current map type>"}],'
             '"reason_tags":["<tag>"],"reason":"<route reason>"}'
         )
@@ -667,7 +684,11 @@ def _prompt_header(prompt_style: PromptStyle, *, turn_plan_enabled: bool = False
             '"pros":"<why it helps>","cons":"<main risk or cost>"}],'
             '"action_id":<integer>,"selected_action_label":"<copy exact chosen legal action label>",'
             '"sequence":[{"card_index":<integer>,"target_index":<integer if needed>}],'
+            '"combat_notes":["<optional factual combat observation, no advice>"],'
             f"{route_plan_schema},"
+            '"evidence_refs":[<candidate action_id integers from Evidence context if used>],'
+            '"run_plan_patch":{},"run_memory_facts":[],'
+            '"no_context_change_reason":"<why no RunContext change is needed, when applicable>",'
             '"reason":"<final concise reason>"}'
         )
         if turn_plan_enabled:
@@ -682,7 +703,11 @@ def _prompt_header(prompt_style: PromptStyle, *, turn_plan_enabled: bool = False
                 '"pros":"<why it helps>","cons":"<main risk or cost>"}],'
                 '"action_id":<integer>,"selected_action_label":"<copy exact chosen legal action label>",'
                 '"sequence":[{"card_index":<integer>,"target_index":<integer if needed>}],'
+                '"combat_notes":["<optional factual combat observation, no advice>"],'
                 f"{route_plan_schema},"
+                '"evidence_refs":[<candidate action_id integers from Evidence context if used>],'
+                '"run_plan_patch":{},"run_memory_facts":[],'
+                '"no_context_change_reason":"<why no RunContext change is needed, when applicable>",'
                 '"reason":"<final concise reason>"}'
             )
         return [
@@ -699,15 +724,19 @@ def _prompt_header(prompt_style: PromptStyle, *, turn_plan_enabled: bool = False
         ]
 
     route_plan_schema = (
-        '"route_plan_event": {"type": "<required for map_select map actions: '
-        'route_plan_created|route_plan_followed|route_plan_updated>", '
+        '"route_plan_event": {"type": "<for route plan changes: '
+        'route_plan_created|route_plan_updated; omit when executing active plan>", '
         '"new_plan": [{"col": <integer>, "row": <integer>, "type": "<exact current map type>"}], '
         '"reason_tags": ["<tag>"], "reason": "<route reason>"}'
     )
     schema = (
         '{"action_id": <integer>, "selected_action_label": "<copy exact chosen legal action label>", '
         '"sequence": [{"card_index": <integer>, "target_index": <integer if needed>}], '
+        '"combat_notes": ["<optional factual combat observation, no advice>"], '
         f"{route_plan_schema}, "
+        '"evidence_refs": [<candidate action_id integers from Evidence context if used>], '
+        '"run_plan_patch": {}, "run_memory_facts": [], '
+        '"no_context_change_reason": "<why no RunContext change is needed, when applicable>", '
         '"reason": "<short reason>"}'
     )
     if turn_plan_enabled:
@@ -718,7 +747,11 @@ def _prompt_header(prompt_style: PromptStyle, *, turn_plan_enabled: bool = False
             '"replan_if": ["<state change that invalidates the plan>"]}, '
             '"action_id": <integer>, "selected_action_label": "<copy exact chosen legal action label>", '
             '"sequence": [{"card_index": <integer>, "target_index": <integer if needed>}], '
+            '"combat_notes": ["<optional factual combat observation, no advice>"], '
             f"{route_plan_schema}, "
+            '"evidence_refs": [<candidate action_id integers from Evidence context if used>], '
+            '"run_plan_patch": {}, "run_memory_facts": [], '
+            '"no_context_change_reason": "<why no RunContext change is needed, when applicable>", '
             '"reason": "<short reason>"}'
         )
     return [

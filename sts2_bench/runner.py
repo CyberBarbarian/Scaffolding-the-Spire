@@ -22,17 +22,28 @@ from .agents import (
     TurnChatUpdateMode,
 )
 from .context import build_last_action_result, compact_state
+from .evidence import (
+    EvidenceBundle,
+    build_evidence_bundle,
+    evidence_ref_feedback,
+    validate_occ_context_contract,
+    validate_evidence_refs,
+)
+from .feedback import FeedbackBus
 from .multi_agent import CoordinatorAgent, OutOfCombatContextAgent
+from .posterior import LLMRewardPosteriorEvaluator
 from .process import Sts2Process
 from .route_plan import RoutePlanTracker
 from .sequences import execute_card_sequence
 from .sequence_validation import validate_custom_sequence
 from .run_context import RunContextStore
+from .routing import route_state
 
 
 LogLevel = Literal["metrics", "decisions", "full"]
 CUSTOM_SEQUENCE_VALIDATION_RETRIES = 2
 ROUTE_PLAN_VALIDATION_RETRIES = 2
+EVIDENCE_VALIDATION_RETRIES = 2
 
 
 @dataclass
@@ -149,6 +160,11 @@ def run_one(
                 allow_repeat_views=allow_repeat_views,
                 allow_custom_sequences=_allow_custom_sequences_for_agent(agent),
             )
+            evidence_bundle = build_evidence_bundle(
+                state,
+                legal_actions,
+                store=_agent_run_context_store(agent),
+            )
             prompt = agent.build_prompt(state, legal_actions) if print_prompts or log_level == "full" else None
             if logger:
                 decision_entry = _decision_log_entry(
@@ -157,6 +173,7 @@ def run_one(
                     state=state,
                     legal_actions=legal_actions,
                     prompt=prompt,
+                    evidence_bundle=evidence_bundle,
                 )
                 if decision_entry:
                     logger.write(decision_entry)
@@ -193,6 +210,7 @@ def run_one(
                 lang=lang,
                 sequence_probe_factory=sequence_probe_factory,
                 route_plan_tracker=route_plan_tracker,
+                evidence_bundle=evidence_bundle,
             )
             if validation_error:
                 result.invalid_states += 1
@@ -285,18 +303,79 @@ def _choose_action_with_runner_validation(
     lang: str,
     sequence_probe_factory: Callable[[], Sts2Process] | None,
     route_plan_tracker: RoutePlanTracker,
+    evidence_bundle: EvidenceBundle,
 ) -> tuple[LegalAction, dict[str, Any], str | None]:
-    validation_retries = 0
-    route_plan_validation_retries = 0
+    feedback_bus = FeedbackBus(
+        step=step,
+        decision=decision,
+        evidence_bundle_hash=evidence_bundle.bundle_hash(),
+        retry_limits={
+            "custom_sequence_validation": CUSTOM_SEQUENCE_VALIDATION_RETRIES,
+            "route_plan_validation": ROUTE_PLAN_VALIDATION_RETRIES,
+            "evidence_validation": EVIDENCE_VALIDATION_RETRIES,
+        },
+    )
     while True:
         action, meta = agent.choose(state, legal_actions, prompt=prompt)
         if not isinstance(action, LegalAction):
             raise TypeError("Agent returned a non-LegalAction")
+        meta = {
+            **meta,
+            "evidence_bundle_hash": evidence_bundle.bundle_hash(),
+            "deck_summary_visible": evidence_bundle.deck_summary_visible,
+            "full_deck_details_visible": evidence_bundle.full_deck_details_visible,
+            "deck_details_visible": evidence_bundle.deck_details_visible,
+            "skip_action_visible": evidence_bundle.skip_action_visible,
+        }
+        if feedback_bus.events:
+            meta["feedback_events"] = feedback_bus.meta_events()
         if meta.get("fallback"):
             result.model_fallback_count += 1
 
         if print_model_output:
             _print_model_output(step=step, decision=decision, action=action, meta=meta)
+
+        evidence_error = None
+        evidence_error_code = "invalid_evidence_refs"
+        parsed = meta.get("parsed") if isinstance(meta.get("parsed"), dict) else None
+        if isinstance(parsed, dict):
+            evidence_error = validate_evidence_refs(parsed, evidence_bundle)
+            if evidence_error is None:
+                evidence_error = validate_occ_context_contract(
+                    parsed,
+                    action,
+                    active_agent=_active_agent_for_validation(state, meta),
+                )
+                evidence_error_code = "missing_no_context_change_reason"
+        if evidence_error is not None:
+            event = feedback_bus.make_event(
+                kind="evidence_validation",
+                validator="evidence_refs" if evidence_error_code == "invalid_evidence_refs" else "occ_context_contract",
+                code=evidence_error_code,
+                message=evidence_ref_feedback(evidence_error),
+                action=action,
+                details={"reason": evidence_error},
+            )
+            if logger:
+                logger.write(
+                    feedback_bus.trace_entry(
+                        event,
+                        entry_type="evidence_validation_error",
+                        reason=evidence_error,
+                    )
+                )
+            if not feedback_bus.dispatch_retry(
+                agent=agent,
+                state=state,
+                action=action,
+                meta=meta,
+                event=event,
+                legal_actions=legal_actions,
+                result_extra=result.extra,
+                result_extra_key="evidence_validation_retry_count",
+            ):
+                return action, meta, f"evidence validation failed: {evidence_error}"
+            continue
 
         if logger:
             logger.write(_action_log_entry(log_level=log_level, step=step, decision=decision, action=action, meta=meta))
@@ -310,26 +389,34 @@ def _choose_action_with_runner_validation(
         )
         if route_plan_result.error is not None:
             error = route_plan_result.error
+            event = feedback_bus.make_event(
+                kind="route_plan_validation",
+                validator="route_plan",
+                code=error.code,
+                message=error.feedback,
+                action=action,
+                details={"reason": error.message, "event": error.event},
+            )
             if logger:
                 logger.write(
-                    {
-                        "type": "route_plan_validation_error",
-                        "step": step,
-                        "code": error.code,
-                        "reason": error.message,
-                        "event": error.event,
-                        "retry": route_plan_validation_retries,
-                        "retryable": route_plan_validation_retries < ROUTE_PLAN_VALIDATION_RETRIES,
-                    }
+                    feedback_bus.trace_entry(
+                        event,
+                        entry_type="route_plan_validation_error",
+                        reason=error.message,
+                        event=error.event,
+                    )
                 )
-            if route_plan_validation_retries >= ROUTE_PLAN_VALIDATION_RETRIES:
+            if not feedback_bus.dispatch_retry(
+                agent=agent,
+                state=state,
+                action=action,
+                meta=meta,
+                event=event,
+                legal_actions=legal_actions,
+                result_extra=result.extra,
+                result_extra_key="route_plan_validation_retry_count",
+            ):
                 return action, meta, f"route plan validation failed: {error.code}: {error.message}"
-
-            route_plan_validation_retries += 1
-            result.extra["route_plan_validation_retry_count"] = (
-                int(result.extra.get("route_plan_validation_retry_count") or 0) + 1
-            )
-            _send_external_feedback(agent, state, action, meta, error.feedback, legal_actions)
             continue
 
         if route_plan_result.events:
@@ -358,32 +445,33 @@ def _choose_action_with_runner_validation(
         if validation_error is None:
             return action, meta, None
 
+        event = feedback_bus.make_event(
+            kind="custom_sequence_validation",
+            validator="custom_sequence",
+            message=_custom_sequence_feedback(validation_error),
+            action=action,
+            details={"reason": validation_error, "sequence": sequence_payload},
+        )
         if logger:
             logger.write(
-                {
-                    "type": "custom_sequence_validation_error",
-                    "step": step,
-                    "reason": validation_error,
-                    "sequence": sequence_payload,
-                    "retry": validation_retries,
-                    "retryable": validation_retries < CUSTOM_SEQUENCE_VALIDATION_RETRIES,
-                }
+                feedback_bus.trace_entry(
+                    event,
+                    entry_type="custom_sequence_validation_error",
+                    reason=validation_error,
+                    sequence=sequence_payload,
+                )
             )
-        if validation_retries >= CUSTOM_SEQUENCE_VALIDATION_RETRIES:
+        if not feedback_bus.dispatch_retry(
+            agent=agent,
+            state=state,
+            action=action,
+            meta=meta,
+            event=event,
+            legal_actions=legal_actions,
+            result_extra=result.extra,
+            result_extra_key="custom_sequence_validation_retry_count",
+        ):
             return action, meta, validation_error
-
-        validation_retries += 1
-        result.extra["custom_sequence_validation_retry_count"] = (
-            int(result.extra.get("custom_sequence_validation_retry_count") or 0) + 1
-        )
-        _send_external_feedback(
-            agent,
-            state,
-            action,
-            meta,
-            _custom_sequence_feedback(validation_error),
-            legal_actions,
-        )
 
 
 def _prepare_custom_sequence_action(
@@ -447,19 +535,6 @@ def _prepare_custom_sequence_action(
     )
 
 
-def _send_external_feedback(
-    agent: Agent,
-    state: dict[str, Any],
-    action: LegalAction,
-    meta: dict[str, Any],
-    feedback: str,
-    legal_actions: list[LegalAction],
-) -> None:
-    receive = getattr(agent, "receive_external_feedback", None)
-    if callable(receive):
-        receive(state, action, meta, feedback, legal_actions)
-
-
 def _custom_sequence_feedback(validation_error: str) -> str:
     return (
         f"Your previous response was invalid: custom sequence validation failed: {validation_error}. "
@@ -510,6 +585,21 @@ def _reset_agent_episode(agent: Agent) -> None:
 
 def _allow_custom_sequences_for_agent(agent: Agent) -> bool:
     return not isinstance(agent, RandomAgent)
+
+
+def _agent_run_context_store(agent: Agent) -> RunContextStore | None:
+    if isinstance(agent, CoordinatorAgent):
+        return agent.store
+    if isinstance(agent, OutOfCombatContextAgent):
+        return agent.store
+    return None
+
+
+def _active_agent_for_validation(state: dict[str, Any], meta: dict[str, Any]) -> str | None:
+    active_agent = meta.get("active_agent")
+    if active_agent in {"ca", "occ", "none"}:
+        return str(active_agent)
+    return route_state(state).active_agent
 
 
 def _record_agent_transition(
@@ -654,6 +744,7 @@ def _decision_log_entry(
     state: dict[str, Any],
     legal_actions: list[LegalAction],
     prompt: str | None,
+    evidence_bundle: EvidenceBundle | None = None,
 ) -> dict[str, Any] | None:
     if log_level == "metrics":
         return None
@@ -666,15 +757,25 @@ def _decision_log_entry(
     map_snapshot = _map_snapshot_for_trace(state)
     if map_snapshot is not None:
         entry["map_snapshot"] = map_snapshot
+    if evidence_bundle is not None:
+        entry["evidence_bundle_hash"] = evidence_bundle.bundle_hash()
+        entry["deck_summary_visible"] = evidence_bundle.deck_summary_visible
+        entry["full_deck_details_visible"] = evidence_bundle.full_deck_details_visible
+        entry["deck_details_visible"] = evidence_bundle.deck_details_visible
+        entry["skip_action_visible"] = evidence_bundle.skip_action_visible
     if log_level == "full":
         entry["state"] = compact_state(state)
         entry["legal_actions"] = [action.to_prompt_dict() for action in legal_actions]
+        if evidence_bundle is not None:
+            entry["evidence_bundle"] = evidence_bundle.to_dict()
         if prompt is not None:
             entry["prompt"] = prompt
         return entry
 
     entry["state"] = _state_summary(state)
     entry["legal_actions"] = [_legal_action_summary(action) for action in legal_actions]
+    if evidence_bundle is not None:
+        entry["evidence_bundle"] = evidence_bundle.summary_dict()
     return entry
 
 
@@ -786,17 +887,38 @@ def _agent_meta_summary(meta: dict[str, Any]) -> dict[str, Any]:
         "fallback_action_id",
         "error",
         "usage",
+        "evidence_bundle_hash",
+        "deck_summary_visible",
+        "full_deck_details_visible",
+        "deck_details_visible",
+        "skip_action_visible",
+        "feedback_events",
+        "reward_posterior_evaluator",
+        "reward_posterior_model",
+        "reward_posterior_attempt",
+        "reward_posterior_elapsed_sec",
+        "reward_posterior_prompt_chars",
+        "reward_posterior_evaluation_hash",
+        "reward_posterior_evaluation_visible",
+        "reward_posterior_usage",
         "run_context_patch",
         "run_context_hash",
     ):
         if key in meta and meta[key] is not None:
             summary[key] = meta[key]
+    posterior = meta.get("reward_posterior_evaluation")
+    if isinstance(posterior, dict):
+        summary["reward_posterior_evaluation"] = {
+            "mode": posterior.get("mode"),
+            "candidate_analysis_count": len(posterior.get("candidate_deck_analyses") or []),
+            "global_uncertainty_count": len(posterior.get("global_uncertainties") or []),
+        }
 
     parsed = meta.get("parsed")
     if isinstance(parsed, dict):
         summary["parsed"] = {
             key: parsed[key]
-            for key in ("action_id", "reason", "route_plan_event")
+            for key in ("action_id", "reason", "route_plan_event", "evidence_refs", "no_context_change_reason")
             if key in parsed
         }
     return summary
@@ -879,6 +1001,7 @@ def agent_from_args(
     turn_chat_update_mode: TurnChatUpdateMode = "delta",
     turn_chat_assistant_history: TurnChatAssistantHistory = "compact",
     turn_chat_plan_enabled: bool = False,
+    reward_posterior_evaluator_enabled: bool = True,
 ) -> Agent:
     if kind == "random":
         if conversation_mode != "single_turn":
@@ -937,9 +1060,19 @@ def agent_from_args(
                 turn_chat_assistant_history=turn_chat_assistant_history,
                 turn_chat_plan_enabled=False,
             )
+            reward_posterior_evaluator = (
+                LLMRewardPosteriorEvaluator(occ_inner, max_retries=llm_max_retries)
+                if reward_posterior_evaluator_enabled
+                else None
+            )
             return CoordinatorAgent(
                 ca_agent=ca_agent,
-                occ_agent=OutOfCombatContextAgent(occ_inner, store, history_window=turn_chat_window),
+                occ_agent=OutOfCombatContextAgent(
+                    occ_inner,
+                    store,
+                    history_window=turn_chat_window,
+                    reward_posterior_evaluator=reward_posterior_evaluator,
+                ),
                 store=store,
                 fallback_mode=llm_fallback_mode,
             )

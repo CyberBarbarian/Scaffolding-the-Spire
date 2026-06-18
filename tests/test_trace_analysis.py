@@ -2,6 +2,7 @@ import json
 import re
 
 from sts2_bench.actions import LegalAction
+from sts2_bench.evidence import build_evidence_bundle
 from sts2_bench.runner import _decision_log_entry
 from sts2_bench.trace_analysis import analyze_trace
 
@@ -135,6 +136,63 @@ def test_decision_log_entry_records_map_snapshot_outside_state():
     assert entry["map_snapshot"]["type"] == "map"
     assert "full_map" not in entry["state"]
     assert "map_snapshot" not in entry["state"]
+
+
+def test_decision_log_entry_records_evidence_summary_flags():
+    state = _state(
+        "card_reward",
+        act=1,
+        floor=2,
+        room="Monster",
+        hp=70,
+        cards=[{"index": 0, "name": "Twin Strike"}],
+        can_skip=True,
+        player={
+            "hp": 70,
+            "max_hp": 80,
+            "gold": 100,
+            "deck_size": 3,
+            "deck": [
+                {"id": "CARD.STRIKE", "name": "Strike", "type": "Attack", "cost": 1},
+                {"id": "CARD.STRIKE", "name": "Strike", "type": "Attack", "cost": 1},
+                {"id": "CARD.DEFEND", "name": "Defend", "type": "Skill", "cost": 1},
+            ],
+        },
+    )
+    legal_actions = [
+        LegalAction(
+            action_id=0,
+            label="pick card 0: Twin Strike",
+            command={"cmd": "action", "action": "select_card_reward", "args": {"card_index": 0}},
+            kind="card_reward",
+        ),
+        LegalAction(
+            action_id=1,
+            label="skip card reward",
+            command={"cmd": "action", "action": "skip_card_reward"},
+            kind="card_reward_skip",
+        ),
+    ]
+    evidence_bundle = build_evidence_bundle(state, legal_actions)
+
+    entry = _decision_log_entry(
+        log_level="decisions",
+        step=0,
+        state=state,
+        legal_actions=legal_actions,
+        prompt=None,
+        evidence_bundle=evidence_bundle,
+    )
+
+    assert entry["evidence_bundle_hash"] == evidence_bundle.bundle_hash()
+    assert entry["deck_summary_visible"] is True
+    assert entry["full_deck_details_visible"] is False
+    assert entry["deck_details_visible"] is False
+    assert entry["skip_action_visible"] is True
+    assert entry["evidence_bundle"]["candidate_count"] == 2
+    assert entry["evidence_bundle"]["deck_summary_visible"] is True
+    assert entry["evidence_bundle"]["deck_group_count"] == 2
+    assert entry["evidence_bundle"]["decision_type"] == "card_reward"
 
 
 def test_analyze_trace_writes_replay_metrics_and_high_risk_events(tmp_path):
@@ -388,6 +446,68 @@ def test_analyze_trace_writes_replay_metrics_and_high_risk_events(tmp_path):
     event_types = {event["type"] for event in report["high_risk_events"]}
     assert "low_hp_elite_selected" in event_types
     assert "low_hp_safe_route_ignored" in event_types
+
+
+def test_route_hp_replay_splits_dense_room_labels(tmp_path):
+    trace_path = tmp_path / "dense_route_labels.jsonl"
+    out_dir = tmp_path / "analysis"
+    room_types = [
+        "Monster",
+        "Monster",
+        "RestSite",
+        "Monster",
+        "Elite",
+        "Treasure",
+        "Monster",
+        "Event",
+        "Monster",
+        "RestSite",
+        "Monster",
+        "Boss",
+    ]
+    losses = [4, 3, 0, 5, 8, 0, 4, 0, 7, 0, 9, 40]
+    rows = [{"type": "start", "seed": "seed-a", "character": "Ironclad", "ascension": 0}]
+    hp = 80
+    step = 0
+    for index, (room_type, loss) in enumerate(zip(room_types, losses), start=1):
+        label = f"go to {room_type} at col=0 row={index}"
+        map_action = _map_action(0, label, 0, index)
+        rows.append(_decision(step, _state("map_select", act=1, floor=index, room="Map", hp=hp), [map_action]))
+        rows.append(_action(step, "map_select", label, "map", command=map_action["cmd"]))
+        rows.append(_decision(step + 1, _state("combat_play", act=1, floor=index, room=room_type, hp=hp), []))
+        hp = max(0, hp - loss)
+        rows.append(_action(step + 1, "combat_play", "end turn", "combat_end_turn"))
+        step += 2
+    rows.append(
+        {
+            "type": "result",
+            "result": {
+                "seed": "seed-a",
+                "character": "Ironclad",
+                "ascension": 0,
+                "victory": False,
+                "decision": "game_over",
+                "act": 1,
+                "floor": len(room_types),
+                "room_type": room_types[-1],
+                "hp": hp,
+                "max_hp": 80,
+                "error": None,
+                "truncated": False,
+            },
+        }
+    )
+    _write_jsonl(trace_path, rows)
+
+    analyze_trace(trace_path, out_dir)
+    route_hp_svg = (out_dir / "route_hp_replay.svg").read_text(encoding="utf-8")
+
+    assert 'class="hp-room-label"' in route_hp_svg
+    assert 'class="loss-floor-label"' in route_hp_svg
+    assert 'class="loss-room-label"' in route_hp_svg
+    assert 'class="loss-label" x="' not in route_hp_svg
+    assert "F12 Boss -40" in route_hp_svg
+    assert "40-&gt;0" in route_hp_svg
 
 
 def test_hp_timeline_reads_flat_hp_from_decisions_log(tmp_path):
@@ -1067,9 +1187,10 @@ def test_map_path_svg_uses_full_map_snapshot_when_available(tmp_path):
     assert ".route-node-icon { font-size: 18px" in route_hp_svg
     assert ".route-topology-coordinate { font-size: 15px" in route_hp_svg
     assert ".selected-room-badge { font-size: 18px" in route_hp_svg
-    assert ".loss-label { font-size: 18px" in route_hp_svg
-    assert ".hp-transition-label { font-size: 19px" in route_hp_svg
-    assert ".room-index-label { font-size: 18px" in route_hp_svg
+    assert ".loss-floor-label { font-size: 15px" in route_hp_svg
+    assert ".loss-room-label { font-size: 14px" in route_hp_svg
+    assert ".hp-transition-label { font-size: 15px" in route_hp_svg
+    assert ".room-index-label { font-size: 13px" in route_hp_svg
     assert "dominant-baseline: central" in route_hp_svg
     assert 'dominant-baseline="central"' in route_hp_svg
     assert 'y="672">HP route by room' in route_hp_svg

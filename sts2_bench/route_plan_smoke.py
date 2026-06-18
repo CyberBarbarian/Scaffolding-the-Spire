@@ -6,6 +6,7 @@ import re
 from typing import Any
 
 from .actions import LegalAction
+from .route_graph import build_route_graph, node_coord as route_node_coord, normalize_map_node, route_graph_node_map
 
 
 class RoutePlanSmokeAgent:
@@ -71,11 +72,10 @@ class RoutePlanSmokeAgent:
                     "parsed": {"reason": "Follow smoke route plan node."},
                 }
 
-        selected = map_actions[0]
-        selected_node = _node_from_action(selected)
-        plan = _extend_plan_from_snapshot(selected_node, state.get("full_map"))
+        selected, plan, route_tags = _select_route(state, map_actions)
         event_type = "route_plan_updated" if self.planned_remaining or self.force_update else "route_plan_created"
         reason_tags = ["smoke_replan", "map_changed"] if event_type == "route_plan_updated" else ["smoke_start"]
+        reason_tags.extend(route_tags)
         self.planned_remaining = [dict(node) for node in plan[1:]]
         self.force_update = False
         return selected, {
@@ -86,7 +86,7 @@ class RoutePlanSmokeAgent:
                     "event_type": event_type,
                     "new_plan": plan,
                     "reason_tags": reason_tags,
-                    "reason": "Create or repair a short deterministic route for smoke validation.",
+                    "reason": "Create or repair a complete deterministic route for smoke validation.",
                 },
             },
         }
@@ -110,40 +110,173 @@ def _matching_map_action(actions: list[LegalAction], node: dict[str, Any]) -> Le
     return None
 
 
-def _extend_plan_from_snapshot(selected: dict[str, Any], snapshot: Any, *, max_nodes: int = 2) -> list[dict[str, Any]]:
-    plan = [dict(selected)]
+def _select_route(state: dict[str, Any], map_actions: list[LegalAction]) -> tuple[LegalAction, list[dict[str, Any]], list[str]]:
+    best: tuple[float, int, LegalAction, list[dict[str, Any]]] | None = None
+    for index, action in enumerate(map_actions):
+        selected = _node_from_action(action)
+        plan = _extend_plan_from_snapshot(selected, state.get("full_map"), state=state)
+        score = _score_route(plan, state)
+        candidate = (score, -index, action, plan)
+        if best is None or candidate[:2] > best[:2]:
+            best = candidate
+    assert best is not None
+    score, _index, action, plan = best
+    del score
+    return action, plan, _route_reason_tags(plan, state)
+
+
+def _extend_plan_from_snapshot(
+    selected: dict[str, Any],
+    snapshot: Any,
+    *,
+    state: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
     if not isinstance(snapshot, dict) or snapshot.get("type") != "map":
-        return plan
-    node_map = _snapshot_nodes(snapshot)
-    current = dict(selected)
-    while len(plan) < max_nodes:
-        node = node_map.get(_coord(current))
-        children = node.get("children") if isinstance(node, dict) else None
-        if not children:
-            break
-        child = _normalize_node(children[0])
+        return [dict(selected)]
+    route_graph = build_route_graph(snapshot, (state or {}).get("choices") or [])
+    node_map = route_graph_node_map(route_graph)
+    routes = _complete_routes_from_node(selected, node_map, seen={_coord(selected)})
+    if not state:
+        return routes[0]
+    return max(routes, key=lambda route: _score_route(route, state))
+
+
+def _complete_routes_from_node(
+    node: dict[str, Any],
+    node_map: dict[tuple[int, int], dict[str, Any]],
+    *,
+    seen: set[tuple[int, int]],
+) -> list[list[dict[str, Any]]]:
+    current = _decorate_known_node(node, node_map)
+    raw_node = node_map.get(_coord(current))
+    children = raw_node.get("children") if isinstance(raw_node, dict) else None
+    if not children:
+        return [[current]]
+
+    routes: list[list[dict[str, Any]]] = []
+    for raw_child in children:
+        child = _normalize_node(raw_child)
         if child is None:
-            break
-        known = node_map.get(_coord(child))
-        if isinstance(known, dict) and known.get("type") is not None:
-            child["type"] = str(known.get("type"))
-        plan.append(child)
-        current = child
-    return plan
+            continue
+        child_coord = _coord(child)
+        if child_coord in seen:
+            continue
+        for suffix in _complete_routes_from_node(child, node_map, seen={*seen, child_coord}):
+            routes.append([current, *suffix])
+    return routes or [[current]]
 
 
-def _snapshot_nodes(snapshot: dict[str, Any]) -> dict[tuple[int, int], dict[str, Any]]:
-    nodes: dict[tuple[int, int], dict[str, Any]] = {}
-    for row in snapshot.get("rows") or []:
-        for raw_node in row:
-            node = _normalize_node(raw_node)
-            if node is not None:
-                nodes[_coord(node)] = raw_node
-    boss = snapshot.get("boss")
-    node = _normalize_node(boss)
-    if node is not None and isinstance(boss, dict):
-        nodes[_coord(node)] = boss
-    return nodes
+def _decorate_known_node(node: dict[str, Any], node_map: dict[tuple[int, int], dict[str, Any]]) -> dict[str, Any]:
+    result = dict(node)
+    known = node_map.get(_coord(result))
+    if isinstance(known, dict) and known.get("type") is not None:
+        result["type"] = str(known.get("type"))
+    return result
+
+
+def _score_route(plan: list[dict[str, Any]], state: dict[str, Any]) -> float:
+    player = state.get("player") if isinstance(state.get("player"), dict) else {}
+    hp = _number(player.get("hp"), default=0.0)
+    max_hp = max(_number(player.get("max_hp"), default=80.0), 1.0)
+    gold = _number(player.get("gold"), default=0.0)
+    hp_ratio = hp / max_hp
+    low_hp = hp_ratio <= 0.35
+    healthy = hp_ratio >= 0.65
+    rich = gold >= 150
+    score = 0.0
+    for index, node in enumerate(plan):
+        room_type = str(node.get("type") or "")
+        early = max(0.0, 1.5 - (0.25 * index))
+        if low_hp:
+            score += _low_hp_room_score(room_type, gold) * early
+        elif rich:
+            score += _rich_room_score(room_type, hp_ratio) * early
+        elif healthy:
+            score += _healthy_room_score(room_type, gold) * early
+        else:
+            score += _balanced_room_score(room_type, gold) * early
+    return score
+
+
+def _low_hp_room_score(room_type: str, gold: float) -> float:
+    if room_type == "Elite":
+        return -10.0
+    if room_type == "RestSite":
+        return 8.0
+    if room_type == "Shop":
+        return 2.5 if gold >= 75 else -2.0
+    if room_type == "Treasure":
+        return 1.0
+    if room_type == "Monster":
+        return -1.0
+    return 0.0
+
+
+def _rich_room_score(room_type: str, hp_ratio: float) -> float:
+    if room_type == "Shop":
+        return 8.0
+    if room_type == "Treasure":
+        return 3.0
+    if room_type == "RestSite":
+        return 2.0
+    if room_type == "Elite":
+        return 1.5 if hp_ratio >= 0.5 else -4.0
+    if room_type == "Monster":
+        return 0.5
+    return 0.0
+
+
+def _healthy_room_score(room_type: str, gold: float) -> float:
+    if room_type == "Elite":
+        return 5.0
+    if room_type == "Treasure":
+        return 2.0
+    if room_type == "Monster":
+        return 1.0
+    if room_type == "Shop":
+        return 1.0 if gold >= 75 else -1.0
+    if room_type == "RestSite":
+        return -1.0
+    return 0.0
+
+
+def _balanced_room_score(room_type: str, gold: float) -> float:
+    if room_type == "RestSite":
+        return 4.0
+    if room_type == "Shop":
+        return 3.0 if gold >= 100 else 0.5
+    if room_type == "Treasure":
+        return 2.0
+    if room_type == "Elite":
+        return -2.0
+    if room_type == "Monster":
+        return 0.5
+    return 0.0
+
+
+def _route_reason_tags(plan: list[dict[str, Any]], state: dict[str, Any]) -> list[str]:
+    player = state.get("player") if isinstance(state.get("player"), dict) else {}
+    hp = _number(player.get("hp"), default=0.0)
+    max_hp = max(_number(player.get("max_hp"), default=80.0), 1.0)
+    gold = _number(player.get("gold"), default=0.0)
+    room_types = [str(node.get("type") or "") for node in plan]
+    tags: list[str] = []
+    if hp / max_hp <= 0.35:
+        tags.append("low_hp")
+    if gold >= 150 and "Shop" in room_types:
+        tags.append("shop_value")
+    if room_types.count("Elite") >= 2:
+        tags.append("elite_hunting")
+    if "RestSite" in room_types[:3]:
+        tags.append("early_rest")
+    return tags
+
+
+def _number(value: Any, *, default: float) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
 
 
 def _node_from_action(action: LegalAction) -> dict[str, Any]:
@@ -157,19 +290,11 @@ def _node_from_action(action: LegalAction) -> dict[str, Any]:
 
 
 def _normalize_node(value: Any) -> dict[str, Any] | None:
-    if not isinstance(value, dict):
-        return None
-    try:
-        node = {"col": int(value["col"]), "row": int(value["row"])}
-    except (KeyError, TypeError, ValueError):
-        return None
-    if value.get("type") is not None:
-        node["type"] = str(value.get("type"))
-    return node
+    return normalize_map_node(value)
 
 
 def _coord(node: dict[str, Any]) -> tuple[int, int]:
-    return int(node["col"]), int(node["row"])
+    return route_node_coord(node)
 
 
 def _room_type_from_label(label: str) -> str | None:

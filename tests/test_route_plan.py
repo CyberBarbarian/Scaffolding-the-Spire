@@ -15,13 +15,13 @@ def _map_action(action_id, room_type, col, row):
     )
 
 
-def _map_state(*, choices, full_map=None, hp=80):
+def _map_state(*, choices, full_map=None, hp=80, act=1, floor=1, relics=None):
     return {
         "decision": "map_select",
-        "act": 1,
-        "floor": 1,
-        "context": {"act": 1, "floor": 1, "room_type": "Map"},
-        "player": {"hp": hp, "max_hp": 80, "gold": 99, "deck_size": 10},
+        "act": act,
+        "floor": floor,
+        "context": {"act": act, "floor": floor, "room_type": "Map"},
+        "player": {"hp": hp, "max_hp": 80, "gold": 99, "deck_size": 10, "relics": relics or []},
         "choices": choices,
         **({"full_map": full_map} if full_map is not None else {}),
     }
@@ -92,7 +92,28 @@ def test_route_plan_created_records_topological_plan_and_remaining_route():
     assert event["active_plan"]["remaining"] == [{"col": 1, "row": 2, "type": "Elite"}]
 
 
-def test_route_plan_created_trims_invalid_future_suffix_without_rejecting_legal_move():
+def test_route_plan_created_requires_complete_visible_route():
+    tracker = RoutePlanTracker()
+    action = _map_action(0, "Monster", 0, 1)
+    state = _map_state(
+        choices=[{"col": 0, "row": 1, "type": "Monster"}],
+        full_map=_full_map(edges={(0, 0): [(0, 1)], (0, 1): [(1, 2)]}),
+    )
+
+    result = tracker.validate_and_apply(
+        state=state,
+        legal_actions=[action],
+        action=action,
+        meta={"parsed": {"route_plan_event": _event("route_plan_created", [(0, 1, "Monster")])}},
+        step=0,
+    )
+
+    assert result.error is not None
+    assert result.error.code == "route_plan_incomplete"
+    assert "complete visible route" in result.error.feedback
+
+
+def test_route_plan_created_rejects_invalid_future_suffix_in_visible_map():
     tracker = RoutePlanTracker()
     action = _map_action(5, "Monster", 1, 1)
     state = _map_state(
@@ -128,24 +149,64 @@ def test_route_plan_created_trims_invalid_future_suffix_without_rejecting_legal_
         step=195,
     )
 
-    assert result.error is None
-    event = result.events[0]
-    assert event["event_type"] == "route_plan_created"
-    assert event["route_validity"] == "partial_invalid_suffix_trimmed"
-    assert event["new_plan"] == [{"col": 1, "row": 1, "type": "Monster"}]
-    assert event["original_new_plan"] == [
-        {"col": 1, "row": 1, "type": "Monster"},
-        {"col": 1, "row": 2, "type": "Event"},
-        {"col": 1, "row": 3, "type": "Monster"},
-    ]
-    assert event["trimmed_invalid_suffix"] == [
-        {"col": 1, "row": 2, "type": "Event"},
-        {"col": 1, "row": 3, "type": "Monster"},
-    ]
-    assert event["active_plan"]["remaining"] == []
+    assert result.error is not None
+    assert result.error.code == "route_plan_topology_invalid"
 
 
-def test_route_plan_followed_is_logged_when_selected_node_matches_active_plan():
+def test_route_plan_rejects_node_type_that_does_not_match_route_graph():
+    tracker = RoutePlanTracker()
+    action = _map_action(5, "Monster", 1, 1)
+    state = _map_state(
+        choices=[{"col": 1, "row": 1, "type": "Monster"}],
+        full_map=_full_map(
+            current=(3, 0),
+            nodes={(3, 0): "Ancient", (1, 1): "Monster", (0, 2): "Unknown"},
+            edges={(3, 0): [(1, 1)], (1, 1): [(0, 2)]},
+        ),
+    )
+
+    result = tracker.validate_and_apply(
+        state=state,
+        legal_actions=[action],
+        action=action,
+        meta={
+            "parsed": {
+                "route_plan_event": _event(
+                    "route_plan_created",
+                    [(1, 1, "Monster"), (0, 2, "Event")],
+                    reason="Rename Unknown as Event.",
+                )
+            }
+        },
+        step=0,
+    )
+
+    assert result.error is not None
+    assert result.error.code == "route_plan_topology_invalid"
+    assert "exact type" in result.error.message
+
+
+def test_route_plan_missing_created_event_rejected_when_no_active_plan():
+    tracker = RoutePlanTracker()
+    action = _map_action(0, "Monster", 0, 1)
+    state = _map_state(
+        choices=[{"col": 0, "row": 1, "type": "Monster"}],
+        full_map=_full_map(edges={(0, 0): [(0, 1)], (0, 1): [(1, 2)]}),
+    )
+
+    result = tracker.validate_and_apply(
+        state=state,
+        legal_actions=[action],
+        action=action,
+        meta={"parsed": {"reason": "go to monster"}},
+        step=0,
+    )
+
+    assert result.error is not None
+    assert result.error.code == "route_plan_missing_created_event"
+
+
+def test_route_plan_execute_current_plan_consumes_next_node_without_logging_event():
     tracker = RoutePlanTracker()
     first_action = _map_action(0, "Monster", 0, 1)
     first_state = _map_state(
@@ -175,9 +236,154 @@ def test_route_plan_followed_is_logged_when_selected_node_matches_active_plan():
     )
 
     assert result.error is None
-    assert result.events[0]["event_type"] == "route_plan_followed"
-    assert result.events[0]["reason"] == "follow active route plan"
-    assert result.events[0]["active_plan"]["remaining"] == []
+    assert result.events == []
+    assert tracker.active is None
+
+
+def test_route_plan_requires_topological_route_without_winged_boots():
+    tracker = RoutePlanTracker()
+    action = _map_action(0, "Monster", 0, 1)
+    state = _map_state(
+        choices=[{"col": 0, "row": 1, "type": "Monster"}],
+        full_map=_full_map(
+            nodes={(0, 0): "Ancient", (0, 1): "Monster", (2, 2): "RestSite"},
+            edges={(0, 0): [(0, 1)]},
+        ),
+    )
+
+    result = tracker.validate_and_apply(
+        state=state,
+        legal_actions=[action],
+        action=action,
+        meta={"parsed": {"route_plan_event": _event("route_plan_created", [(0, 1, "Monster"), (2, 2, "RestSite")])}},
+        step=0,
+    )
+
+    assert result.error is not None
+    assert result.error.code == "route_plan_topology_invalid"
+
+
+def test_route_plan_allows_up_to_three_forward_jumps_with_winged_boots():
+    tracker = RoutePlanTracker()
+    action = _map_action(0, "Monster", 0, 1)
+    state = _map_state(
+        choices=[{"col": 0, "row": 1, "type": "Monster"}],
+        relics=[{"name": "Winged Boots"}],
+        full_map=_full_map(
+            nodes={
+                (0, 0): "Ancient",
+                (0, 1): "Monster",
+                (2, 2): "RestSite",
+                (1, 3): "Boss",
+            },
+            edges={(0, 0): [(0, 1)]},
+        ),
+    )
+
+    result = tracker.validate_and_apply(
+        state=state,
+        legal_actions=[action],
+        action=action,
+        meta={
+            "parsed": {
+                "route_plan_event": _event(
+                    "route_plan_created",
+                    [(0, 1, "Monster"), (2, 2, "RestSite"), (1, 3, "Boss")],
+                )
+            }
+        },
+        step=0,
+    )
+
+    assert result.error is None
+    assert result.events[0]["route_validity"] == "winged_boots_override"
+    assert result.events[0]["winged_boots_jumps_used"] == 2
+    assert result.events[0]["active_plan"]["remaining"] == [
+        {"col": 2, "row": 2, "type": "RestSite"},
+        {"col": 1, "row": 3, "type": "Boss"},
+    ]
+
+
+def test_route_plan_rejects_more_than_three_forward_jumps_with_winged_boots():
+    tracker = RoutePlanTracker()
+    action = _map_action(0, "Monster", 0, 1)
+    state = _map_state(
+        choices=[{"col": 0, "row": 1, "type": "Monster"}],
+        relics=[{"id": "winged_boots"}],
+        full_map=_full_map(
+            nodes={
+                (0, 0): "Ancient",
+                (0, 1): "Monster",
+                (2, 2): "RestSite",
+                (4, 3): "Shop",
+                (1, 4): "Treasure",
+                (3, 5): "Boss",
+            },
+            edges={(0, 0): [(0, 1)]},
+        ),
+    )
+
+    result = tracker.validate_and_apply(
+        state=state,
+        legal_actions=[action],
+        action=action,
+        meta={
+            "parsed": {
+                "route_plan_event": _event(
+                    "route_plan_created",
+                    [
+                        (0, 1, "Monster"),
+                        (2, 2, "RestSite"),
+                        (4, 3, "Shop"),
+                        (1, 4, "Treasure"),
+                        (3, 5, "Boss"),
+                    ],
+                )
+            }
+        },
+        step=0,
+    )
+
+    assert result.error is not None
+    assert result.error.code == "route_plan_topology_invalid"
+    assert "at most three" in result.error.message
+
+
+def test_route_plan_rejects_non_forward_winged_boots_jumps():
+    tracker = RoutePlanTracker()
+    action = _map_action(0, "Monster", 0, 1)
+    state = _map_state(
+        choices=[{"col": 0, "row": 1, "type": "Monster"}],
+        relics=[{"name": "Winged Boots"}],
+        full_map=_full_map(
+            nodes={
+                (0, 0): "Ancient",
+                (0, 1): "Monster",
+                (2, 1): "Shop",
+                (1, 2): "Boss",
+            },
+            edges={(0, 0): [(0, 1)]},
+        ),
+    )
+
+    result = tracker.validate_and_apply(
+        state=state,
+        legal_actions=[action],
+        action=action,
+        meta={
+            "parsed": {
+                "route_plan_event": _event(
+                    "route_plan_created",
+                    [(0, 1, "Monster"), (2, 1, "Shop"), (1, 2, "Boss")],
+                )
+            }
+        },
+        step=0,
+    )
+
+    assert result.error is not None
+    assert result.error.code == "route_plan_topology_invalid"
+    assert "move forward" in result.error.message
 
 
 def test_route_plan_deviation_without_update_is_rejected():
@@ -321,7 +527,58 @@ def test_route_plan_update_allowed_when_map_revision_changes_and_new_plan_is_leg
     assert result.events[0]["trigger"] == "map_changed"
 
 
-def test_non_topological_but_legal_first_step_is_logged_as_override():
+def test_route_plan_created_allowed_when_map_revision_changes_and_stale_next_coord_is_legal():
+    tracker = RoutePlanTracker()
+    first_snapshot = _full_map(
+        current=(0, 0),
+        nodes={(0, 0): "Ancient", (1, 1): "Monster", (0, 2): "Elite"},
+        edges={(0, 0): [(1, 1)], (1, 1): [(0, 2)]},
+    )
+    first_action = _map_action(0, "Monster", 1, 1)
+    tracker.validate_and_apply(
+        state=_map_state(choices=[{"col": 1, "row": 1, "type": "Monster"}], full_map=first_snapshot),
+        legal_actions=[first_action],
+        action=first_action,
+        meta={"parsed": {"route_plan_event": _event("route_plan_created", [(1, 1, "Monster"), (0, 2, "Elite")])}},
+        step=0,
+    )
+    changed_snapshot = _full_map(
+        current=(0, 1),
+        nodes={(0, 1): "Ancient", (0, 2): "Monster", (2, 2): "Shop"},
+        edges={(0, 1): [(0, 2), (2, 2)]},
+    )
+    selected = _map_action(5, "Shop", 2, 2)
+    stale_next_is_still_legal = _map_action(6, "Monster", 0, 2)
+
+    result = tracker.validate_and_apply(
+        state=_map_state(
+            choices=[{"col": 2, "row": 2, "type": "Shop"}, {"col": 0, "row": 2, "type": "Monster"}],
+            full_map=changed_snapshot,
+            act=2,
+            floor=1,
+        ),
+        legal_actions=[selected, stale_next_is_still_legal],
+        action=selected,
+        meta={
+            "parsed": {
+                "route_plan_event": _event(
+                    "route_plan_created",
+                    [(2, 2, "Shop")],
+                    reason_tags=["map_changed", "shop"],
+                )
+            }
+        },
+        step=1,
+    )
+
+    assert result.error is None
+    assert result.events[0]["event_type"] == "route_plan_created"
+    assert result.events[0]["old_plan_remaining"] == [{"col": 0, "row": 2, "type": "Elite"}]
+    assert result.events[0]["trigger"] == "map_changed"
+    assert result.events[0]["active_plan"]["remaining"] == []
+
+
+def test_non_topological_but_legal_first_step_is_rejected_without_winged_boots():
     tracker = RoutePlanTracker()
     action = _map_action(0, "Shop", 2, 1)
     state = _map_state(
@@ -337,9 +594,8 @@ def test_non_topological_but_legal_first_step_is_logged_as_override():
         step=0,
     )
 
-    assert result.error is None
-    assert result.events[0]["route_validity"] == "requires_override"
-    assert result.events[0]["override_used"] is True
+    assert result.error is not None
+    assert result.error.code == "route_plan_topology_invalid"
 
 
 def test_route_plan_event_json_is_serializable():
@@ -362,7 +618,10 @@ def test_route_plan_event_json_is_serializable():
 
 
 def test_map_prompt_instructs_llm_to_emit_route_plan_event():
-    state = _map_state(choices=[{"col": 0, "row": 1, "type": "Monster"}])
+    state = _map_state(
+        choices=[{"col": 0, "row": 1, "type": "Monster"}],
+        full_map=_full_map(edges={(0, 0): [(0, 1)]}),
+    )
     action = _map_action(0, "Monster", 0, 1)
 
     prompt = build_llm_prompt(state, [action])
@@ -370,9 +629,13 @@ def test_map_prompt_instructs_llm_to_emit_route_plan_event():
     assert "route_plan_event" in prompt
     assert "route_plan_created" in prompt
     assert "route_plan_updated" in prompt
-    assert "route_plan_followed" in prompt
+    assert "route_plan_followed" not in prompt
+    assert "omit route_plan_event" in prompt
     assert "new_plan" in prompt
     assert "reason_tags" in prompt
+    assert "Route graph JSON:" in prompt
+    assert '"node_key":"0:1"' in prompt
+    assert "Route graph exact nodes:" not in prompt
 
 
 class _RoutePlanScriptAgent:
@@ -421,7 +684,7 @@ def _read_jsonl(path):
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
-def test_runner_logs_route_plan_created_and_followed_events(tmp_path):
+def test_runner_logs_route_plan_created_and_silent_execution(tmp_path):
     first_map = _full_map(edges={(0, 0): [(0, 1)], (0, 1): [(1, 2)]})
     second_map = _full_map(current=(0, 1), edges={(0, 1): [(1, 2)]})
     process = _RoutePlanProcess(
@@ -452,8 +715,7 @@ def test_runner_logs_route_plan_created_and_followed_events(tmp_path):
 
     assert result.error is None
     events = [row for row in _read_jsonl(out) if row.get("type") == "route_plan_event"]
-    assert [event["event_type"] for event in events] == ["route_plan_created", "route_plan_followed"]
-    assert events[1]["reason"] == "follow active route plan"
+    assert [event["event_type"] for event in events] == ["route_plan_created"]
 
 
 def test_runner_reasks_when_map_choice_deviates_without_route_plan_update(tmp_path):

@@ -9,9 +9,17 @@ from dataclasses import dataclass
 from typing import Any
 
 from .actions import LegalAction
+from .route_graph import (
+    build_route_graph,
+    node_coord as route_node_coord,
+    normalize_map_node,
+    route_graph_current_coord,
+    route_graph_edges,
+    route_graph_node_map,
+)
 
 
-ROUTE_PLAN_EVENT_TYPES = {"route_plan_created", "route_plan_followed", "route_plan_updated"}
+ROUTE_PLAN_EVENT_TYPES = {"route_plan_created", "route_plan_updated"}
 
 
 @dataclass
@@ -33,12 +41,14 @@ class ActiveRoutePlan:
     plan_id: str
     remaining: list[dict[str, Any]]
     map_revision: str | None
+    act: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "plan_id": self.plan_id,
             "remaining": [dict(node) for node in self.remaining],
             "based_on_map_revision": self.map_revision,
+            "act": self.act,
         }
 
 
@@ -81,6 +91,9 @@ class RoutePlanTracker:
         legal_nodes = _legal_map_nodes(state, legal_actions)
         map_snapshot = _map_snapshot(state)
         map_revision = map_revision_for_state(state)
+        state_act = _state_act(state)
+        winged_boots_available = _has_winged_boots(state)
+        act_changed = bool(self.active and self.active.act is not None and state_act is not None and self.active.act != state_act)
         map_changed = bool(
             self.active
             and self.active.map_revision
@@ -89,23 +102,13 @@ class RoutePlanTracker:
         )
 
         if self.active and self.active.remaining:
-            planned_next = self.active.remaining[0]
-            if _coord(planned_next) not in legal_nodes:
-                if not map_changed:
-                    return RoutePlanValidationResult(
-                        [],
-                        self._error(
-                            "route_plan_invalid_next_not_legal",
-                            "The active route plan's next node is not in current legal_actions.",
-                            event=event,
-                        ),
-                    )
-                if event is None or event.get("event_type") != "route_plan_updated":
+            if act_changed:
+                if event is None or event.get("event_type") not in {"route_plan_created", "route_plan_updated"}:
                     return RoutePlanValidationResult(
                         [],
                         self._error(
                             "route_plan_invalid_after_map_change",
-                            "The map revision changed and the old plan no longer matches legal_actions; emit route_plan_updated.",
+                            "The act changed; emit route_plan_created or route_plan_updated with reason_tags containing map_changed.",
                             event=event,
                         ),
                     )
@@ -114,14 +117,74 @@ class RoutePlanTracker:
                         [],
                         self._error(
                             "route_plan_update_missing_map_changed_reason",
-                            "Route update after a changed map must include reason_tags containing map_changed.",
+                            "Route change after a changed map must include reason_tags containing map_changed.",
                             event=event,
                         ),
                     )
+                return self._apply_created_or_updated(
+                    event,
+                    event_type=event.get("event_type"),
+                    selected=selected,
+                    legal_nodes=legal_nodes,
+                    map_snapshot=map_snapshot,
+                    map_revision=map_revision,
+                    map_changed=True,
+                    act=state_act,
+                    winged_boots_available=winged_boots_available,
+                    step=step,
+                )
+
+            planned_next = self.active.remaining[0]
+            if _coord(planned_next) not in legal_nodes:
+                if map_changed:
+                    if event is None or event.get("event_type") != "route_plan_updated":
+                        return RoutePlanValidationResult(
+                            [],
+                            self._error(
+                                "route_plan_invalid_after_map_change",
+                                "The map revision changed and the old plan no longer matches legal_actions; emit route_plan_updated.",
+                                event=event,
+                            ),
+                        )
+                    if "map_changed" not in event.get("reason_tags", []):
+                        return RoutePlanValidationResult(
+                            [],
+                            self._error(
+                                "route_plan_update_missing_map_changed_reason",
+                                "Route update after a changed map must include reason_tags containing map_changed.",
+                                event=event,
+                            ),
+                        )
+                    return self._apply_created_or_updated(
+                        event,
+                        event_type="route_plan_updated",
+                        selected=selected,
+                        legal_nodes=legal_nodes,
+                        map_snapshot=map_snapshot,
+                        map_revision=map_revision,
+                        map_changed=True,
+                        act=state_act,
+                        winged_boots_available=winged_boots_available,
+                        step=step,
+                    )
+                return RoutePlanValidationResult(
+                    [],
+                    self._error(
+                        "route_plan_invalid_next_not_legal",
+                        "The active route plan's next node is not in current legal_actions.",
+                        event=event,
+                    ),
+                )
 
         if self.active is None or not self.active.remaining:
             if event is None:
-                return RoutePlanValidationResult([])
+                return RoutePlanValidationResult(
+                    [],
+                    self._error(
+                        "route_plan_missing_created_event",
+                        "No active route plan exists; emit route_plan_created before selecting a map node.",
+                    ),
+                )
             if event.get("event_type") != "route_plan_created":
                 return RoutePlanValidationResult(
                     [],
@@ -139,6 +202,8 @@ class RoutePlanTracker:
                 map_snapshot=map_snapshot,
                 map_revision=map_revision,
                 map_changed=False,
+                act=state_act,
+                winged_boots_available=winged_boots_available,
                 step=step,
             )
 
@@ -153,21 +218,9 @@ class RoutePlanTracker:
                         "Selected map node is outside the active route plan and no route_plan_updated event was emitted.",
                     ),
                 )
-            return self._apply_followed(selected=selected, map_revision=map_revision, step=step)
+            return self._consume_followed(map_revision=map_revision, act=state_act)
 
         event_type = event.get("event_type")
-        if event_type == "route_plan_followed":
-            if not selected_matches_plan:
-                return RoutePlanValidationResult(
-                    [],
-                    self._error(
-                        "route_plan_followed_wrong_node",
-                        "route_plan_followed selected a node different from the active plan's next node.",
-                        event=event,
-                    ),
-                )
-            return self._apply_followed(selected=selected, map_revision=map_revision, step=step, source_event=event)
-
         if event_type == "route_plan_updated":
             return self._apply_created_or_updated(
                 event,
@@ -177,6 +230,8 @@ class RoutePlanTracker:
                 map_snapshot=map_snapshot,
                 map_revision=map_revision,
                 map_changed=map_changed,
+                act=state_act,
+                winged_boots_available=winged_boots_available,
                 step=step,
             )
 
@@ -184,7 +239,7 @@ class RoutePlanTracker:
             [],
             self._error(
                 "route_plan_unexpected_event_type",
-                "Active route plans can only be followed or updated at map_select.",
+                "Active route plans can only be executed silently or changed with route_plan_updated at map_select.",
                 event=event,
             ),
         )
@@ -199,6 +254,8 @@ class RoutePlanTracker:
         map_snapshot: dict[str, Any] | None,
         map_revision: str | None,
         map_changed: bool,
+        act: int | None,
+        winged_boots_available: bool,
         step: int,
     ) -> RoutePlanValidationResult:
         plan = _normalize_plan(event.get("new_plan") or event.get("plan") or event.get("route"))
@@ -228,37 +285,34 @@ class RoutePlanTracker:
             )
 
         decorated_plan = [_merge_known_node_type(node, legal_nodes) for node in plan]
-        original_decorated_plan = [dict(node) for node in decorated_plan]
-        trimmed_invalid_suffix: list[dict[str, Any]] = []
-        topology = _validate_plan_topology(decorated_plan, map_snapshot)
+        topology = _validate_plan_topology(
+            decorated_plan,
+            map_snapshot,
+            winged_boots_available=winged_boots_available,
+        )
         if topology["route_validity"] == "invalid":
-            trimmed_plan, trimmed_invalid_suffix = _trim_invalid_future_suffix(decorated_plan, map_snapshot)
-            if not trimmed_plan:
-                return RoutePlanValidationResult(
-                    [],
-                    self._error(
-                        "route_plan_topology_invalid",
-                        "new_plan references nodes that are absent from the current map snapshot.",
-                        event=event,
-                    ),
-                )
-            decorated_plan = trimmed_plan
-            topology = _validate_plan_topology(decorated_plan, map_snapshot)
-            if topology["route_validity"] == "invalid":
-                return RoutePlanValidationResult(
-                    [],
-                    self._error(
-                        "route_plan_topology_invalid",
-                        "new_plan references nodes that are absent from the current map snapshot.",
-                        event=event,
-                    ),
-                )
-            topology = {**topology, "route_validity": "partial_invalid_suffix_trimmed"}
+            return RoutePlanValidationResult(
+                [],
+                self._error(
+                    "route_plan_topology_invalid",
+                    topology.get("reason") or "new_plan is not a valid route through the current map snapshot.",
+                    event=event,
+                ),
+            )
+        if topology["route_validity"] == "incomplete":
+            return RoutePlanValidationResult(
+                [],
+                self._error(
+                    "route_plan_incomplete",
+                    topology.get("reason") or "new_plan must include the complete visible route from the selected node.",
+                    event=event,
+                ),
+            )
 
         old_remaining = self.active.remaining if self.active else []
         plan_id = self._allocate_plan_id() if event_type == "route_plan_created" else (self.active.plan_id if self.active else self._allocate_plan_id())
         remaining = [dict(node) for node in decorated_plan[1:]]
-        active_for_log = ActiveRoutePlan(plan_id=plan_id, remaining=remaining, map_revision=map_revision)
+        active_for_log = ActiveRoutePlan(plan_id=plan_id, remaining=remaining, map_revision=map_revision, act=act)
         logged = {
             "type": "route_plan_event",
             "event_type": event_type,
@@ -274,42 +328,27 @@ class RoutePlanTracker:
             "map_revision": map_revision,
             "active_plan": active_for_log.to_dict(),
         }
-        if trimmed_invalid_suffix:
-            logged["original_new_plan"] = original_decorated_plan
-            logged["trimmed_invalid_suffix"] = trimmed_invalid_suffix
-            logged["trimmed_invalid_suffix_count"] = len(trimmed_invalid_suffix)
+        if topology.get("winged_boots_jumps_used"):
+            logged["winged_boots_jumps_used"] = topology["winged_boots_jumps_used"]
         self.active = active_for_log if remaining else None
         return RoutePlanValidationResult([logged])
 
-    def _apply_followed(
+    def _consume_followed(
         self,
         *,
-        selected: dict[str, Any],
         map_revision: str | None,
-        step: int,
-        source_event: dict[str, Any] | None = None,
+        act: int | None,
     ) -> RoutePlanValidationResult:
         assert self.active is not None
-        old_remaining = [dict(node) for node in self.active.remaining]
         remaining = [dict(node) for node in self.active.remaining[1:]]
         active_for_log = ActiveRoutePlan(
             plan_id=self.active.plan_id,
             remaining=remaining,
             map_revision=map_revision or self.active.map_revision,
+            act=act if act is not None else self.active.act,
         )
-        logged = {
-            "type": "route_plan_event",
-            "event_type": "route_plan_followed",
-            "step": step,
-            "selected_node": selected,
-            "old_plan_remaining": old_remaining,
-            "reason_tags": (source_event or {}).get("reason_tags", []),
-            "reason": (source_event or {}).get("reason") or "follow active route plan",
-            "map_revision": map_revision,
-            "active_plan": active_for_log.to_dict(),
-        }
         self.active = active_for_log if remaining else None
-        return RoutePlanValidationResult([logged])
+        return RoutePlanValidationResult([])
 
     def _allocate_plan_id(self) -> str:
         plan_id = f"rp_{self._next_plan_id:03d}"
@@ -338,10 +377,54 @@ def map_revision_for_state(state: dict[str, Any]) -> str | None:
     payload = {
         "rows": snapshot.get("rows"),
         "boss": snapshot.get("boss"),
-        "current_coord": snapshot.get("current_coord"),
     }
     raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:12]
+
+
+def _state_act(state: dict[str, Any]) -> int | None:
+    value = state.get("act")
+    if value is None and isinstance(state.get("context"), dict):
+        value = state["context"].get("act")
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _has_winged_boots(state: dict[str, Any]) -> bool:
+    relics: list[Any] = []
+    player = state.get("player")
+    if isinstance(player, dict):
+        relics.extend(player.get("relics") or [])
+    relics.extend(state.get("relics") or [])
+    for relic in relics:
+        if _relic_matches_winged_boots(relic):
+            return True
+    return False
+
+
+def _relic_matches_winged_boots(relic: Any) -> bool:
+    values: list[Any]
+    if isinstance(relic, dict):
+        values = [
+            relic.get("id"),
+            relic.get("key"),
+            relic.get("name"),
+            relic.get("title"),
+            relic.get("display_name"),
+        ]
+        for nested in list(values):
+            if isinstance(nested, dict):
+                values.extend(nested.values())
+    else:
+        values = [relic]
+    for value in values:
+        text = str(value or "").strip().lower()
+        normalized = re.sub(r"[\s_-]+", "", text)
+        if normalized == "wingedboots" or "winged boots" in text or "\u7fbd\u7ffc\u4e4b\u9774" in text:
+            return True
+    return False
 
 
 def _normalize_route_plan_event(value: Any) -> dict[str, Any] | None:
@@ -371,13 +454,8 @@ def _normalize_plan(value: Any) -> list[dict[str, Any]]:
 def _normalize_node(value: Any) -> dict[str, Any] | None:
     if not isinstance(value, dict):
         return None
-    col = value.get("col")
-    row = value.get("row")
-    if col is None or row is None:
-        return None
-    try:
-        node = {"col": int(col), "row": int(row)}
-    except (TypeError, ValueError):
+    node = normalize_map_node(value)
+    if node is None:
         return None
     if value.get("type") is not None:
         node["type"] = str(value.get("type"))
@@ -426,68 +504,125 @@ def _merge_known_node_type(node: dict[str, Any], legal_nodes: dict[tuple[int, in
     return merged
 
 
-def _validate_plan_topology(plan: list[dict[str, Any]], snapshot: dict[str, Any] | None) -> dict[str, Any]:
+def _validate_plan_topology(
+    plan: list[dict[str, Any]],
+    snapshot: dict[str, Any] | None,
+    *,
+    winged_boots_available: bool,
+) -> dict[str, Any]:
+    base = {"override_used": False, "winged_boots_jumps_used": 0}
     if snapshot is None:
-        return {"route_validity": "unknown", "override_used": False}
+        return {"route_validity": "unknown", **base}
     node_map, edges = _snapshot_graph(snapshot)
     if not node_map:
-        return {"route_validity": "unknown", "override_used": False}
+        return {"route_validity": "unknown", **base}
     plan_coords = [_coord(node) for node in plan]
     if any(coord not in node_map for coord in plan_coords):
-        return {"route_validity": "invalid", "override_used": False}
+        return {
+            "route_validity": "invalid",
+            **base,
+            "reason": "new_plan references nodes that are absent from the current route_graph.",
+        }
+    for node in plan:
+        coord = _coord(node)
+        known_type = node_map.get(coord, {}).get("type")
+        if known_type is None:
+            continue
+        submitted_type = node.get("type")
+        if submitted_type is None:
+            return {
+                "route_validity": "invalid",
+                **base,
+                "reason": "Every new_plan node must include the exact type from the current route_graph.",
+            }
+        if str(submitted_type) != str(known_type):
+            return {
+                "route_validity": "invalid",
+                **base,
+                "reason": (
+                    "new_plan node type must match the exact type from the current route_graph; "
+                    f"node {coord} used {submitted_type!r} but route_graph has {known_type!r}."
+                ),
+            }
 
-    route_validity = "topological"
-    override_used = False
+    jumps_used = 0
     current = _current_coord(snapshot)
     if current is not None and plan_coords:
-        if plan_coords[0] not in edges.get(current, set()):
-            route_validity = "requires_override"
-            override_used = True
+        transition = _validate_route_transition(
+            current,
+            plan_coords[0],
+            edges,
+            winged_boots_available=winged_boots_available,
+        )
+        if transition["route_validity"] == "invalid":
+            return transition
+        jumps_used += transition["winged_boots_jumps_used"]
     for prev, nxt in zip(plan_coords, plan_coords[1:]):
-        if nxt not in edges.get(prev, set()):
-            route_validity = "requires_override"
-    return {"route_validity": route_validity, "override_used": override_used}
+        transition = _validate_route_transition(
+            prev,
+            nxt,
+            edges,
+            winged_boots_available=winged_boots_available,
+        )
+        if transition["route_validity"] == "invalid":
+            return transition
+        jumps_used += transition["winged_boots_jumps_used"]
+        if jumps_used > 3:
+            return {
+                "route_validity": "invalid",
+                "override_used": True,
+                "winged_boots_jumps_used": jumps_used,
+                "reason": "Winged Boots permits at most three disconnected forward jumps in one route plan.",
+            }
+
+    if plan_coords and any(child in node_map for child in edges.get(plan_coords[-1], set())):
+        return {
+            "route_validity": "incomplete",
+            "override_used": bool(jumps_used),
+            "winged_boots_jumps_used": jumps_used,
+            "reason": "new_plan must include the complete visible route from the selected node to a visible terminal node.",
+        }
+
+    return {
+        "route_validity": "winged_boots_override" if jumps_used else "topological",
+        "override_used": bool(jumps_used),
+        "winged_boots_jumps_used": jumps_used,
+    }
 
 
-def _trim_invalid_future_suffix(
-    plan: list[dict[str, Any]], snapshot: dict[str, Any] | None
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    if snapshot is None:
-        return plan, []
-    node_map, _edges = _snapshot_graph(snapshot)
-    if not node_map:
-        return plan, []
-    valid_prefix: list[dict[str, Any]] = []
-    for index, node in enumerate(plan):
-        if _coord(node) not in node_map:
-            return valid_prefix, [dict(item) for item in plan[index:]]
-        valid_prefix.append(dict(node))
-    return valid_prefix, []
+def _validate_route_transition(
+    previous: tuple[int, int],
+    next_coord: tuple[int, int],
+    edges: dict[tuple[int, int], set[tuple[int, int]]],
+    *,
+    winged_boots_available: bool,
+) -> dict[str, Any]:
+    if next_coord in edges.get(previous, set()):
+        return {"route_validity": "topological", "override_used": False, "winged_boots_jumps_used": 0}
+    if not winged_boots_available:
+        return {
+            "route_validity": "invalid",
+            "override_used": False,
+            "winged_boots_jumps_used": 0,
+            "reason": "new_plan contains disconnected nodes; only Winged Boots can bridge disconnected route nodes.",
+        }
+    if next_coord[1] <= previous[1]:
+        return {
+            "route_validity": "invalid",
+            "override_used": True,
+            "winged_boots_jumps_used": 0,
+            "reason": "Winged Boots route jumps must still move forward to a later map row.",
+        }
+    return {"route_validity": "winged_boots_override", "override_used": True, "winged_boots_jumps_used": 1}
 
 
 def _snapshot_graph(snapshot: dict[str, Any]) -> tuple[dict[tuple[int, int], dict[str, Any]], dict[tuple[int, int], set[tuple[int, int]]]]:
-    node_map: dict[tuple[int, int], dict[str, Any]] = {}
-    edges: dict[tuple[int, int], set[tuple[int, int]]] = {}
-    for row_nodes in snapshot.get("rows") or []:
-        for raw_node in row_nodes:
-            node = _normalize_node(raw_node)
-            if node is None:
-                continue
-            coord = _coord(node)
-            node_map[coord] = raw_node
-            for child in raw_node.get("children") or []:
-                child_node = _normalize_node(child)
-                if child_node is not None:
-                    edges.setdefault(coord, set()).add(_coord(child_node))
-    boss = _normalize_node(snapshot.get("boss") or {})
-    if boss is not None:
-        node_map[_coord(boss)] = snapshot.get("boss") or {}
-    return node_map, edges
+    graph = build_route_graph(snapshot, [])
+    return route_graph_node_map(graph), route_graph_edges(graph)
 
 
 def _current_coord(snapshot: dict[str, Any]) -> tuple[int, int] | None:
-    current = _normalize_node(snapshot.get("current_coord") or {})
-    return _coord(current) if current else None
+    return route_graph_current_coord(build_route_graph(snapshot, []))
 
 
 def _map_snapshot(state: dict[str, Any]) -> dict[str, Any] | None:
@@ -498,7 +633,7 @@ def _map_snapshot(state: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def _coord(node: dict[str, Any]) -> tuple[int, int]:
-    return (int(node["col"]), int(node["row"]))
+    return route_node_coord(node)
 
 
 def _room_type_from_label(label: str) -> str | None:
@@ -510,25 +645,32 @@ def _route_plan_feedback(code: str, message: str) -> str:
     missing_created_hint = ""
     if code == "route_plan_missing_created_event":
         missing_created_hint = (
-            "There is no active route to follow or update. This often happens after a short one-node new_plan "
-            "was consumed by the previous map move. For this retry, do not emit route_plan_followed or "
-            "route_plan_updated; emit route_plan_created with a new_plan whose first and possibly only node is "
-            "the selected legal map node. "
+            "There is no active route to execute or update. For this retry, emit route_plan_created with a "
+            "complete visible new_plan whose first node is the selected legal map node. "
         )
     topology_hint = ""
     if code == "route_plan_topology_invalid":
         topology_hint = (
-            "Do not include inferred or remembered future nodes that are absent from the current full map snapshot. "
-            "If uncertain, make new_plan contain only the selected legal map node. "
+            "Do not include inferred or remembered future nodes that are absent from the current route_graph. "
+            "Copy each new_plan node's exact col, row, and type from route_graph.nodes. "
+            "Every adjacent pair in new_plan must be connected by the map unless Winged Boots is available; with "
+            "Winged Boots, at most three disconnected jumps are allowed and every jump must move forward to a later row. "
+        )
+    incomplete_hint = ""
+    if code == "route_plan_incomplete":
+        incomplete_hint = (
+            "A map route_plan_event is a full visible route commitment, not a one-step prefix. Continue the new_plan "
+            "through the current route_graph until the selected path reaches a visible terminal node. "
         )
     return (
         f"Your previous map choice violated route-plan validation ({code}): {message} "
         f"{missing_created_hint}"
         f"{topology_hint}"
-        "If you have no active route plan, emit route_plan_created with a non-empty new_plan whose first node is the selected legal map node. "
-        "If you are following the active route, choose the planned next node. "
+        f"{incomplete_hint}"
+        "If you have no active route plan, emit route_plan_created with a complete visible new_plan whose first node is the selected legal map node. "
+        "If you are executing the active route, choose the planned next node and do not emit route_plan_event. "
         "If you need to change route, emit route_plan_updated with old_plan_remaining, new_plan, reason_tags, and reason; "
-        "the new_plan first node must be in current legal_actions. "
+        "the new_plan must be complete and its first node must be in current legal_actions. "
         "If the map changed, include reason_tags containing map_changed. Then choose again."
     )
 

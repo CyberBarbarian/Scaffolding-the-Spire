@@ -1240,7 +1240,8 @@ def _write_route_hp_replay_svg(report: dict[str, Any], path: Path) -> None:
 
     map_choices = report.get("map_choices") or []
     has_full_map = any(isinstance(choice.get("map_snapshot"), dict) for choice in map_choices)
-    width = max(1280 if has_full_map else 1180, 96 * len(rooms) + 160)
+    room_label_slot_width = _route_hp_label_slot_width(rooms)
+    width = max(1280 if has_full_map else 1180, room_label_slot_width * len(rooms) + 160)
     height = 1120 if has_full_map else 820
     margin_left, margin_right = 76, 110
     map_top, map_bottom = (72, 650) if has_full_map else (72, 330)
@@ -1351,13 +1352,16 @@ def _write_route_hp_replay_svg(report: dict[str, Any], path: Path) -> None:
             hp_shapes.append(f'<circle cx="{x:.1f}" cy="{y_entry:.1f}" r="5.5" fill="#fff" stroke="{color}" stroke-width="2.4"/>')
             hp_shapes.append(f'<circle cx="{x:.1f}" cy="{y_exit:.1f}" r="7" fill="{color}" stroke="{severity_color}" stroke-width="2.4"/>')
             hp_exit_points.append((x, y_exit))
-            label = f"F{room.get('floor')} {room_type} -{loss}"
-            hp_transition = f"{entry}->{exit_hp}"
             labels.append(
-                f'<text class="loss-label" x="{x:.1f}" y="{hp_top - 34}" text-anchor="middle">{html.escape(label)}</text>'
-            )
-            labels.append(
-                f'<text class="hp-transition-label" x="{x:.1f}" y="{hp_top - 14}" text-anchor="middle">{html.escape(hp_transition)}</text>'
+                _route_hp_room_label_svg(
+                    x=x,
+                    y=hp_top - 52,
+                    room=room,
+                    room_type=room_type,
+                    loss=loss,
+                    entry=entry,
+                    exit_hp=exit_hp,
+                )
             )
         labels.append(
             f'<text class="room-index-label" x="{x:.1f}" y="{height - 24}" text-anchor="middle">#{int(room_index)}</text>'
@@ -1424,9 +1428,10 @@ text {{ font-family: Arial, sans-serif; font-size: 15px; fill: #222; }}
 .same-floor-coordinate {{ font-size: 15px; fill: #555; paint-order: stroke; stroke: white; stroke-width: 4px; }}
 .selected-room-badge {{ font-size: 18px; font-weight: 700; fill: #111; paint-order: stroke; stroke: white; stroke-width: 5px; }}
 .room-hp-segment {{ stroke-linecap: round; }}
-.loss-label {{ font-size: 18px; font-weight: 700; fill: #222; paint-order: stroke; stroke: white; stroke-width: 5px; }}
-.hp-transition-label {{ font-size: 19px; fill: #555; paint-order: stroke; stroke: white; stroke-width: 5px; }}
-.room-index-label {{ font-size: 18px; font-weight: 700; fill: #555; }}
+.loss-floor-label {{ font-size: 15px; font-weight: 700; fill: #222; paint-order: stroke; stroke: white; stroke-width: 5px; }}
+.loss-room-label {{ font-size: 14px; font-weight: 700; fill: #222; paint-order: stroke; stroke: white; stroke-width: 5px; }}
+.hp-transition-label {{ font-size: 15px; fill: #555; paint-order: stroke; stroke: white; stroke-width: 5px; }}
+.room-index-label {{ font-size: 13px; font-weight: 700; fill: #555; }}
 .hp-axis-label {{ font-size: 14px; fill: #555; }}
 </style>
 <rect width="100%" height="100%" fill="#fff"/>
@@ -1454,6 +1459,45 @@ text {{ font-family: Arial, sans-serif; font-size: 15px; fill: #222; }}
 </svg>
 """
     path.write_text(svg, encoding="utf-8")
+
+
+def _route_hp_label_slot_width(rooms: list[dict[str, Any]]) -> int:
+    width = 126
+    for room in rooms:
+        room_type = str(room.get("room_type") or "?")
+        loss = int(room.get("hp_loss") or 0)
+        detail = f"{room_type} -{loss}"
+        transition = ""
+        if room.get("entry_hp") is not None and room.get("exit_hp") is not None:
+            transition = f"{room.get('entry_hp')}->{room.get('exit_hp')}"
+        width = max(width, int(max(len(detail) * 8.4 + 32, len(transition) * 7.6 + 28)))
+    return width
+
+
+def _route_hp_room_label_svg(
+    *,
+    x: float,
+    y: float,
+    room: dict[str, Any],
+    room_type: str,
+    loss: int,
+    entry: Any,
+    exit_hp: Any,
+) -> str:
+    floor = str(room.get("floor"))
+    full_label = f"F{floor} {room_type} -{loss}"
+    room_label = f"{room_type} -{loss}"
+    hp_transition = f"{entry}->{exit_hp}"
+    title = f"{full_label} {hp_transition}"
+    room_index = room.get("room_index")
+    return (
+        f'<g class="hp-room-label" data-room-index="{html.escape(str(room_index))}">'
+        f"<title>{html.escape(title)}</title>"
+        f'<text class="loss-floor-label" x="{x:.1f}" y="{y:.1f}" text-anchor="middle">F{html.escape(floor)}</text>'
+        f'<text class="loss-room-label" x="{x:.1f}" y="{y + 18:.1f}" text-anchor="middle">{html.escape(room_label)}</text>'
+        f'<text class="hp-transition-label" x="{x:.1f}" y="{y + 38:.1f}" text-anchor="middle">{html.escape(hp_transition)}</text>'
+        "</g>"
+    )
 
 
 def _action_drop_markers(items: list[dict[str, Any]]) -> list[tuple[dict[str, Any], dict[str, Any], float]]:
