@@ -117,6 +117,7 @@ class RunContextStore:
         owner: str,
         state: dict[str, Any],
         action: LegalAction,
+        run_plan_route_plan_enabled: bool = True,
     ) -> dict[str, Any]:
         """Validate and apply an agent-supplied RM/RP patch.
 
@@ -140,9 +141,13 @@ class RunContextStore:
         mandates_added = 0
         combat_reports_added = 0
 
+        ignored_plan_updates: list[str] = []
         if plan_patch is not None:
             if not isinstance(plan_patch, dict):
                 raise ValueError("run_plan_patch must be an object")
+            if not run_plan_route_plan_enabled and "route_plan" in plan_patch:
+                plan_patch = {key: value for key, value in plan_patch.items() if key != "route_plan"}
+                ignored_plan_updates.append("route_plan")
             unsupported = sorted(set(plan_patch) - PLAN_PATCH_KEYS)
             if unsupported:
                 raise ValueError(f"Unsupported run_plan_patch keys: {', '.join(unsupported)}")
@@ -156,7 +161,10 @@ class RunContextStore:
             self.run_memory.combat_reports.append(self._decorate_entry(report, owner, state, action))
             combat_reports_added += 1
 
-        return self._summary(True, plan_updates, facts_added, mandates_added, combat_reports_added)
+        summary = self._summary(True, plan_updates, facts_added, mandates_added, combat_reports_added)
+        if ignored_plan_updates:
+            summary["ignored_run_plan_updates"] = ignored_plan_updates
+        return summary
 
     def _apply_plan_patch(
         self,
@@ -222,16 +230,28 @@ class RunContextStore:
         }
 
 
-def render_out_of_combat_context(store: RunContextStore, state: dict[str, Any]) -> str:
+def render_out_of_combat_context(
+    store: RunContextStore,
+    state: dict[str, Any],
+    *,
+    run_plan_route_plan_enabled: bool = True,
+) -> str:
     context = store.context_slice(state)
     plan = context["run_plan"]
     memory = context["run_memory"]
+    plan_text_fields = ["build_plan", "resource_policy"]
+    if run_plan_route_plan_enabled:
+        plan_text_fields.insert(0, "route_plan")
+    allowed_patch_keys = [*plan_text_fields, "open_threads", "delayed_effects", "pending_mandates"]
+    map_event_update_keys = ["resource_policy", "open_threads", "delayed_effects", "pending_mandates"]
+    if run_plan_route_plan_enabled:
+        map_event_update_keys.insert(0, "route_plan")
     lines = [
         "Out-of-combat controller context:",
         f"snapshot_hash: {context['snapshot_hash']}",
         "RunPlan:",
     ]
-    for key in ("route_plan", "build_plan", "resource_policy"):
+    for key in plan_text_fields:
         value = plan.get(key) or "(empty)"
         lines.append(f"- {key}: {value}")
     for key in ("open_threads", "delayed_effects"):
@@ -259,9 +279,9 @@ def render_out_of_combat_context(store: RunContextStore, state: dict[str, Any]) 
             "Return one legal action_id, selected_action_label, reason, evidence_refs, run_plan_patch, run_memory_facts, and no_context_change_reason.",
             'Use "run_plan_patch": {} and "run_memory_facts": [] when nothing should change.',
             "When run_plan_patch is empty for a real OCC non-view action, include no_context_change_reason instead of inventing a plan update.",
-            "For map/event choices, update route_plan, resource_policy, open_threads, delayed_effects, or pending_mandates as relevant.",
+            f"For map/event choices, update {', '.join(map_event_update_keys[:-1])}, or {map_event_update_keys[-1]} as relevant.",
             "For shops, update resource_policy as relevant. Card reward decisions use a separate history-free reward context and do not update build_plan.",
-            "Allowed run_plan_patch keys: route_plan, build_plan, resource_policy, open_threads, delayed_effects, pending_mandates.",
+            f"Allowed run_plan_patch keys: {', '.join(allowed_patch_keys)}.",
             "Do not mutate RM/RP directly; the coordinator validates and commits patches.",
         ]
     )

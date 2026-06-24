@@ -138,6 +138,88 @@ def test_decision_log_entry_records_map_snapshot_outside_state():
     assert "map_snapshot" not in entry["state"]
 
 
+def test_decision_log_entry_records_enemy_snapshot_outside_compact_state():
+    state = _state(
+        "combat_play",
+        act=1,
+        floor=2,
+        room="Monster",
+        hp=70,
+        enemies=[
+            {
+                "index": 0,
+                "name": "Jaw Worm",
+                "hp": 33,
+                "max_hp": 40,
+                "block": 5,
+                "move_name": "Chomp",
+                "intents": [{"type": "Attack", "damage": 7, "hits": 2}],
+                "powers": [{"name": "Strength", "amount": 2, "type": "Buff"}],
+            }
+        ],
+    )
+
+    entry = _decision_log_entry(
+        log_level="decisions",
+        step=0,
+        state=state,
+        legal_actions=[],
+        prompt=None,
+    )
+
+    assert "enemies" not in entry["state"]
+    assert entry["state"]["enemy_count"] == 1
+    assert entry["enemy_snapshot"] == [
+        {
+            "index": 0,
+            "name": "Jaw Worm",
+            "hp": 33,
+            "max_hp": 40,
+            "block": 5,
+            "intent": "Attack 7x2",
+            "intents": [{"type": "Attack", "damage": 7, "hits": 2, "total_damage": 14, "text": "Attack 7x2"}],
+            "move_name": "Chomp",
+            "powers": [{"name": "Strength", "amount": 2, "type": "Buff"}],
+        }
+    ]
+
+
+def test_decision_log_entry_records_nested_combat_enemy_snapshot():
+    state = _state(
+        "card_select",
+        act=2,
+        floor=7,
+        room="Elite",
+        hp=27,
+        combat={
+            "enemies": [
+                {
+                    "index": 0,
+                    "name": "Entomancer",
+                    "hp": 1,
+                    "max_hp": 145,
+                    "block": 0,
+                    "move_name": "Attack",
+                    "intents": [{"type": "Attack", "damage": 28, "hits": 1}],
+                }
+            ]
+        },
+    )
+
+    entry = _decision_log_entry(
+        log_level="decisions",
+        step=289,
+        state=state,
+        legal_actions=[],
+        prompt=None,
+    )
+
+    assert entry["state"]["enemy_count"] == 0
+    assert entry["enemy_snapshot"][0]["name"] == "Entomancer"
+    assert entry["enemy_snapshot"][0]["intent"] == "Attack 28"
+    assert entry["enemy_snapshot"][0]["intents"][0]["total_damage"] == 28
+
+
 def test_decision_log_entry_records_evidence_summary_flags():
     state = _state(
         "card_reward",

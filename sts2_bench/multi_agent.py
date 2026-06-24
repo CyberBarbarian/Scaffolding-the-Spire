@@ -23,6 +23,7 @@ class OutOfCombatContextAgent:
     store: RunContextStore
     history_window: int = 6
     reward_posterior_evaluator: Any | None = None
+    run_plan_route_plan_enabled: bool = True
     history: list[dict[str, str]] = field(default_factory=list)
     _last_reward_context: dict[str, Any] = field(default_factory=dict, init=False, repr=False)
 
@@ -50,7 +51,11 @@ class OutOfCombatContextAgent:
             [
                 base_prompt,
                 render_evidence_context(evidence_bundle),
-                render_out_of_combat_context(self.store, state),
+                render_out_of_combat_context(
+                    self.store,
+                    state,
+                    run_plan_route_plan_enabled=self.run_plan_route_plan_enabled,
+                ),
                 _render_occ_history(self.history),
             ]
         )
@@ -170,6 +175,7 @@ class CoordinatorAgent:
     occ_agent: Agent
     store: RunContextStore = field(default_factory=RunContextStore)
     fallback_mode: FallbackMode = "error"
+    run_plan_route_plan_enabled: bool = True
 
     def build_prompt(self, state: dict[str, Any], legal_actions: list[LegalAction]) -> str:
         route = route_state(state)
@@ -274,7 +280,13 @@ class CoordinatorAgent:
             summary["ignored_patch_keys"] = sorted(_present_context_patch_keys(parsed))
             return summary
         try:
-            return self.store.apply_agent_patch(parsed, owner=owner, state=state, action=action)
+            return self.store.apply_agent_patch(
+                parsed,
+                owner=owner,
+                state=state,
+                action=action,
+                run_plan_route_plan_enabled=self.run_plan_route_plan_enabled,
+            )
         except ValueError as exc:
             return {
                 "applied": False,
@@ -305,6 +317,7 @@ class CoordinatorAgent:
             owner=owner,
             state=state,
             action=action,
+            run_plan_route_plan_enabled=self.run_plan_route_plan_enabled,
         )
 
     def _empty_patch_summary(self) -> dict[str, Any]:
@@ -382,6 +395,12 @@ def _merge_patch_summaries(first: dict[str, Any], second: dict[str, Any]) -> dic
             *list(first.get("ignored_patch_keys") or []),
             *list(second.get("ignored_patch_keys") or []),
         ]
+    ignored_run_plan_updates = [
+        *list(first.get("ignored_run_plan_updates") or []),
+        *list(second.get("ignored_run_plan_updates") or []),
+    ]
+    if ignored_run_plan_updates:
+        merged["ignored_run_plan_updates"] = ignored_run_plan_updates
     return merged
 
 

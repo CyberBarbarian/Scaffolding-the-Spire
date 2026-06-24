@@ -209,6 +209,42 @@ def test_combat_reward_exposes_skip_and_potion_discard_shortcuts():
     } == {0, 2}
 
 
+def test_combat_reward_blocks_reclaiming_skipped_card_reward():
+    state = {
+        "decision": "combat_reward",
+        "rewards": [
+            {"index": 0, "kind": "card_reward", "can_claim": True, "can_skip": True},
+            {"index": 1, "kind": "gold", "amount": 12, "can_claim": True},
+        ],
+    }
+
+    actions = build_legal_actions(state, blocked_card_reward_claims={0})
+
+    assert not any(
+        action.kind == "combat_reward" and action.command["args"]["reward_index"] == 0
+        for action in actions
+    )
+    assert any(
+        action.kind == "combat_reward_skip" and action.command["args"]["reward_index"] == 0
+        for action in actions
+    )
+    assert any(action.kind == "combat_reward" and action.command["args"]["reward_index"] == 1 for action in actions)
+
+
+def test_combat_reward_blocks_reindexed_card_reward_after_skip():
+    state = {
+        "decision": "combat_reward",
+        "rewards": [
+            {"index": 0, "kind": "card_reward", "can_claim": True, "can_skip": True},
+        ],
+    }
+
+    actions = build_legal_actions(state, blocked_card_reward_claims={"*"})
+
+    assert not any(action.kind == "combat_reward" for action in actions)
+    assert any(action.kind == "combat_reward_skip" for action in actions)
+
+
 def test_event_choice_exposes_leave_when_available():
     state = {
         "decision": "event_choice",
@@ -548,6 +584,41 @@ def test_openai_compat_agent_prompt_explains_atomic_card_sequence_actions():
     assert "engine-side queued card sequence" in prompt
 
 
+def test_openai_compat_agent_prompt_can_disable_card_sequence_actions():
+    agent = OpenAICompatAgent(
+        base_url="http://127.0.0.1:1",
+        model="test",
+        combat_card_sequences_enabled=False,
+    )
+    state = _combat_turn_state()
+
+    prompt = agent.build_prompt(state, build_legal_actions(state, allow_card_sequences=False))
+
+    assert "combat_card_sequence" not in prompt
+    assert "combat_custom_sequence" not in prompt
+    assert '"sequence"' not in prompt
+    assert "choose only one current legal card" in prompt
+
+
+def test_openai_compat_agent_retry_prompt_respects_disabled_card_sequences():
+    state = _combat_turn_state()
+    agent, sent_messages = _turn_chat_agent(
+        [
+            {"action_id": 99, "reason": "bad id"},
+            {"action_id": 5, "reason": "corrected to legal Strike."},
+        ],
+        max_retries=1,
+        fallback_mode="error",
+        combat_card_sequences_enabled=False,
+    )
+
+    agent.choose(state, build_legal_actions(state, allow_card_sequences=False))
+
+    correction = sent_messages[1][-1]["content"]
+    assert "multi-card combat sequences are disabled" in correction
+    assert "combat_custom_sequence" not in correction
+
+
 def test_openai_compat_agent_factual_memory_records_transition_diffs_not_reasons():
     agent = OpenAICompatAgent(
         base_url="http://127.0.0.1:1",
@@ -706,6 +777,436 @@ def _single_turn_agent(responses, **kwargs):
 
     agent._chat = fake_chat
     return agent, sent_messages
+
+
+def test_openai_compat_agent_self_consistency_logs_card_reward_votes():
+    state = {
+        "decision": "card_reward",
+        "view_deck": True,
+        "view_map": True,
+        "view_draw_pile": True,
+        "view_discard_pile": True,
+        "view_exhaust_pile": True,
+        "context": {"act": 1, "floor": 2, "room_type": "Reward"},
+        "player": {"hp": 70, "max_hp": 80, "gold": 0, "deck_size": 10},
+        "cards": [
+            {"index": 0, "name": "Anger"},
+            {"index": 1, "name": "Shrug It Off"},
+        ],
+        "can_skip": True,
+    }
+    actions = build_legal_actions(state)
+    agent, sent_messages = _single_turn_agent(
+        [
+            {"action_id": 0, "reason": "Anger adds damage."},
+            {"action_id": 1, "reason": "Shrug It Off adds block and draw."},
+            {"action_id": 1, "reason": "Shrug It Off is safer."},
+        ],
+        self_consistency_enabled=True,
+        self_consistency_samples=3,
+        self_consistency_decisions=("card_reward",),
+    )
+
+    action, meta = agent.choose(state, actions)
+
+    assert action.label == "pick card 0: Anger"
+    assert len(sent_messages) == 3
+    self_consistency = meta["self_consistency"]
+    assert self_consistency["decision"] == "card_reward"
+    assert self_consistency["samples_requested"] == 3
+    assert self_consistency["samples_completed"] == 3
+    assert self_consistency["invalid_samples"] == 0
+    assert self_consistency["selected_action_id"] == 0
+    assert self_consistency["selected_vote_count"] == 1
+    assert self_consistency["top_action_id"] == 1
+    assert self_consistency["top_vote_fraction"] == pytest.approx(2 / 3)
+    assert self_consistency["disagreement"] is True
+    assert self_consistency["vote_counts"][0]["label"] == "pick card 1: Shrug It Off"
+
+
+def test_openai_compat_agent_self_consistency_majority_vote_can_change_action():
+    state = {
+        "decision": "card_reward",
+        "view_deck": True,
+        "view_map": True,
+        "view_draw_pile": True,
+        "view_discard_pile": True,
+        "view_exhaust_pile": True,
+        "context": {"act": 1, "floor": 2, "room_type": "Reward"},
+        "player": {"hp": 70, "max_hp": 80, "gold": 0, "deck_size": 10},
+        "cards": [
+            {"index": 0, "name": "Anger"},
+            {"index": 1, "name": "Shrug It Off"},
+        ],
+        "can_skip": True,
+    }
+    actions = build_legal_actions(state)
+    agent, _sent_messages = _single_turn_agent(
+        [
+            {"action_id": 0, "reason": "Anger adds damage."},
+            {"action_id": 1, "reason": "Shrug It Off adds block and draw."},
+            {"action_id": 1, "reason": "Shrug It Off is safer."},
+        ],
+        self_consistency_enabled=True,
+        self_consistency_samples=3,
+        self_consistency_decisions=("card_reward",),
+        self_consistency_mode="majority_vote",
+    )
+
+    action, meta = agent.choose(state, actions)
+
+    assert action.label == "pick card 1: Shrug It Off"
+    assert meta["parsed"]["reason"] == "Shrug It Off adds block and draw."
+    self_consistency = meta["self_consistency"]
+    assert self_consistency["mode"] == "majority_vote"
+    assert self_consistency["primary_action_id"] == 0
+    assert self_consistency["selected_action_id"] == 1
+    assert self_consistency["selected_vote_count"] == 2
+    assert self_consistency["top_action_id"] == 1
+    assert self_consistency["majority_found"] is True
+    assert self_consistency["majority_vote_applied"] is True
+
+
+def test_openai_compat_agent_self_consistency_majority_vote_does_not_change_combat_action():
+    state = _combat_turn_state()
+    actions = build_legal_actions(state)
+    strike = next(action for action in actions if action.kind == "combat_play_card")
+    end_turn = next(action for action in actions if action.kind == "combat_end_turn")
+    agent, _sent_messages = _single_turn_agent(
+        [
+            {
+                "action_id": end_turn.action_id,
+                "selected_action_label": end_turn.label,
+                "reason": "End turn as the primary combat choice.",
+            },
+            {
+                "action_id": strike.action_id,
+                "selected_action_label": strike.label,
+                "reason": "Play Strike instead.",
+            },
+            {
+                "action_id": strike.action_id,
+                "selected_action_label": strike.label,
+                "reason": "Play Strike instead.",
+            },
+        ],
+        self_consistency_enabled=True,
+        self_consistency_samples=3,
+        self_consistency_decisions=("combat_play",),
+        self_consistency_mode="majority_vote",
+    )
+
+    action, meta = agent.choose(state, actions)
+
+    assert action == end_turn
+    assert meta["parsed"]["reason"] == "End turn as the primary combat choice."
+    self_consistency = meta["self_consistency"]
+    assert self_consistency["mode"] == "majority_vote"
+    assert self_consistency["primary_action_id"] == end_turn.action_id
+    assert self_consistency["selected_action_id"] == end_turn.action_id
+    assert self_consistency["top_action_id"] == strike.action_id
+    assert self_consistency["top_vote_count"] == 2
+    assert self_consistency["majority_found"] is True
+    assert self_consistency["majority_vote_allowed"] is False
+    assert self_consistency["majority_vote_applied"] is False
+
+
+def test_openai_compat_agent_reflection_diagnostic_logs_noncombat_verifier_choice():
+    state = {
+        "decision": "card_reward",
+        "view_deck": True,
+        "view_map": True,
+        "view_draw_pile": True,
+        "view_discard_pile": True,
+        "view_exhaust_pile": True,
+        "context": {"act": 1, "floor": 2, "room_type": "Reward"},
+        "player": {"hp": 70, "max_hp": 80, "gold": 0, "deck_size": 18},
+        "cards": [
+            {"index": 0, "name": "Clash"},
+            {"index": 1, "name": "Strike Dummy"},
+        ],
+        "can_skip": True,
+    }
+    actions = build_legal_actions(state)
+    agent, sent_messages = _single_turn_agent(
+        [
+            {"action_id": 0, "reason": "Take Clash for damage."},
+            {
+                "action_id": 0,
+                "selected_action_label": "pick card 0: Clash",
+                "reason_for": "Adds damage.",
+                "main_risk": "Awkward deck fit.",
+                "score": 3,
+            },
+            {
+                "action_id": 1,
+                "selected_action_label": "pick card 1: Strike Dummy",
+                "reason_for": "Possible synergy.",
+                "main_risk": "Low impact.",
+                "score": 4,
+            },
+            {
+                "action_id": 2,
+                "selected_action_label": "skip card reward",
+                "reason_for": "Keeps deck lean.",
+                "main_risk": "No immediate gain.",
+                "score": 8,
+            },
+            {
+                "comparison": ["Skip has the best state fit and lowest long-term cost."],
+                "verifier": {
+                    "selected_action_id": 2,
+                    "selected_action_label": "skip card reward",
+                    "reason": "The deck is already large and neither card solves a current need.",
+                    "risk_gate": "Avoid low-impact card pickup.",
+                    "confidence": 0.8,
+                },
+            },
+        ],
+        reflection_enabled=True,
+        reflection_decisions=("noncombat_non_map",),
+        reflection_mode="diagnostic",
+    )
+
+    action, meta = agent.choose(state, actions)
+
+    assert action.label == "pick card 0: Clash"
+    assert len(sent_messages) == 5
+    assert [message["role"] for message in sent_messages[1]] == ["system", "user"]
+    assert "reflection evaluator" in sent_messages[1][0]["content"]
+    assert "Reference action-selection context" in sent_messages[1][-1]["content"]
+    assert "Strict counterfactual reflection report" in sent_messages[1][-1]["content"]
+    assert "Focused action" in sent_messages[1][-1]["content"]
+    assert "Your JSON action_id must equal the focused action_id exactly" in sent_messages[1][-1]["content"]
+    assert [message["role"] for message in sent_messages[4]] == ["system", "user"]
+    assert "Strict reflection verifier" in sent_messages[4][-1]["content"]
+    assert "Primary model choice" not in sent_messages[4][-1]["content"]
+    reflection = meta["reflection_verifier"]
+    assert reflection["mode"] == "diagnostic"
+    assert reflection["evaluation_mode"] == "per_option_counterfactual"
+    assert reflection["prompt_context_mode"] == "isolated_reference_context"
+    assert reflection["decision"] == "card_reward"
+    assert reflection["candidate_action_ids"] == [0, 1, 2]
+    assert reflection["option_report_count"] == 3
+    assert [report["action_id"] for report in reflection["option_reports"]] == [0, 1, 2]
+    assert reflection["primary_action_id"] == 0
+    assert reflection["selected_action_id"] == 2
+    assert reflection["verifier_vote_applied"] is False
+
+
+def test_openai_compat_agent_reflection_verifier_vote_can_change_noncombat_action():
+    state = {
+        "decision": "card_reward",
+        "view_deck": True,
+        "view_map": True,
+        "view_draw_pile": True,
+        "view_discard_pile": True,
+        "view_exhaust_pile": True,
+        "context": {"act": 1, "floor": 2, "room_type": "Reward"},
+        "player": {"hp": 70, "max_hp": 80, "gold": 0, "deck_size": 18},
+        "cards": [
+            {"index": 0, "name": "Clash"},
+            {"index": 1, "name": "Strike Dummy"},
+        ],
+        "can_skip": True,
+    }
+    actions = build_legal_actions(state)
+    agent, _sent_messages = _single_turn_agent(
+        [
+            {"action_id": 0, "reason": "Take Clash for damage.", "run_plan_patch": {"build_plan": "Take attacks."}},
+            {
+                "action_id": 0,
+                "selected_action_label": "pick card 0: Clash",
+                "reason_for": "Adds damage.",
+                "main_risk": "Awkward deck fit.",
+                "score": 3,
+            },
+            {
+                "action_id": 1,
+                "selected_action_label": "pick card 1: Strike Dummy",
+                "reason_for": "Possible synergy.",
+                "main_risk": "Low impact.",
+                "score": 4,
+            },
+            {
+                "action_id": 2,
+                "selected_action_label": "skip card reward",
+                "reason_for": "Keeps deck lean.",
+                "main_risk": "No immediate gain.",
+                "score": 8,
+            },
+            {
+                "comparison": ["Skip has the best state fit and lowest long-term cost."],
+                "verifier": {
+                    "selected_action_id": 2,
+                    "selected_action_label": "skip card reward",
+                    "reason": "Skip beats adding another low-impact card.",
+                    "risk_gate": "Deck size penalty outweighs marginal damage.",
+                    "confidence": 0.84,
+                },
+            },
+        ],
+        reflection_enabled=True,
+        reflection_decisions=("noncombat_non_map",),
+        reflection_mode="verifier_vote",
+    )
+
+    action, meta = agent.choose(state, actions)
+
+    assert action.label == "skip card reward"
+    assert meta["parsed"]["action_id"] == 2
+    assert meta["parsed"]["selected_action_label"] == "skip card reward"
+    assert meta["parsed"]["reason"] == "Skip beats adding another low-impact card."
+    assert meta["parsed"]["run_plan_patch"] == {}
+    assert meta["parsed"]["evidence_refs"] == []
+    reflection = meta["reflection_verifier"]
+    assert reflection["mode"] == "verifier_vote"
+    assert reflection["evaluation_mode"] == "per_option_counterfactual"
+    assert reflection["option_report_count"] == 3
+    assert reflection["primary_action_id"] == 0
+    assert reflection["selected_action_id"] == 2
+    assert reflection["verifier_vote_allowed"] is True
+    assert reflection["verifier_vote_applied"] is True
+
+
+def test_openai_compat_agent_reflection_blocks_weak_card_reward_skip_override():
+    state = {
+        "decision": "card_reward",
+        "view_deck": True,
+        "view_map": True,
+        "view_draw_pile": True,
+        "view_discard_pile": True,
+        "view_exhaust_pile": True,
+        "context": {"act": 1, "floor": 2, "room_type": "Reward"},
+        "player": {"hp": 70, "max_hp": 80, "gold": 0, "deck_size": 12},
+        "cards": [
+            {"index": 0, "name": "Pommel Strike"},
+            {"index": 1, "name": "Defend"},
+        ],
+        "can_skip": True,
+    }
+    actions = build_legal_actions(state)
+    agent, _sent_messages = _single_turn_agent(
+        [
+            {"action_id": 0, "reason": "Take Pommel Strike for damage and draw."},
+            {
+                "action_id": 0,
+                "selected_action_label": "pick card 0: Pommel Strike",
+                "reason_for": "Adds damage and draw.",
+                "main_risk": "Slight deck dilution.",
+                "score": 6,
+            },
+            {
+                "action_id": 1,
+                "selected_action_label": "pick card 1: Defend",
+                "reason_for": "Adds block.",
+                "main_risk": "Low impact.",
+                "score": 5,
+            },
+            {
+                "action_id": 2,
+                "selected_action_label": "skip card reward",
+                "reason_for": "Keeps deck lean.",
+                "main_risk": "Misses useful draw.",
+                "score": 6,
+            },
+            {
+                "comparison": ["Skip is only marginally cleaner, not clearly better."],
+                "verifier": {
+                    "selected_action_id": 2,
+                    "selected_action_label": "skip card reward",
+                    "reason": "Skip avoids dilution, but the card options are not clearly bad.",
+                    "risk_gate": "No clear score advantage.",
+                    "confidence": 0.9,
+                    "selected_score": 6,
+                    "primary_score": 6,
+                    "best_pick_score": 6,
+                    "skip_score": 6,
+                    "score_gap": 0,
+                    "should_override": True,
+                },
+            },
+        ],
+        reflection_enabled=True,
+        reflection_decisions=("card_reward",),
+        reflection_mode="verifier_vote",
+    )
+
+    action, meta = agent.choose(state, actions)
+
+    assert action.label == "pick card 0: Pommel Strike"
+    assert meta["parsed"]["reason"] == "Take Pommel Strike for damage and draw."
+    reflection = meta["reflection_verifier"]
+    assert reflection["selected_action_id"] == 2
+    assert reflection["verifier_vote_allowed"] is False
+    assert reflection["verifier_vote_applied"] is False
+    assert reflection["override_block_reason"] == "score_gap_below_threshold"
+
+
+def test_openai_compat_agent_reflection_skips_map_select():
+    state = {
+        "decision": "map_select",
+        "view_deck": True,
+        "view_map": True,
+        "view_draw_pile": True,
+        "view_discard_pile": True,
+        "view_exhaust_pile": True,
+        "context": {"act": 1, "floor": 1, "room_type": "Map"},
+        "player": {"hp": 80, "max_hp": 80, "gold": 0, "deck_size": 10},
+        "choices": [
+            {"col": 0, "row": 1, "type": "Monster"},
+            {"col": 2, "row": 1, "type": "Monster"},
+        ],
+    }
+    actions = build_legal_actions(state)
+    agent, sent_messages = _single_turn_agent(
+        [{"action_id": 0, "reason": "Choose first map node."}],
+        reflection_enabled=True,
+        reflection_decisions=("noncombat_non_map",),
+        reflection_mode="verifier_vote",
+    )
+
+    action, meta = agent.choose(state, actions)
+
+    assert action.kind == "map"
+    assert len(sent_messages) == 1
+    assert "reflection_verifier" not in meta
+
+
+def test_openai_compat_agent_can_shuffle_map_actions_in_prompt_only():
+    state = {
+        "decision": "map_select",
+        "view_deck": True,
+        "view_map": True,
+        "view_draw_pile": True,
+        "view_discard_pile": True,
+        "view_exhaust_pile": True,
+        "context": {"act": 1, "floor": 1, "room_type": "Map"},
+        "player": {"hp": 80, "max_hp": 80, "gold": 0, "deck_size": 10},
+        "choices": [
+            {"col": 0, "row": 1, "type": "Monster"},
+            {"col": 2, "row": 1, "type": "Monster"},
+            {"col": 4, "row": 1, "type": "Monster"},
+        ],
+    }
+    actions = build_legal_actions(state)
+    agent, sent_messages = _single_turn_agent(
+        [{"action_id": 1, "reason": "Choose the displayed middle map node."}],
+        action_prompt_order="shuffle_map",
+        action_prompt_order_seed=1,
+    )
+
+    action, meta = agent.choose(state, actions)
+
+    prompt = sent_messages[0][1]["content"]
+    legal_actions_text = prompt.split("Legal actions:\n", 1)[1].split("\n", 1)[0]
+    prompt_actions = json.loads(legal_actions_text)
+    assert [item["action_id"] for item in prompt_actions if item["kind"] == "map"] == [1, 2, 0]
+    assert [action.action_id for action in actions] == [0, 1, 2]
+    assert action.action_id == 1
+    assert meta["action_prompt_order"] == "shuffle_map"
+    assert meta["action_prompt_order_changed"] is True
+    assert meta["action_prompt_map_action_ids"] == [1, 2, 0]
 
 
 def test_openai_compat_agent_retries_invalid_action_before_strict_error():
@@ -997,6 +1498,15 @@ def test_custom_card_sequence_gateway_can_be_disabled_for_env_action_masks():
     actions = build_legal_actions(_combat_turn_state(), allow_custom_sequences=False)
 
     assert not any(action.kind == "combat_custom_sequence" for action in actions)
+
+
+def test_combat_card_sequences_can_be_disabled_for_one_card_combat_actions():
+    actions = build_legal_actions(_combat_turn_state(), allow_card_sequences=False)
+    kinds = {action.kind for action in actions}
+
+    assert "combat_play_card" in kinds
+    assert "combat_card_sequence" not in kinds
+    assert "combat_custom_sequence" not in kinds
 
 
 class _CapturingRandomAgent(RandomAgent):
@@ -1827,7 +2337,7 @@ def test_openai_compat_agent_turn_chat_keeps_history_within_combat_turn():
     assert second_meta["turn_chat_history_turns"] == 1
 
 
-def test_openai_compat_agent_turn_chat_plan_is_added_to_initial_combat_prompt_and_kept_compact():
+def test_openai_compat_agent_turn_chat_check_is_added_to_combat_prompt_and_kept_compact():
     state = _combat_turn_state()
     next_state = _combat_turn_state(
         energy=2,
@@ -1844,9 +2354,13 @@ def test_openai_compat_agent_turn_chat_plan_is_added_to_initial_combat_prompt_an
     agent, sent_messages = _turn_chat_agent(
         [
             {
-                "turn_plan": {
-                    "objective": "Deal damage before blocking.",
-                    "replan_if": ["draw changes hand"],
+                "turn_check": {
+                    "primary_goal": "damage",
+                    "incoming_damage": "none",
+                    "survival_requirement": "none",
+                    "lethal_available": False,
+                    "first_action_rule": "Strike is safe because no enemy is attacking.",
+                    "must_recompute_after": ["draw changes hand"],
                 },
                 "action_id": 5,
                 "reason": "Start with Strike.",
@@ -1855,17 +2369,24 @@ def test_openai_compat_agent_turn_chat_plan_is_added_to_initial_combat_prompt_an
             {"action_id": 5, "reason": "End after the plan."},
         ],
         turn_chat_plan_enabled=True,
+        context_patch_fields_enabled=False,
     )
 
     agent.choose(state, build_legal_actions(state))
     agent.choose(next_state, build_legal_actions(next_state))
 
-    assert "turn_plan" in sent_messages[0][0]["content"]
-    assert "visible hand in detail" in sent_messages[0][0]["content"]
+    assert "turn_check" in sent_messages[0][0]["content"]
+    assert "current-state tactical guardrail" in sent_messages[0][0]["content"]
+    assert "Never follow them automatically" in sent_messages[0][0]["content"]
+    assert "tentative multi-card script" in sent_messages[0][0]["content"]
+    assert "run_plan_patch" not in sent_messages[0][0]["content"]
+    assert "run_memory_facts" not in sent_messages[0][0]["content"]
+    assert "no_context_change_reason" not in sent_messages[0][0]["content"]
+    assert "evidence_refs" not in sent_messages[0][0]["content"]
     assert "Turn planning instruction:" not in sent_messages[0][1]["content"]
     assistant_history = sent_messages[1][2]["content"]
-    assert "turn_plan" in assistant_history
-    assert "Deal damage before blocking." in assistant_history
+    assert "turn_check" in assistant_history
+    assert "Strike is safe because no enemy is attacking." in assistant_history
     assert "calculations" not in assistant_history
 
 
@@ -1875,9 +2396,9 @@ def test_openai_compat_agent_turn_chat_omits_plan_prompt_by_default():
 
     agent.choose(state, build_legal_actions(state))
 
-    assert "turn_plan" not in sent_messages[0][0]["content"]
+    assert "turn_check" not in sent_messages[0][0]["content"]
     assert "Turn planning instruction:" not in sent_messages[0][1]["content"]
-    assert "turn_plan" not in sent_messages[0][1]["content"]
+    assert "turn_check" not in sent_messages[0][1]["content"]
 
 
 def test_openai_compat_agent_turn_chat_clears_after_end_turn_transition():
@@ -2037,6 +2558,37 @@ def test_agent_from_args_passes_llm_temperature():
     assert agent.temperature == 0.25
 
 
+def test_agent_from_args_passes_self_consistency_settings():
+    agent = agent_from_args(
+        "llm",
+        base_url="http://127.0.0.1:1",
+        model="test",
+        api_key="local",
+        self_consistency_enabled=True,
+        self_consistency_samples=5,
+        self_consistency_decisions="map_select,card_reward",
+        self_consistency_mode="majority_vote",
+        reflection_enabled=True,
+        reflection_decisions="noncombat_non_map",
+        reflection_mode="verifier_vote",
+        reflection_max_options=6,
+        action_prompt_order="shuffle_map",
+        action_prompt_order_seed=7,
+    )
+
+    assert isinstance(agent, OpenAICompatAgent)
+    assert agent.self_consistency_enabled is True
+    assert agent.self_consistency_samples == 5
+    assert agent.self_consistency_decisions == ("map_select", "card_reward")
+    assert agent.self_consistency_mode == "majority_vote"
+    assert agent.reflection_enabled is True
+    assert agent.reflection_decisions == ("noncombat_non_map",)
+    assert agent.reflection_mode == "verifier_vote"
+    assert agent.reflection_max_options == 6
+    assert agent.action_prompt_order == "shuffle_map"
+    assert agent.action_prompt_order_seed == 7
+
+
 def test_agent_from_args_passes_strict_fallback_mode_by_default():
     agent = agent_from_args(
         "llm",
@@ -2057,6 +2609,7 @@ def test_load_benchmark_config_reads_nested_context_management(tmp_path, monkeyp
         "STS2_BENCH_TURN_CHAT_WINDOW",
         "STS2_BENCH_TURN_CHAT_UPDATE_MODE",
         "STS2_BENCH_TURN_CHAT_ASSISTANT_HISTORY",
+        "STS2_BENCH_TURN_CHECK_ENABLED",
         "STS2_BENCH_TURN_CHAT_PLAN_ENABLED",
     ):
         monkeypatch.delenv(key, raising=False)
@@ -2070,7 +2623,7 @@ context_management:
     window: 3
     update_mode: delta
     assistant_history: compact
-    plan:
+    turn_check:
       enabled: true
 """,
         encoding="utf-8",
@@ -2083,4 +2636,4 @@ context_management:
     assert os.environ["STS2_BENCH_TURN_CHAT_WINDOW"] == "3"
     assert os.environ["STS2_BENCH_TURN_CHAT_UPDATE_MODE"] == "delta"
     assert os.environ["STS2_BENCH_TURN_CHAT_ASSISTANT_HISTORY"] == "compact"
-    assert os.environ["STS2_BENCH_TURN_CHAT_PLAN_ENABLED"] == "true"
+    assert os.environ["STS2_BENCH_TURN_CHECK_ENABLED"] == "true"

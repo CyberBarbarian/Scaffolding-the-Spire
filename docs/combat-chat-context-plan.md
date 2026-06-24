@@ -528,25 +528,24 @@ turn_chat_assistant_history: compact
 
 ### Ideas
 
-- 继续探索 `chat history` 分支时，可以加入 **turn-initial advisory plan**：
-  - 只在 `New player turn` 的第一条 assistant response 中要求模型给出一个短 `turn_plan`，同时仍然选择一个原子 `action_id`。
-  - 这个 plan 是可修正的 tactical guide，不是必须执行的多动作脚本；后续 `Turn update` 应允许模型根据真实状态变化更新或放弃计划。
-  - 不建议为 plan 单独增加一次 LLM call。额外 call 会增加成本，而且抽牌、随机 exhaust、发现牌、modal 状态都会让计划快速过期。
-  - `turn_plan` 的主要价值是给同一玩家回合内的后续 chat history 一个稳定目标，例如“先确认能否 survive”“若无法 break block 则优先 block/用 potion”“抽牌后重新评估 lethal”。
-  - 后续轮次可以只输出 `plan_update` + `action_id` + `reason`，避免每一步都重新生成完整 `situation/calculations/candidates`。
+- 继续探索 `chat history` 分支时，不再使用多步 `turn_plan`，改成 **current-state turn_check**：
+  - 每次 `combat_play` response 都可以给出一个短 `turn_check`，同时仍然只选择一个当前合法 `action_id`。
+  - `turn_check` 是当前动作前的 tactical guardrail，不是后续动作计划；它只检查生存、斩杀、当前第一步是否安全。
+  - 不建议为 check 单独增加一次 LLM call。额外 call 会增加成本，而且抽牌、随机 exhaust、发现牌、modal 状态都会让任何多步计划快速过期。
+  - 历史里的 `turn_check` 只能作为参考，后续 `Turn update` 必须根据最新 state 重新计算，不能自动 follow 旧 check。
+  - 设计目标是避免模型写出“看似完整但能量/随机性上不可执行”的手牌脚本。
 
 建议 schema 草案：
 
 ```json
 {
-  "turn_plan": {
-    "objective": "survive this turn and break Tunneler block if possible",
-    "survival_check": "enemy attacks for 23; need enough block or a stun",
-    "tentative_sequence": [
-      "use redraw if current hand cannot break block or block enough",
-      "prefer actions that create the needed state immediately"
-    ],
-    "replan_if": [
+  "turn_check": {
+    "primary_goal": "survive",
+    "incoming_damage": "enemy attacks for 23",
+    "survival_requirement": "need 23 block, lethal, stun, or potion line from the current state",
+    "lethal_available": false,
+    "first_action_rule": "redraw is safe because the current hand cannot block or kill and redraw is a current legal action",
+    "must_recompute_after": [
       "card draw changes hand",
       "random exhaust/discard happens",
       "energy changes",
@@ -558,22 +557,12 @@ turn_chat_assistant_history: compact
 }
 ```
 
-后续同回合 update 可以更短：
-
-```json
-{
-  "plan_update": "redraw did not find lethal; prioritize blocking the 23 attack",
-  "action_id": 6,
-  "reason": "True Grit adds the most block among remaining playable cards."
-}
-```
-
 设计约束：
 
-- `turn_plan` 不能替代合法动作列表，最终仍必须只选择一个当前合法 `action_id`。
+- `turn_check` 不能替代合法动作列表，最终仍必须只选择一个当前合法 `action_id`。
 - 不允许让模型输出“本回合完整操作序列”并要求 runner 执行；runner 仍然逐动作 re-prompt。
-- plan 进入 history 时应 compact，避免把完整 calculations/candidates 带入后续轮次。
-- 如果 `turn_plan` 与最新 `Last game action result` 冲突，最新真实 state 永远优先。
+- `turn_check` 进入 history 时应 compact，避免把完整 calculations/candidates 带入后续轮次。
+- 如果旧 `turn_check` 与最新 `Last game action result` 冲突，最新真实 state 永远优先。
 
 ### Experiment Results
 
@@ -584,6 +573,24 @@ turn_chat_assistant_history: compact
 - 阶段性判断：`turn_chat` 相比最原始 `no_memory` baseline 有正向信号，但当前只有 `bench_0000` 一个 seed，不能写成统计结论。
 - `turn_chat` 没有超过 `factual_diff memory`；因此更准确的定位是“有潜力的 chat-history 替代方法”，不是已验证优于 memory 的方法。
 - 三次运行都使用了相同 `logging.out` 路径，结构化 JSONL 可能被后一次覆盖；本轮分析以 `logs/bench_*.log` 为准。后续实验应让每个 variant 使用唯一 `out` 路径。
+
+### Current Preferred Setting
+
+2026-06-18 单 seed 对比后，当前阶段先采用这组轻约束 baseline：
+
+```bash
+--turn-check \
+--no-route-plan \
+--run-plan-route-plan \
+--route-plan-enforcement soft \
+--no-reward-posterior-evaluator
+```
+
+含义：保留 combat 的 current-state `turn_check`，关闭 `map_select` 的 `route_plan_event` 强校验/事件机制，保留 OCC `RunPlan.route_plan` 作为软性路线叙事字段，并关闭选牌 posterior evaluator，减少方法混杂。现有观察里这组能到 Act 2 floor 7，但仍只是 `bench_0000` 的阶段性 baseline，不是统计最优结论。
+
+下一步偏好诊断：在 `map_select` 和 `card_reward` 上开启 self-consistency，只重复采样并记录投票分布，不改变实际执行的 primary action，用来观察模型是否对“攻杀/精英路线”或某类选牌存在稳定偏好。
+
+并行探索 `reflection` verifier：先收窄到 `card_reward`，为每个非 view 候选分别发起一次 forced counterfactual report，再由 verifier 只基于这些平等生成的候选报告横向选择最终动作。`diagnostic` 模式只记录 verifier 结论，`verifier_vote` 只有在高置信、分数差足够大、且没有高价值可拿牌被 skip 掉时才执行 verifier 选中的 action。当前不默认覆盖 `combat_reward/event/shop/rest_site`，因为三组 `bench_0000` 复跑显示宽范围 reflection 成本高、schema 错误集中在 `combat_reward`，并且 verifier 容易把“牌组更瘦”误当作目标，导致 Act 1 Boss 前资源不足。新的 rubric 要求优先判断选牌是否补足前期输出、稳定格挡、过牌、能量利用、AoE、精英/Boss 解法或明确协同；只有所有选项都低影响/冗余/太慢时才 skip。
 
 ### Bugs Found
 

@@ -190,6 +190,30 @@ def test_out_of_combat_prompt_includes_rm_rp_slice_and_patch_schema():
     assert "occ prompt" in prompt
 
 
+def test_out_of_combat_prompt_can_hide_run_plan_route_plan():
+    store = RunContextStore()
+    store.apply_agent_patch(
+        {
+            "run_plan_patch": {
+                "route_plan": "Path toward shop.",
+                "build_plan": "Prefer efficient attacks.",
+            }
+        },
+        owner="occ",
+        state={"decision": "map_select"},
+        action=_action(),
+    )
+    wrapped = OutOfCombatContextAgent(_FakeAgent("occ"), store, run_plan_route_plan_enabled=False)
+
+    prompt = wrapped.build_prompt({"decision": "map_select"}, [_action()])
+
+    assert "route_plan: Path toward shop." not in prompt
+    assert "Path toward shop." not in prompt
+    assert "Allowed run_plan_patch keys: build_plan, resource_policy" in prompt
+    assert "Allowed run_plan_patch keys: route_plan" not in prompt
+    assert "build_plan: Prefer efficient attacks." in prompt
+
+
 def test_out_of_combat_prompt_includes_short_reference_turn_history_after_transition():
     store = RunContextStore()
     wrapped = OutOfCombatContextAgent(_FakeAgent("occ"), store, history_window=2)
@@ -395,6 +419,36 @@ def test_coordinator_routes_to_active_agent_and_commits_occ_patch():
     assert store.run_memory.facts[0]["text"] == "Shop path supports removals."
 
 
+def test_coordinator_can_ignore_run_plan_route_plan_patch_when_disabled():
+    store = RunContextStore()
+    occ = _FakeAgent(
+        "occ",
+        parsed={
+            "action_id": 0,
+            "reason": "Choose from current map only.",
+            "run_plan_patch": {
+                "route_plan": "Take the elite path.",
+                "resource_policy": "Rest below half HP.",
+            },
+        },
+    )
+    coordinator = CoordinatorAgent(
+        ca_agent=_FakeAgent("ca"),
+        occ_agent=occ,
+        store=store,
+        run_plan_route_plan_enabled=False,
+    )
+    action = _action()
+
+    chosen, meta = coordinator.choose({"decision": "map_select"}, [action])
+
+    assert chosen is action
+    assert store.run_plan.route_plan == ""
+    assert store.run_plan.resource_policy == "Rest below half HP."
+    assert meta["run_context_patch"]["run_plan_updates"] == ["resource_policy"]
+    assert meta["run_context_patch"]["ignored_run_plan_updates"] == ["route_plan"]
+
+
 def test_coordinator_strict_guard_raises_for_stale_delegate_action():
     coordinator = CoordinatorAgent(
         ca_agent=_FakeAgent("ca"),
@@ -431,16 +485,40 @@ def test_agent_from_args_can_build_coordinator_agent():
         prompt_style="analysis",
         turn_chat_window=3,
         turn_chat_plan_enabled=True,
+        self_consistency_enabled=True,
+        self_consistency_samples=5,
+        self_consistency_decisions="map_select,card_reward",
+        self_consistency_mode="majority_vote",
+        reflection_enabled=True,
+        reflection_decisions="noncombat_non_map",
+        reflection_mode="verifier_vote",
+        reflection_max_options=6,
+        action_prompt_order="shuffle_map",
+        action_prompt_order_seed=7,
     )
 
     assert isinstance(agent, CoordinatorAgent)
     assert agent.fallback_mode == "error"
     assert agent.ca_agent.conversation_mode == "turn_chat"
     assert agent.ca_agent.turn_chat_plan_enabled is True
+    assert agent.ca_agent.route_plan_enabled is False
+    assert agent.ca_agent.context_patch_fields_enabled is False
     assert agent.ca_agent.fallback_mode == "error"
     assert isinstance(agent.occ_agent, OutOfCombatContextAgent)
     assert agent.occ_agent.history_window == 3
     assert agent.occ_agent.inner.fallback_mode == "error"
+    assert agent.occ_agent.inner.self_consistency_enabled is True
+    assert agent.occ_agent.inner.self_consistency_samples == 5
+    assert agent.occ_agent.inner.self_consistency_decisions == ("map_select", "card_reward")
+    assert agent.occ_agent.inner.self_consistency_mode == "majority_vote"
+    assert agent.occ_agent.inner.reflection_enabled is True
+    assert agent.occ_agent.inner.reflection_decisions == ("noncombat_non_map",)
+    assert agent.occ_agent.inner.reflection_mode == "verifier_vote"
+    assert agent.occ_agent.inner.reflection_max_options == 6
+    assert agent.occ_agent.inner.action_prompt_order == "shuffle_map"
+    assert agent.occ_agent.inner.action_prompt_order_seed == 7
+    assert agent.ca_agent.self_consistency_enabled is False
+    assert agent.ca_agent.reflection_enabled is False
     assert agent.occ_agent.reward_posterior_evaluator is not None
 
 
@@ -463,7 +541,21 @@ def test_run_config_records_coordinator_context_split():
         turn_chat_window = 3
         turn_chat_update_mode = "delta"
         turn_chat_assistant_history = "compact"
-        turn_chat_plan = True
+        turn_check = True
+        combat_card_sequences = True
+        route_plan_enabled = False
+        route_plan_enforcement = "soft"
+        run_plan_route_plan_enabled = False
+        self_consistency_enabled = True
+        self_consistency_samples = 5
+        self_consistency_decisions = "map_select,card_reward"
+        self_consistency_mode = "majority_vote"
+        reflection_enabled = True
+        reflection_decisions = "noncombat_non_map"
+        reflection_mode = "verifier_vote"
+        reflection_max_options = 6
+        action_prompt_order = "shuffle_map"
+        action_prompt_order_seed = 7
         reward_posterior_evaluator = True
         character = "Ironclad"
         ascension = 0
@@ -484,9 +576,29 @@ def test_run_config_records_coordinator_context_split():
     context = config["agent"]["context_management"]
     assert config["agent"]["llm_fallback_mode"] == "error"
     assert context["mode"] == "coordinator"
+    assert context["route_plan"]["enabled"] is False
+    assert context["route_plan"]["enforcement"] == "soft"
+    assert context["run_plan"]["route_plan"]["enabled"] is False
     assert context["ca"]["mode"] == "turn_chat"
     assert context["ca"]["turn_chat"]["window"] == 3
+    assert context["ca"]["turn_chat"]["turn_check"]["enabled"] is True
     assert context["occ"]["mode"] == "reference_turn"
     assert context["occ"]["reference_context"]["window"] == 3
     assert context["occ"]["reference_context"]["source"] == "rm_rp_slice_plus_short_occ_history"
     assert context["occ"]["reward_posterior_evaluator"] is True
+    assert config["agent"]["diagnostics"]["self_consistency"] == {
+        "enabled": True,
+        "samples": 5,
+        "decisions": "map_select,card_reward",
+        "mode": "majority_vote",
+    }
+    assert config["agent"]["diagnostics"]["reflection"] == {
+        "enabled": True,
+        "decisions": "noncombat_non_map",
+        "mode": "verifier_vote",
+        "max_options": 6,
+    }
+    assert config["agent"]["diagnostics"]["action_prompt_order"] == {
+        "mode": "shuffle_map",
+        "seed": 7,
+    }

@@ -638,6 +638,21 @@ def test_map_prompt_instructs_llm_to_emit_route_plan_event():
     assert "Route graph exact nodes:" not in prompt
 
 
+def test_map_prompt_can_omit_route_plan_instructions_when_disabled():
+    state = _map_state(
+        choices=[{"col": 0, "row": 1, "type": "Monster"}],
+        full_map=_full_map(edges={(0, 0): [(0, 1)]}),
+    )
+    action = _map_action(0, "Monster", 0, 1)
+
+    prompt = build_llm_prompt(state, [action], route_plan_enabled=False)
+
+    assert "route_plan_event" not in prompt
+    assert "route_plan_created" not in prompt
+    assert "route_plan_updated" not in prompt
+    assert "Route graph JSON:" in prompt
+
+
 class _RoutePlanScriptAgent:
     def __init__(self, responses):
         self.responses = list(responses)
@@ -715,6 +730,91 @@ def test_runner_logs_route_plan_created_and_silent_execution(tmp_path):
 
     assert result.error is None
     events = [row for row in _read_jsonl(out) if row.get("type") == "route_plan_event"]
+    assert [event["event_type"] for event in events] == ["route_plan_created"]
+
+
+def test_runner_can_disable_route_plan_validation(tmp_path):
+    first_map = _full_map(edges={(0, 0): [(0, 1)]})
+    process = _RoutePlanProcess(
+        [
+            _map_state(choices=[{"col": 0, "row": 1, "type": "Monster"}], full_map=first_map),
+            {"decision": "game_over", "victory": False, "player": {"hp": 54, "max_hp": 80}},
+        ]
+    )
+    agent = _RoutePlanScriptAgent(
+        [
+            {"action_index": 5, "parsed": {"reason": "choose current best map node"}},
+        ]
+    )
+    out = tmp_path / "run.jsonl"
+    logger = JsonlLogger(out)
+    try:
+        result = run_one(
+            agent=agent,
+            seed="route-plan-disabled",
+            process=process,
+            logger=logger,
+            max_steps=5,
+            route_plan_enabled=False,
+        )
+    finally:
+        logger.close()
+
+    assert result.error is None
+    assert not [row for row in _read_jsonl(out) if row.get("type") == "route_plan_validation_error"]
+    assert not [row for row in _read_jsonl(out) if row.get("type") == "route_plan_event"]
+
+
+def test_runner_can_soft_log_route_plan_validation_without_reask(tmp_path):
+    first_map = _full_map(edges={(0, 0): [(0, 1)], (0, 1): [(1, 2), (2, 2)]})
+    second_map = _full_map(current=(0, 1), edges={(0, 1): [(1, 2), (2, 2)]})
+    process = _RoutePlanProcess(
+        [
+            _map_state(choices=[{"col": 0, "row": 1, "type": "Monster"}], full_map=first_map),
+            _map_state(
+                choices=[{"col": 1, "row": 2, "type": "Elite"}, {"col": 2, "row": 2, "type": "RestSite"}],
+                full_map=second_map,
+                hp=18,
+            ),
+            {"decision": "game_over", "victory": False, "player": {"hp": 38, "max_hp": 80}},
+        ]
+    )
+    agent = _RoutePlanScriptAgent(
+        [
+            {
+                "action_index": 5,
+                "parsed": {
+                    "reason": "create route",
+                    "route_plan_event": _event("route_plan_created", [(0, 1, "Monster"), (1, 2, "Elite")]),
+                },
+            },
+            {"action_index": 6, "parsed": {"reason": "rest without saying why"}},
+        ]
+    )
+    out = tmp_path / "run.jsonl"
+    logger = JsonlLogger(out)
+    try:
+        result = run_one(
+            agent=agent,
+            seed="route-plan-soft",
+            process=process,
+            logger=logger,
+            max_steps=5,
+            route_plan_enforcement="soft",
+        )
+    finally:
+        logger.close()
+
+    assert result.error is None
+    assert agent.feedback == []
+    assert result.extra["route_plan_validation_soft_error_count"] == 1
+    map_commands = [cmd for cmd in process.sent if cmd.get("action") == "select_map_node"]
+    assert [cmd["args"] for cmd in map_commands] == [{"col": 0, "row": 1}, {"col": 2, "row": 2}]
+    rows = _read_jsonl(out)
+    errors = [row for row in rows if row.get("type") == "route_plan_validation_error"]
+    assert [row["enforcement"] for row in errors] == ["soft"]
+    assert errors[0]["code"] == "route_plan_deviated_without_update"
+    events = [row for row in rows if row.get("type") == "route_plan_event"]
     assert [event["event_type"] for event in events] == ["route_plan_created"]
 
 

@@ -87,6 +87,10 @@ def _name(obj: Any) -> str:
     return str(obj) if obj is not None else "?"
 
 
+def _reward_kind(reward: dict[str, Any]) -> str:
+    return str(reward.get("kind", reward.get("type_name", "?")))
+
+
 def _price(item: dict[str, Any]) -> int:
     for key in ("price", "gold_cost", "cost"):
         value = item.get(key)
@@ -242,7 +246,9 @@ def build_legal_actions(
     state: dict[str, Any],
     *,
     allow_repeat_views: bool = False,
+    allow_card_sequences: bool = True,
     allow_custom_sequences: bool = True,
+    blocked_card_reward_claims: set[Any] | None = None,
 ) -> list[LegalAction]:
     """Build legal actions from the current decision point.
 
@@ -287,7 +293,8 @@ def build_legal_actions(
                 continue
             playable_cards.append(card)
             raw.extend(_targeted_card_actions(state, card))
-        raw.extend(_combat_card_sequence_actions(state, playable_cards))
+        if allow_card_sequences:
+            raw.extend(_combat_card_sequence_actions(state, playable_cards))
 
         player = state.get("player") or {}
         for potion in player.get("potions", []) or state.get("potions", []) or []:
@@ -321,15 +328,19 @@ def build_legal_actions(
                 )
 
         raw.append(_action("end turn", "end_turn", "combat_end_turn"))
-        if playable_cards and allow_custom_sequences:
+        if playable_cards and allow_card_sequences and allow_custom_sequences:
             raw.append(_custom_sequence_action())
 
     elif decision == "combat_reward":
         rewards = state.get("rewards") or []
+        blocked_card_reward_claims = blocked_card_reward_claims or set()
         for reward in rewards:
             reward_index = reward.get("index")
-            reward_kind = reward.get("kind", reward.get("type_name", "?"))
-            if reward.get("can_claim") is not False:
+            reward_kind = _reward_kind(reward)
+            is_blocked_card_reward = reward_kind.lower() == "card_reward" and (
+                "*" in blocked_card_reward_claims or reward_index in blocked_card_reward_claims
+            )
+            if reward.get("can_claim") is not False and not is_blocked_card_reward:
                 raw.append(
                     _action(
                         f"claim reward {reward_index}: {reward_kind}",

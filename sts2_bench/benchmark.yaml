@@ -46,6 +46,17 @@ run_summary_enabled: false
 # Agent 侧上下文管理方法。single_turn 是当前每步独立 prompt；turn_chat 只在同一个玩家出牌回合内保留短 chat history。
 context_management:
   mode: single_turn
+  route_plan:
+    # 是否启用 map_select 的 route_plan_event prompt 与 runner 校验。
+    # 关闭后每次地图选择都只基于当前 state / route graph / legal_actions 决策。
+    enabled: false
+    # hard 会在 route_plan_event 不一致时重问；soft 只记录错误，方便观察 plan 行为。
+    enforcement: soft
+  run_plan:
+    route_plan:
+      # 是否启用 OCC RunPlan.route_plan 这个长期路线承诺字段。
+      # 关闭后 OCC prompt 不展示该字段，模型提交的 run_plan_patch.route_plan 也会被忽略。
+      enabled: true
   turn_chat:
     # 同一玩家出牌回合内保留最近多少组 user/assistant 消息。
     window: 10
@@ -53,9 +64,45 @@ context_management:
     update_mode: delta
     # 第一版只支持 compact：历史里的 assistant 只保留 action 和简短 reason，不保留完整分析。
     assistant_history: compact
-    # 是否在每个玩家出牌回合的第一条 turn_chat prompt 中要求模型先给一个可修正的 turn_plan。
-    plan:
+    # 是否在 combat turn_chat prompt 中要求模型输出当前状态的 turn_check 检查。
+    # turn_check 只用于生存/斩杀/当前第一步校验，不要求 follow 多步计划。
+    turn_check:
       enabled: true
+  combat:
+    card_sequences:
+      # 是否在 combat_play legal actions 中暴露一次执行多张牌的 sequence 动作。
+      # 关闭后局内每次 LLM 决策只能选择单张牌、药水、view 或 end turn。
+      enabled: true
+
+# 诊断开关。self_consistency 默认关闭；打开后只在指定 decision 上重复采样并记录投票分布，
+# 不改变实际执行的 primary action。适合观察模型是否对选路/选牌有稳定偏好。
+diagnostics:
+  self_consistency:
+    enabled: false
+    samples: 3
+    decisions: map_select,card_reward
+    # diagnostic 只记录投票分布；majority_vote 只会在 map_select/card_reward 执行严格多数胜出的 action。
+    # combat_play/card_select 等局内动作即使误配进 decisions，也只记录诊断并保留 primary action。
+    mode: diagnostic
+  # reflection 与 self_consistency 并行：为每个非 view 候选分别生成 forced counterfactual report，
+  # 再由 verifier 只基于这些平等生成的候选报告横向选择。
+  # 默认只作用 card_reward：用补短板/收益是否超过稀释的 rubric 校正无脑抓牌，
+  # 避免 combat_reward/event/shop/rest_site 的高成本和高 schema 错误率。
+  reflection:
+    enabled: false
+    decisions: card_reward
+    # diagnostic 只记录 verifier 结论；verifier_vote 会执行 verifier 选择的非 view action。
+    mode: diagnostic
+    # 候选太多时跳过 reflection，避免商店/复杂事件一次消耗过大；成本约为候选数 + 1 次额外 LLM call。
+    max_options: 8
+  # legal action 在 prompt 中的展示顺序。default 保持 runner 原顺序；
+  # shuffle_map 只打乱 map_select 的 map candidates，保留真实 action_id，用于检测候选顺序偏好。
+  action_prompt_order:
+    mode: default
+    seed: 0
+
+# coordinator 的选牌 posterior evaluator 当前默认关闭，避免和 RunPlan/OCC route 这条 baseline 混在一起。
+reward_posterior_evaluator: false
 
 # 选择角色。可选 Ironclad、Silent、Defect、Regent、Necrobinder。
 character: Ironclad

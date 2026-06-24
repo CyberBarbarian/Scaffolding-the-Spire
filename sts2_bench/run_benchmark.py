@@ -41,14 +41,44 @@ CONFIG_ENV_KEYS = {
     "print_model_output": "STS2_BENCH_PRINT_MODEL_OUTPUT",
     "include_full_map": "STS2_BENCH_INCLUDE_FULL_MAP",
     "allow_repeat_views": "STS2_BENCH_ALLOW_REPEAT_VIEWS",
+    "combat_card_sequences_enabled": "STS2_BENCH_COMBAT_CARD_SEQUENCES_ENABLED",
     "reward_posterior_evaluator": "STS2_BENCH_REWARD_POSTERIOR_EVALUATOR",
+    "route_plan_enabled": "STS2_BENCH_ROUTE_PLAN_ENABLED",
+    "route_plan_enforcement": "STS2_BENCH_ROUTE_PLAN_ENFORCEMENT",
+    "run_plan_route_plan_enabled": "STS2_BENCH_RUN_PLAN_ROUTE_PLAN_ENABLED",
+    "turn_check_enabled": "STS2_BENCH_TURN_CHECK_ENABLED",
+    "self_consistency_enabled": "STS2_BENCH_SELF_CONSISTENCY_ENABLED",
+    "self_consistency_samples": "STS2_BENCH_SELF_CONSISTENCY_SAMPLES",
+    "self_consistency_decisions": "STS2_BENCH_SELF_CONSISTENCY_DECISIONS",
+    "self_consistency_mode": "STS2_BENCH_SELF_CONSISTENCY_MODE",
+    "reflection_enabled": "STS2_BENCH_REFLECTION_ENABLED",
+    "reflection_decisions": "STS2_BENCH_REFLECTION_DECISIONS",
+    "reflection_mode": "STS2_BENCH_REFLECTION_MODE",
+    "reflection_max_options": "STS2_BENCH_REFLECTION_MAX_OPTIONS",
+    "action_prompt_order": "STS2_BENCH_ACTION_PROMPT_ORDER",
+    "action_prompt_order_seed": "STS2_BENCH_ACTION_PROMPT_ORDER_SEED",
 }
 NESTED_CONFIG_ENV_KEYS = {
     ("context_management", "mode"): "STS2_BENCH_CONTEXT_MODE",
+    ("context_management", "route_plan", "enabled"): "STS2_BENCH_ROUTE_PLAN_ENABLED",
+    ("context_management", "route_plan", "enforcement"): "STS2_BENCH_ROUTE_PLAN_ENFORCEMENT",
+    ("context_management", "run_plan", "route_plan", "enabled"): "STS2_BENCH_RUN_PLAN_ROUTE_PLAN_ENABLED",
     ("context_management", "turn_chat", "window"): "STS2_BENCH_TURN_CHAT_WINDOW",
     ("context_management", "turn_chat", "update_mode"): "STS2_BENCH_TURN_CHAT_UPDATE_MODE",
     ("context_management", "turn_chat", "assistant_history"): "STS2_BENCH_TURN_CHAT_ASSISTANT_HISTORY",
+    ("context_management", "turn_chat", "turn_check", "enabled"): "STS2_BENCH_TURN_CHECK_ENABLED",
     ("context_management", "turn_chat", "plan", "enabled"): "STS2_BENCH_TURN_CHAT_PLAN_ENABLED",
+    ("context_management", "combat", "card_sequences", "enabled"): "STS2_BENCH_COMBAT_CARD_SEQUENCES_ENABLED",
+    ("diagnostics", "self_consistency", "enabled"): "STS2_BENCH_SELF_CONSISTENCY_ENABLED",
+    ("diagnostics", "self_consistency", "samples"): "STS2_BENCH_SELF_CONSISTENCY_SAMPLES",
+    ("diagnostics", "self_consistency", "decisions"): "STS2_BENCH_SELF_CONSISTENCY_DECISIONS",
+    ("diagnostics", "self_consistency", "mode"): "STS2_BENCH_SELF_CONSISTENCY_MODE",
+    ("diagnostics", "reflection", "enabled"): "STS2_BENCH_REFLECTION_ENABLED",
+    ("diagnostics", "reflection", "decisions"): "STS2_BENCH_REFLECTION_DECISIONS",
+    ("diagnostics", "reflection", "mode"): "STS2_BENCH_REFLECTION_MODE",
+    ("diagnostics", "reflection", "max_options"): "STS2_BENCH_REFLECTION_MAX_OPTIONS",
+    ("diagnostics", "action_prompt_order", "mode"): "STS2_BENCH_ACTION_PROMPT_ORDER",
+    ("diagnostics", "action_prompt_order", "seed"): "STS2_BENCH_ACTION_PROMPT_ORDER_SEED",
 }
 
 
@@ -264,8 +294,8 @@ def env_float(name: str, default: float) -> float:
     return float(value) if value is not None else default
 
 
-def env_bool(name: str, default: bool = False) -> bool:
-    value = env_str(name)
+def env_bool(name: str, default: bool = False, *, fallbacks: tuple[str, ...] = ()) -> bool:
+    value = env_str(name, fallbacks=fallbacks)
     if value is None:
         return default
     normalized = value.strip().lower()
@@ -304,13 +334,40 @@ def build_run_config(args: argparse.Namespace, seeds: list[str], argv: list[str]
         "window": args.turn_chat_window,
         "update_mode": args.turn_chat_update_mode,
         "assistant_history": args.turn_chat_assistant_history,
-        "plan": {
-            "enabled": args.turn_chat_plan,
+        "turn_check": {
+            "enabled": args.turn_check,
+        },
+    }
+    diagnostics_config = {
+        "self_consistency": {
+            "enabled": args.self_consistency_enabled,
+            "samples": args.self_consistency_samples,
+            "decisions": args.self_consistency_decisions,
+            "mode": args.self_consistency_mode,
+        },
+        "reflection": {
+            "enabled": args.reflection_enabled,
+            "decisions": args.reflection_decisions,
+            "mode": args.reflection_mode,
+            "max_options": args.reflection_max_options,
+        },
+        "action_prompt_order": {
+            "mode": args.action_prompt_order,
+            "seed": args.action_prompt_order_seed,
         },
     }
     if args.agent == "coordinator":
         context_management: dict[str, object] = {
             "mode": "coordinator",
+            "route_plan": {
+                "enabled": args.route_plan_enabled,
+                "enforcement": args.route_plan_enforcement,
+            },
+            "run_plan": {
+                "route_plan": {
+                    "enabled": args.run_plan_route_plan_enabled,
+                },
+            },
             "ca": {
                 "mode": "turn_chat",
                 "turn_chat": turn_chat_config,
@@ -328,6 +385,15 @@ def build_run_config(args: argparse.Namespace, seeds: list[str], argv: list[str]
     else:
         context_management = {
             "mode": args.context_mode,
+            "route_plan": {
+                "enabled": args.route_plan_enabled,
+                "enforcement": args.route_plan_enforcement,
+            },
+            "run_plan": {
+                "route_plan": {
+                    "enabled": args.run_plan_route_plan_enabled,
+                },
+            },
             "turn_chat": turn_chat_config,
         }
 
@@ -350,6 +416,12 @@ def build_run_config(args: argparse.Namespace, seeds: list[str], argv: list[str]
             },
             "run_summary_enabled": args.run_summary,
             "context_management": context_management,
+            "diagnostics": diagnostics_config,
+            "combat": {
+                "card_sequences": {
+                    "enabled": args.combat_card_sequences,
+                },
+            },
         },
         "game": {
             "character": args.character,
@@ -474,16 +546,106 @@ def main(argv: list[str] | None = None) -> int:
         help="How turn_chat stores assistant messages in history",
     )
     parser.add_argument(
+        "--turn-check",
         "--turn-chat-plan",
+        dest="turn_check",
         action=argparse.BooleanOptionalAction,
-        default=env_bool("STS2_BENCH_TURN_CHAT_PLAN_ENABLED", False),
-        help="Ask the first turn_chat response in each player turn to include an advisory turn_plan",
+        default=env_bool(
+            "STS2_BENCH_TURN_CHECK_ENABLED",
+            False,
+            fallbacks=("STS2_BENCH_TURN_CHAT_PLAN_ENABLED",),
+        ),
+        help="Ask turn_chat combat responses to include an advisory current-state turn_check guardrail",
     )
     parser.add_argument(
         "--reward-posterior-evaluator",
         action=argparse.BooleanOptionalAction,
         default=env_bool("STS2_BENCH_REWARD_POSTERIOR_EVALUATOR", True),
         help="For coordinator card rewards, run an evidence-only LLM deck-state posterior evaluator before OCC chooses",
+    )
+    parser.add_argument(
+        "--route-plan",
+        "--route-plan-enabled",
+        dest="route_plan_enabled",
+        action=argparse.BooleanOptionalAction,
+        default=env_bool("STS2_BENCH_ROUTE_PLAN_ENABLED", True),
+        help="Enable map route_plan_event prompt instructions and runner validation",
+    )
+    parser.add_argument(
+        "--route-plan-enforcement",
+        choices=["hard", "soft"],
+        default=env_str("STS2_BENCH_ROUTE_PLAN_ENFORCEMENT", "hard"),
+        help="hard retries/blocks invalid route_plan_event outputs; soft only logs validation errors",
+    )
+    parser.add_argument(
+        "--run-plan-route-plan",
+        "--run-plan-route-plan-enabled",
+        dest="run_plan_route_plan_enabled",
+        action=argparse.BooleanOptionalAction,
+        default=env_bool("STS2_BENCH_RUN_PLAN_ROUTE_PLAN_ENABLED", True),
+        help="Enable the OCC RunPlan.route_plan field in prompt context and accepted run_plan_patch updates",
+    )
+    parser.add_argument(
+        "--self-consistency",
+        "--self-consistency-enabled",
+        dest="self_consistency_enabled",
+        action=argparse.BooleanOptionalAction,
+        default=env_bool("STS2_BENCH_SELF_CONSISTENCY_ENABLED", False),
+        help="For selected decision types, sample the same prompt multiple times and log vote distribution without changing the chosen action",
+    )
+    parser.add_argument(
+        "--self-consistency-samples",
+        type=int,
+        default=env_int("STS2_BENCH_SELF_CONSISTENCY_SAMPLES", 3),
+        help="Total samples per self-consistency decision, including the primary action",
+    )
+    parser.add_argument(
+        "--self-consistency-decisions",
+        default=env_str("STS2_BENCH_SELF_CONSISTENCY_DECISIONS", "map_select,card_reward"),
+        help="Comma-separated decision names to diagnose with self-consistency sampling",
+    )
+    parser.add_argument(
+        "--self-consistency-mode",
+        choices=["diagnostic", "majority_vote"],
+        default=env_str("STS2_BENCH_SELF_CONSISTENCY_MODE", "diagnostic"),
+        help="diagnostic logs votes only; majority_vote executes strict-majority choices only for map_select/card_reward and ties or combat decisions keep the primary action",
+    )
+    parser.add_argument(
+        "--reflection",
+        "--reflection-enabled",
+        dest="reflection_enabled",
+        action=argparse.BooleanOptionalAction,
+        default=env_bool("STS2_BENCH_REFLECTION_ENABLED", False),
+        help="For selected non-combat choices, generate one forced counterfactual report per non-view option, then ask a verifier to compare them",
+    )
+    parser.add_argument(
+        "--reflection-decisions",
+        default=env_str("STS2_BENCH_REFLECTION_DECISIONS", "card_reward"),
+        help="Comma-separated decision names for reflection; defaults to card_reward, or use noncombat_non_map for all OCC-style non-map choices",
+    )
+    parser.add_argument(
+        "--reflection-mode",
+        choices=["diagnostic", "verifier_vote"],
+        default=env_str("STS2_BENCH_REFLECTION_MODE", "diagnostic"),
+        help="diagnostic logs verifier choice only; verifier_vote executes the verifier-selected non-view action",
+    )
+    parser.add_argument(
+        "--reflection-max-options",
+        type=int,
+        default=env_int("STS2_BENCH_REFLECTION_MAX_OPTIONS", 8),
+        help="Skip reflection when the number of non-view candidate actions exceeds this cap",
+    )
+    parser.add_argument(
+        "--action-prompt-order",
+        choices=["default", "shuffle_map"],
+        default=env_str("STS2_BENCH_ACTION_PROMPT_ORDER", "default"),
+        help="How to order legal actions in LLM prompts. shuffle_map randomizes only map_select map candidates while preserving action_id values",
+    )
+    parser.add_argument(
+        "--action-prompt-order-seed",
+        type=int,
+        default=env_int("STS2_BENCH_ACTION_PROMPT_ORDER_SEED", 0),
+        help="Deterministic RNG seed for action prompt order ablations",
     )
     parser.add_argument(
         "--character",
@@ -537,6 +699,12 @@ def main(argv: list[str] | None = None) -> int:
         default=env_bool("STS2_BENCH_ALLOW_REPEAT_VIEWS", False),
         help="Allow view deck/map actions again after that information has already been viewed in the current decision",
     )
+    parser.add_argument(
+        "--combat-card-sequences",
+        action=argparse.BooleanOptionalAction,
+        default=env_bool("STS2_BENCH_COMBAT_CARD_SEQUENCES_ENABLED", True),
+        help="Expose multi-card combat sequence actions; disable for strict one-card combat decisions",
+    )
     args = parser.parse_args(argv)
 
     seeds = load_seeds(args.seeds, args.count)
@@ -567,8 +735,22 @@ def main(argv: list[str] | None = None) -> int:
             turn_chat_window=args.turn_chat_window,
             turn_chat_update_mode=args.turn_chat_update_mode,
             turn_chat_assistant_history=args.turn_chat_assistant_history,
-            turn_chat_plan_enabled=args.turn_chat_plan,
+            turn_chat_plan_enabled=args.turn_check,
+            route_plan_enabled=args.route_plan_enabled,
+            route_plan_enforcement=args.route_plan_enforcement,
+            run_plan_route_plan_enabled=args.run_plan_route_plan_enabled,
             reward_posterior_evaluator_enabled=args.reward_posterior_evaluator,
+            self_consistency_enabled=args.self_consistency_enabled,
+            self_consistency_samples=args.self_consistency_samples,
+            self_consistency_decisions=args.self_consistency_decisions,
+            self_consistency_mode=args.self_consistency_mode,
+            reflection_enabled=args.reflection_enabled,
+            reflection_decisions=args.reflection_decisions,
+            reflection_mode=args.reflection_mode,
+            reflection_max_options=args.reflection_max_options,
+            action_prompt_order=args.action_prompt_order,
+            action_prompt_order_seed=args.action_prompt_order_seed,
+            combat_card_sequences_enabled=args.combat_card_sequences,
         )
         for seed in seeds:
             result = run_one(
@@ -584,7 +766,10 @@ def main(argv: list[str] | None = None) -> int:
                 print_model_output=args.print_model_output,
                 include_full_map=args.include_full_map,
                 allow_repeat_views=args.allow_repeat_views,
+                combat_card_sequences_enabled=args.combat_card_sequences,
                 log_level=args.log_level,
+                route_plan_enabled=args.route_plan_enabled,
+                route_plan_enforcement=args.route_plan_enforcement,
             )
             results.append(result)
             print(json.dumps({"seed": seed, "result": result.to_dict()}, ensure_ascii=False), flush=True)
