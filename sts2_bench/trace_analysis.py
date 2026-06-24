@@ -666,6 +666,12 @@ def _deck_changes_from_text(raw_change: Any) -> list[dict[str, Any]]:
 
 
 def _expand_counted_deck_change(operation: str, name: str, raw: str) -> list[dict[str, Any]]:
+    names = _split_multi_deck_change_names(operation, name)
+    if len(names) > 1:
+        changes: list[dict[str, Any]] = []
+        for item in names:
+            changes.extend(_expand_counted_deck_change(operation, item, raw))
+        return changes
     match = re.match(r"^(?P<name>.+?)x(?P<count>[2-9]\d*)$", name)
     if match:
         name = match.group("name").strip()
@@ -673,6 +679,14 @@ def _expand_counted_deck_change(operation: str, name: str, raw: str) -> list[dic
     else:
         count = 1
     return [{"operation": operation, "name": name, "raw": raw} for _ in range(count)]
+
+
+def _split_multi_deck_change_names(operation: str, name: str) -> list[str]:
+    marker = "+" if operation == "add" else "-" if operation == "remove" else ""
+    if not marker or f" {marker}" not in name:
+        return [name.strip()]
+    parts = [item.strip() for item in re.split(rf"\s+\{marker}(?=[A-Za-z])", name) if item.strip()]
+    return parts or [name.strip()]
 
 
 def _remove_card_from_deck(deck: list[str], card: str) -> bool:

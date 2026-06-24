@@ -1120,6 +1120,77 @@ def test_analyze_trace_uses_character_starter_deck_when_trace_has_no_deck_snapsh
     assert counts == {"Strike": 5, "Defend": 4, "Bash": 1, "Twin Strike": 1}
 
 
+def test_analyze_trace_splits_multi_card_bundle_deck_additions(tmp_path):
+    trace_path = tmp_path / "bundle_deck_additions.jsonl"
+    out_dir = tmp_path / "analysis"
+    rows = [
+        {"type": "start", "seed": "seed-a", "character": "Ironclad", "ascension": 0},
+        _decision(
+            0,
+            _state(
+                "bundle_select",
+                act=1,
+                floor=1,
+                room="Event",
+                hp=80,
+                max_hp=80,
+                player={"hp": 80, "max_hp": 80, "gold": 99, "deck_size": 10},
+            ),
+            [
+                {
+                    "action_id": 0,
+                    "kind": "bundle_select",
+                    "label": "select bundle 1: Iron Wave, Shrug It Off, Dismantle",
+                }
+            ],
+        ),
+        _action(0, "bundle_select", "select bundle 1: Iron Wave, Shrug It Off, Dismantle", "bundle_select"),
+        _decision(
+            1,
+            _state(
+                "map_select",
+                act=1,
+                floor=1,
+                room="Map",
+                hp=80,
+                max_hp=80,
+                player={"hp": 80, "max_hp": 80, "gold": 99, "deck_size": 13},
+                last_action_result={
+                    "action_label": "select bundle 1: Iron Wave, Shrug It Off, Dismantle",
+                    "changes": ["deck: +Iron Wave +Shrug It Off +Dismantle"],
+                },
+            ),
+            [],
+        ),
+        {
+            "type": "result",
+            "result": {
+                "seed": "seed-a",
+                "character": "Ironclad",
+                "ascension": 0,
+                "victory": False,
+                "decision": "game_over",
+                "act": 1,
+                "floor": 1,
+                "room_type": "Event",
+                "hp": 80,
+                "max_hp": 80,
+                "deck_size": 13,
+                "error": None,
+                "truncated": False,
+            },
+        },
+    ]
+    _write_jsonl(trace_path, rows)
+
+    report = analyze_trace(trace_path, out_dir)
+
+    assert report["final_deck"]["size"] == 13
+    assert report["final_deck"]["matches_result_deck_size"] is True
+    names = [card["name"] for card in report["final_deck"]["cards"]]
+    assert names[-3:] == ["Iron Wave", "Shrug It Off", "Dismantle"]
+
+
 def test_analyze_trace_does_not_use_mid_run_card_select_as_initial_deck(tmp_path):
     trace_path = tmp_path / "mid_run_card_select_not_initial.jsonl"
     out_dir = tmp_path / "analysis"
