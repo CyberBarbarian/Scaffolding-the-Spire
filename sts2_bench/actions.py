@@ -104,9 +104,255 @@ def _card_cost_value(card: dict[str, Any]) -> int:
     return 99
 
 
+def _single_card_kills_only_enemy(state: dict[str, Any], playable_cards: list[dict[str, Any]]) -> bool:
+    live_enemies = [
+        enemy
+        for enemy in state.get("enemies", []) or []
+        if isinstance(enemy, dict) and enemy.get("hp", 0) > 0 and enemy.get("targetable", True) is not False
+    ]
+    if len(live_enemies) != 1:
+        return False
+    enemy = live_enemies[0]
+    target_index = enemy.get("index")
+    hp = _numeric_value(enemy.get("hp"))
+    if target_index is None or hp is None:
+        return False
+    for card in playable_cards:
+        if str(card.get("target_type") or "") not in {"AnyEnemy", "AllEnemies"}:
+            continue
+        damage = _target_specific_damage(card, target_index)
+        if damage is not None and damage >= hp:
+            return True
+    return False
+
+
+def _should_expose_custom_sequence(state: dict[str, Any], playable_cards: list[dict[str, Any]]) -> bool:
+    if not _has_custom_sequence_entrypoint(state, playable_cards):
+        return False
+    if any(not _is_sequence_safe_card(card) for card in playable_cards):
+        return False
+    if _has_insufficient_one_shot_free_attack_charges(state, playable_cards):
+        return False
+    if _single_card_kills_only_enemy(state, playable_cards):
+        return False
+    if _has_live_enemy_powers(state):
+        return False
+    if _has_modifier_changing_card(playable_cards):
+        return False
+    if _has_target_specific_damage_adjustment(state, playable_cards):
+        return False
+    if _has_cumulative_attack_lethal(state, playable_cards):
+        return False
+    return True
+
+
+def _has_custom_sequence_entrypoint(state: dict[str, Any], playable_cards: list[dict[str, Any]]) -> bool:
+    hand_cards = [card for card in state.get("hand", []) or [] if isinstance(card, dict)]
+    if len(hand_cards) < 2:
+        return False
+    if len(playable_cards) >= 2:
+        return True
+    return any(_card_grants_energy(card) for card in playable_cards)
+
+
+def _card_grants_energy(card: dict[str, Any]) -> bool:
+    stats = card.get("stats") if isinstance(card.get("stats"), dict) else {}
+    for key, value in stats.items():
+        if "energy" not in str(key).lower():
+            continue
+        amount = _numeric_value(value)
+        if amount is not None and amount > 0:
+            return True
+    return False
+
+
+def _has_live_enemy_powers(state: dict[str, Any]) -> bool:
+    for enemy in state.get("enemies", []) or []:
+        if not isinstance(enemy, dict) or enemy.get("hp", 0) <= 0:
+            continue
+        if enemy.get("powers"):
+            return True
+    return False
+
+
+def _has_insufficient_one_shot_free_attack_charges(
+    state: dict[str, Any],
+    playable_cards: list[dict[str, Any]],
+) -> bool:
+    charges = _one_shot_free_attack_charges(state)
+    if charges is None:
+        return False
+    playable_attacks = sum(1 for card in playable_cards if _is_attack_card(card))
+    return playable_attacks > charges
+
+
+def _one_shot_free_attack_charges(state: dict[str, Any]) -> int | None:
+    for power in _player_powers(state):
+        text = _power_search_text(power)
+        if "free_attack_power" not in text and not (
+            "next attack" in text and ("costs 0" in text or "cost 0" in text or "free" in text)
+        ):
+            continue
+        amount = _numeric_value(power.get("amount"))
+        if amount is None:
+            return 1
+        return max(1, int(amount))
+    return None
+
+
+def _player_powers(state: dict[str, Any]) -> list[dict[str, Any]]:
+    direct = state.get("player_powers")
+    if isinstance(direct, list):
+        return [power for power in direct if isinstance(power, dict)]
+    player = state.get("player") if isinstance(state.get("player"), dict) else {}
+    powers = player.get("powers") if isinstance(player.get("powers"), list) else []
+    return [power for power in powers if isinstance(power, dict)]
+
+
+def _power_search_text(power: dict[str, Any]) -> str:
+    parts = [
+        str(power.get("id") or ""),
+        _name(power.get("name")),
+        str(power.get("description") or ""),
+        str(power.get("raw_description") or ""),
+    ]
+    return " ".join(parts).replace("[E]", "0").lower()
+
+
+def _is_attack_card(card: dict[str, Any]) -> bool:
+    return str(card.get("type") or "") == "Attack"
+
+
+def _has_modifier_changing_card(playable_cards: list[dict[str, Any]]) -> bool:
+    for card in playable_cards:
+        stats = card.get("stats") if isinstance(card.get("stats"), dict) else {}
+        keys = {str(key).lower() for key in stats}
+        if any(marker in key for key in keys for marker in ("vulnerable", "weak", "strength", "dexterity")):
+            return True
+    return False
+
+
+def _has_target_specific_damage_adjustment(state: dict[str, Any], playable_cards: list[dict[str, Any]]) -> bool:
+    live_enemies = [
+        enemy
+        for enemy in state.get("enemies", []) or []
+        if isinstance(enemy, dict) and enemy.get("hp", 0) > 0 and enemy.get("targetable", True) is not False
+    ]
+    for card in playable_cards:
+        if str(card.get("target_type") or "") not in {"AnyEnemy", "AllEnemies"}:
+            continue
+        base_damage = _base_card_damage(card)
+        stats = card.get("stats") if isinstance(card.get("stats"), dict) else {}
+        for enemy in live_enemies:
+            target_index = enemy.get("index")
+            if target_index is None:
+                continue
+            for key in ("damage_by_target", "calculateddamage_by_target"):
+                entry = _target_specific_entry(stats.get(key), target_index)
+                if _target_specific_entry_is_adjusted(entry, base_damage):
+                    return True
+    return False
+
+
+def _has_cumulative_attack_lethal(state: dict[str, Any], playable_cards: list[dict[str, Any]]) -> bool:
+    live_enemies = [
+        enemy
+        for enemy in state.get("enemies", []) or []
+        if isinstance(enemy, dict) and enemy.get("hp", 0) > 0 and enemy.get("targetable", True) is not False
+    ]
+    for enemy in live_enemies:
+        target_index = enemy.get("index")
+        hp = _numeric_value(enemy.get("hp"))
+        if target_index is None or hp is None:
+            continue
+        total = 0.0
+        for card in playable_cards:
+            if str(card.get("target_type") or "") not in {"AnyEnemy", "AllEnemies"}:
+                continue
+            damage = _target_specific_damage(card, target_index)
+            if damage is None:
+                damage = _base_card_damage(card)
+            if damage is not None and damage > 0:
+                total += damage
+        if total >= hp:
+            return True
+    return False
+
+
+def _base_card_damage(card: dict[str, Any]) -> float | None:
+    stats = card.get("stats") if isinstance(card.get("stats"), dict) else {}
+    for key in ("damage", "calculateddamage"):
+        value = _numeric_value(stats.get(key))
+        if value is not None:
+            return value
+    return None
+
+
+def _target_specific_entry_is_adjusted(entry: Any, base_damage: float | None) -> bool:
+    if entry is None:
+        return False
+    if isinstance(entry, dict):
+        block = _numeric_value(entry.get("block"))
+        if block is not None and block > 0:
+            return True
+        for key in ("unblocked_damage", "damage", "calculateddamage"):
+            damage = _numeric_value(entry.get(key))
+            if damage is not None:
+                return base_damage is not None and damage != base_damage
+        return False
+    damage = _numeric_value(entry)
+    return damage is not None and base_damage is not None and damage != base_damage
+
+
+def _target_specific_damage(card: dict[str, Any], target_index: int) -> float | None:
+    stats = card.get("stats") if isinstance(card.get("stats"), dict) else {}
+    for key in ("damage_by_target", "calculateddamage_by_target"):
+        damage = _target_specific_damage_from_entries(stats.get(key), target_index)
+        if damage is not None:
+            return damage
+    return None
+
+
+def _target_specific_damage_from_entries(damage_by_target: Any, target_index: int) -> float | None:
+    entry = _target_specific_entry(damage_by_target, target_index)
+    if isinstance(entry, dict):
+        for key in ("unblocked_damage", "damage", "calculateddamage"):
+            value = entry.get(key)
+            if value is not None:
+                return _numeric_value(value)
+        return None
+    return _numeric_value(entry)
+
+
+def _target_specific_entry(damage_by_target: Any, target_index: int) -> Any:
+    if isinstance(damage_by_target, list):
+        return next(
+            (
+                item
+                for item in damage_by_target
+                if isinstance(item, dict) and item.get("target_index") == target_index
+            ),
+            None,
+        )
+    if isinstance(damage_by_target, dict):
+        if target_index in damage_by_target:
+            return damage_by_target[target_index]
+        if str(target_index) in damage_by_target:
+            return damage_by_target[str(target_index)]
+    return None
+
+
+def _numeric_value(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    return None
+
+
 def _is_sequence_safe_card(card: dict[str, Any]) -> bool:
     target_type = str(card.get("target_type") or "")
-    if target_type not in {"None", "AnyEnemy"}:
+    if target_type not in {"None", "Self", "AnyEnemy"}:
         return False
     stats = card.get("stats") or {}
     if any(str(key).lower() in _UNSAFE_SEQUENCE_STATS for key in stats):
@@ -242,7 +488,9 @@ def build_legal_actions(
     state: dict[str, Any],
     *,
     allow_repeat_views: bool = False,
+    allow_card_sequences: bool = True,
     allow_custom_sequences: bool = True,
+    blocked_card_reward_claims: set[Any] | None = None,
 ) -> list[LegalAction]:
     """Build legal actions from the current decision point.
 
@@ -287,7 +535,8 @@ def build_legal_actions(
                 continue
             playable_cards.append(card)
             raw.extend(_targeted_card_actions(state, card))
-        raw.extend(_combat_card_sequence_actions(state, playable_cards))
+        if allow_card_sequences:
+            raw.extend(_combat_card_sequence_actions(state, playable_cards))
 
         player = state.get("player") or {}
         for potion in player.get("potions", []) or state.get("potions", []) or []:
@@ -321,27 +570,44 @@ def build_legal_actions(
                 )
 
         raw.append(_action("end turn", "end_turn", "combat_end_turn"))
-        if playable_cards and allow_custom_sequences:
+        if (
+            playable_cards
+            and allow_card_sequences
+            and allow_custom_sequences
+            and _should_expose_custom_sequence(state, playable_cards)
+        ):
             raw.append(_custom_sequence_action())
 
     elif decision == "combat_reward":
         rewards = state.get("rewards") or []
+        blocked_card_reward_claims = blocked_card_reward_claims or set()
         for reward in rewards:
             reward_index = reward.get("index")
             reward_kind = reward.get("kind", reward.get("type_name", "?"))
-            if reward.get("can_claim") is not False:
+            is_blocked_card_reward = reward_kind == "card_reward" and reward_index in blocked_card_reward_claims
+            if reward.get("can_claim") is not False and not is_blocked_card_reward:
+                label = (
+                    f"open card reward {reward_index}: reveal offered cards"
+                    if reward_kind == "card_reward"
+                    else f"claim reward {reward_index}: {reward_kind}"
+                )
                 raw.append(
                     _action(
-                        f"claim reward {reward_index}: {reward_kind}",
+                        label,
                         "claim_reward",
                         "combat_reward",
                         reward_index=reward_index,
                     )
                 )
             if reward.get("can_skip"):
+                label = (
+                    f"skip unopened card reward {reward_index}"
+                    if reward_kind == "card_reward"
+                    else f"skip reward {reward_index}: {reward_kind}"
+                )
                 raw.append(
                     _action(
-                        f"skip reward {reward_index}: {reward_kind}",
+                        label,
                         "skip_reward",
                         "combat_reward_skip",
                         reward_index=reward_index,

@@ -16,6 +16,7 @@ def build_route_graph(
     choices: list[dict[str, Any]] | None = None,
     *,
     legal_actions: list[LegalAction] | None = None,
+    winged_boots_remaining: int | None = None,
 ) -> dict[str, Any]:
     """Build a machine-readable graph for route-plan prompting and checks."""
 
@@ -51,15 +52,19 @@ def build_route_graph(
             choice["action_id"] = action_id
         legal_starts.append(choice)
 
+    constraints = {
+        "ordered_plan_required": True,
+        "complete_visible_route_required": True,
+        "winged_boots_max_forward_jumps": 3,
+    }
+    if winged_boots_remaining is not None:
+        constraints["winged_boots_remaining_forward_jumps"] = max(0, min(3, int(winged_boots_remaining)))
+
     return {
         "current": current,
         "legal_starts": legal_starts,
         "nodes": nodes,
-        "constraints": {
-            "ordered_plan_required": True,
-            "complete_visible_route_required": True,
-            "winged_boots_max_forward_jumps": 3,
-        },
+        "constraints": constraints,
     }
 
 

@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 
 from .runner import JsonlLogger, agent_from_args, run_one, summarize
+from .trace_analysis import analyze_benchmark_trace
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -41,7 +42,23 @@ CONFIG_ENV_KEYS = {
     "print_model_output": "STS2_BENCH_PRINT_MODEL_OUTPUT",
     "include_full_map": "STS2_BENCH_INCLUDE_FULL_MAP",
     "allow_repeat_views": "STS2_BENCH_ALLOW_REPEAT_VIEWS",
+    "allow_custom_sequences": "STS2_BENCH_ALLOW_CUSTOM_SEQUENCES",
+    "combat_card_sequences_enabled": "STS2_BENCH_COMBAT_CARD_SEQUENCES",
+    "route_plan_enabled": "STS2_BENCH_ROUTE_PLAN_ENABLED",
+    "route_plan_enforcement": "STS2_BENCH_ROUTE_PLAN_ENFORCEMENT",
     "reward_posterior_evaluator": "STS2_BENCH_REWARD_POSTERIOR_EVALUATOR",
+    "self_consistency_enabled": "STS2_BENCH_SELF_CONSISTENCY",
+    "self_consistency_samples": "STS2_BENCH_SELF_CONSISTENCY_SAMPLES",
+    "self_consistency_decisions": "STS2_BENCH_SELF_CONSISTENCY_DECISIONS",
+    "self_consistency_mode": "STS2_BENCH_SELF_CONSISTENCY_MODE",
+    "reflection_enabled": "STS2_BENCH_REFLECTION_VERIFIER",
+    "reflection_decisions": "STS2_BENCH_REFLECTION_DECISIONS",
+    "reflection_mode": "STS2_BENCH_REFLECTION_MODE",
+    "reflection_max_options": "STS2_BENCH_REFLECTION_MAX_OPTIONS",
+    "action_prompt_order": "STS2_BENCH_ACTION_PROMPT_ORDER",
+    "action_prompt_order_seed": "STS2_BENCH_ACTION_PROMPT_ORDER_SEED",
+    "trace_analysis": "STS2_BENCH_TRACE_ANALYSIS",
+    "trace_analysis_dir": "STS2_BENCH_TRACE_ANALYSIS_DIR",
 }
 NESTED_CONFIG_ENV_KEYS = {
     ("context_management", "mode"): "STS2_BENCH_CONTEXT_MODE",
@@ -49,6 +66,19 @@ NESTED_CONFIG_ENV_KEYS = {
     ("context_management", "turn_chat", "update_mode"): "STS2_BENCH_TURN_CHAT_UPDATE_MODE",
     ("context_management", "turn_chat", "assistant_history"): "STS2_BENCH_TURN_CHAT_ASSISTANT_HISTORY",
     ("context_management", "turn_chat", "plan", "enabled"): "STS2_BENCH_TURN_CHAT_PLAN_ENABLED",
+    ("context_management", "turn_check", "enabled"): "STS2_BENCH_TURN_CHECK_ENABLED",
+    ("route_plan", "enabled"): "STS2_BENCH_ROUTE_PLAN_ENABLED",
+    ("route_plan", "enforcement"): "STS2_BENCH_ROUTE_PLAN_ENFORCEMENT",
+    ("diagnostics", "self_consistency", "enabled"): "STS2_BENCH_SELF_CONSISTENCY",
+    ("diagnostics", "self_consistency", "samples"): "STS2_BENCH_SELF_CONSISTENCY_SAMPLES",
+    ("diagnostics", "self_consistency", "decisions"): "STS2_BENCH_SELF_CONSISTENCY_DECISIONS",
+    ("diagnostics", "self_consistency", "mode"): "STS2_BENCH_SELF_CONSISTENCY_MODE",
+    ("diagnostics", "reflection_verifier", "enabled"): "STS2_BENCH_REFLECTION_VERIFIER",
+    ("diagnostics", "reflection_verifier", "decisions"): "STS2_BENCH_REFLECTION_DECISIONS",
+    ("diagnostics", "reflection_verifier", "mode"): "STS2_BENCH_REFLECTION_MODE",
+    ("diagnostics", "reflection_verifier", "max_options"): "STS2_BENCH_REFLECTION_MAX_OPTIONS",
+    ("diagnostics", "action_prompt_order", "mode"): "STS2_BENCH_ACTION_PROMPT_ORDER",
+    ("diagnostics", "action_prompt_order", "seed"): "STS2_BENCH_ACTION_PROMPT_ORDER_SEED",
 }
 
 
@@ -276,6 +306,26 @@ def env_bool(name: str, default: bool = False) -> bool:
     raise ValueError(f"{name} must be a boolean value, got {value!r}")
 
 
+def _default_trace_analysis_dir(out: str | Path) -> Path:
+    trace_path = Path(out)
+    return Path("artifacts") / "trace_analysis" / trace_path.stem
+
+
+def _resolve_trace_analysis_dir(
+    *,
+    out: str | Path | None,
+    trace_analysis_enabled: bool,
+    trace_analysis_dir: str | Path | None,
+) -> Path | None:
+    if not trace_analysis_enabled:
+        return None
+    if trace_analysis_dir:
+        return Path(trace_analysis_dir)
+    if not out:
+        return None
+    return _default_trace_analysis_dir(out)
+
+
 def _redact_argv(argv: list[str]) -> list[str]:
     redacted: list[str] = []
     redact_next = False
@@ -300,28 +350,33 @@ def _redact_argv(argv: list[str]) -> list[str]:
 def build_run_config(args: argparse.Namespace, seeds: list[str], argv: list[str]) -> dict[str, object]:
     """Build a redacted, resolved benchmark config for logs and trace files."""
 
+    turn_check_enabled = bool(getattr(args, "turn_check", getattr(args, "turn_chat_plan", False)))
     turn_chat_config = {
         "window": args.turn_chat_window,
         "update_mode": args.turn_chat_update_mode,
         "assistant_history": args.turn_chat_assistant_history,
-        "plan": {
-            "enabled": args.turn_chat_plan,
+        "turn_check": {
+            "enabled": turn_check_enabled,
         },
     }
     if args.agent == "coordinator":
+        ca_mode = "combat_mdp_state" if args.context_mode == "combat_mdp_state" else "turn_chat"
+        ca_context: dict[str, object] = {"mode": ca_mode}
+        if ca_mode == "combat_mdp_state":
+            ca_context["turn_process"] = "structured_current_turn_actions"
+        else:
+            ca_context["turn_chat"] = turn_chat_config
         context_management: dict[str, object] = {
             "mode": "coordinator",
-            "ca": {
-                "mode": "turn_chat",
-                "turn_chat": turn_chat_config,
-            },
+            "ca": ca_context,
             "occ": {
-                "mode": "reference_turn",
+                "mode": "room_process",
                 "run_context": "rm_rp_slice",
                 "reward_posterior_evaluator": bool(getattr(args, "reward_posterior_evaluator", True)),
-                "reference_context": {
-                    "window": args.turn_chat_window,
-                    "source": "rm_rp_slice_plus_short_occ_history",
+                "room_context": {
+                    "scope": "current_room",
+                    "source": "rm_rp_slice_plus_room_process_ledger",
+                    "reset": "room_change_or_map",
                 },
             },
         }
@@ -350,6 +405,28 @@ def build_run_config(args: argparse.Namespace, seeds: list[str], argv: list[str]
             },
             "run_summary_enabled": args.run_summary,
             "context_management": context_management,
+            "route_plan": {
+                "enabled": bool(getattr(args, "route_plan_enabled", True)),
+                "enforcement": getattr(args, "route_plan_enforcement", "hard"),
+            },
+            "diagnostics": {
+                "self_consistency": {
+                    "enabled": bool(getattr(args, "self_consistency_enabled", False)),
+                    "samples": getattr(args, "self_consistency_samples", 3),
+                    "decisions": getattr(args, "self_consistency_decisions", "map_select,card_reward"),
+                    "mode": getattr(args, "self_consistency_mode", "diagnostic"),
+                },
+                "reflection_verifier": {
+                    "enabled": bool(getattr(args, "reflection_enabled", False)),
+                    "decisions": getattr(args, "reflection_decisions", "card_reward"),
+                    "mode": getattr(args, "reflection_mode", "diagnostic"),
+                    "max_options": getattr(args, "reflection_max_options", 8),
+                },
+                "action_prompt_order": {
+                    "mode": getattr(args, "action_prompt_order", "default"),
+                    "seed": getattr(args, "action_prompt_order_seed", 0),
+                },
+            },
         },
         "game": {
             "character": args.character,
@@ -364,12 +441,16 @@ def build_run_config(args: argparse.Namespace, seeds: list[str], argv: list[str]
             "max_game_actions": args.max_game_actions,
             "include_full_map": args.include_full_map,
             "allow_repeat_views": args.allow_repeat_views,
+            "allow_custom_sequences": bool(getattr(args, "allow_custom_sequences", True)),
+            "combat_card_sequences": bool(getattr(args, "combat_card_sequences_enabled", True)),
         },
         "logging": {
             "out": args.out,
             "log_level": args.log_level,
             "print_prompts": args.print_prompts,
             "print_model_output": args.print_model_output,
+            "trace_analysis": bool(getattr(args, "trace_analysis", True)),
+            "trace_analysis_dir": getattr(args, "trace_analysis_dir", None),
         },
     }
 
@@ -451,9 +532,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--context-mode",
-        choices=["single_turn", "turn_chat"],
+        choices=["single_turn", "turn_chat", "combat_mdp_state"],
         default=env_str("STS2_BENCH_CONTEXT_MODE", "single_turn", fallbacks=("STS2_BENCH_CONVERSATION_MODE",)),
-        help="Agent context-management mode. turn_chat keeps short chat history only within a player combat turn.",
+        help=(
+            "Agent context-management mode. turn_chat keeps short chat history only within a player combat turn; "
+            "combat_mdp_state uses structured current-turn combat facts without chat-history replay."
+        ),
     )
     parser.add_argument(
         "--turn-chat-window",
@@ -474,16 +558,94 @@ def main(argv: list[str] | None = None) -> int:
         help="How turn_chat stores assistant messages in history",
     )
     parser.add_argument(
+        "--turn-check",
         "--turn-chat-plan",
+        dest="turn_chat_plan",
         action=argparse.BooleanOptionalAction,
-        default=env_bool("STS2_BENCH_TURN_CHAT_PLAN_ENABLED", False),
-        help="Ask the first turn_chat response in each player turn to include an advisory turn_plan",
+        default=env_bool(
+            "STS2_BENCH_TURN_CHECK_ENABLED",
+            env_bool("STS2_BENCH_TURN_CHAT_PLAN_ENABLED", False),
+        ),
+        help="Ask combat prompts to include a current-state turn_check tactical guardrail",
+    )
+    parser.add_argument(
+        "--route-plan",
+        action=argparse.BooleanOptionalAction,
+        dest="route_plan_enabled",
+        default=env_bool("STS2_BENCH_ROUTE_PLAN_ENABLED", True),
+        help="Enable route-plan prompting and runner validation",
+    )
+    parser.add_argument(
+        "--route-plan-enforcement",
+        choices=["hard", "soft"],
+        default=env_str("STS2_BENCH_ROUTE_PLAN_ENFORCEMENT", "hard"),
+        help="Route-plan validation behavior: hard retries/stops; soft logs diagnostics only",
     )
     parser.add_argument(
         "--reward-posterior-evaluator",
         action=argparse.BooleanOptionalAction,
         default=env_bool("STS2_BENCH_REWARD_POSTERIOR_EVALUATOR", True),
         help="For coordinator card rewards, run an evidence-only LLM deck-state posterior evaluator before OCC chooses",
+    )
+    parser.add_argument(
+        "--self-consistency",
+        action=argparse.BooleanOptionalAction,
+        dest="self_consistency_enabled",
+        default=env_bool("STS2_BENCH_SELF_CONSISTENCY", False),
+        help="Run extra diagnostic samples for selected decision types",
+    )
+    parser.add_argument(
+        "--self-consistency-samples",
+        type=int,
+        default=env_int("STS2_BENCH_SELF_CONSISTENCY_SAMPLES", 3),
+        help="Number of total self-consistency samples including the primary response",
+    )
+    parser.add_argument(
+        "--self-consistency-decisions",
+        default=env_str("STS2_BENCH_SELF_CONSISTENCY_DECISIONS", "map_select,card_reward"),
+        help="Comma-separated decisions for self-consistency diagnostics",
+    )
+    parser.add_argument(
+        "--self-consistency-mode",
+        choices=["diagnostic", "majority_vote"],
+        default=env_str("STS2_BENCH_SELF_CONSISTENCY_MODE", "diagnostic"),
+        help="Whether self-consistency only logs votes or can apply majority_vote",
+    )
+    parser.add_argument(
+        "--reflection-verifier",
+        action=argparse.BooleanOptionalAction,
+        dest="reflection_enabled",
+        default=env_bool("STS2_BENCH_REFLECTION_VERIFIER", False),
+        help="Run strict per-option reflection verifier diagnostics",
+    )
+    parser.add_argument(
+        "--reflection-decisions",
+        default=env_str("STS2_BENCH_REFLECTION_DECISIONS", "card_reward"),
+        help="Comma-separated decisions for reflection verifier diagnostics",
+    )
+    parser.add_argument(
+        "--reflection-mode",
+        choices=["diagnostic", "verifier_vote"],
+        default=env_str("STS2_BENCH_REFLECTION_MODE", "diagnostic"),
+        help="Whether reflection only logs or can apply verifier_vote",
+    )
+    parser.add_argument(
+        "--reflection-max-options",
+        type=int,
+        default=env_int("STS2_BENCH_REFLECTION_MAX_OPTIONS", 8),
+        help="Maximum number of non-view candidate actions eligible for reflection",
+    )
+    parser.add_argument(
+        "--action-prompt-order",
+        choices=["default", "shuffle_map"],
+        default=env_str("STS2_BENCH_ACTION_PROMPT_ORDER", "default"),
+        help="Diagnostic legal-action display ordering mode",
+    )
+    parser.add_argument(
+        "--action-prompt-order-seed",
+        type=int,
+        default=env_int("STS2_BENCH_ACTION_PROMPT_ORDER_SEED", 0),
+        help="Seed for diagnostic legal-action display ordering",
     )
     parser.add_argument(
         "--character",
@@ -537,7 +699,42 @@ def main(argv: list[str] | None = None) -> int:
         default=env_bool("STS2_BENCH_ALLOW_REPEAT_VIEWS", False),
         help="Allow view deck/map actions again after that information has already been viewed in the current decision",
     )
+    parser.add_argument(
+        "--allow-custom-sequences",
+        action=argparse.BooleanOptionalAction,
+        default=env_bool("STS2_BENCH_ALLOW_CUSTOM_SEQUENCES", True),
+        help="Expose the model-proposed combat_custom_sequence gateway for LLM agents",
+    )
+    parser.add_argument(
+        "--combat-card-sequences",
+        action=argparse.BooleanOptionalAction,
+        dest="combat_card_sequences_enabled",
+        default=env_bool("STS2_BENCH_COMBAT_CARD_SEQUENCES", True),
+        help="Expose combat_card_sequence and combat_custom_sequence actions",
+    )
+    parser.add_argument(
+        "--trace-analysis-dir",
+        default=env_str("STS2_BENCH_TRACE_ANALYSIS_DIR"),
+        help=(
+            "Directory for replay/report artifacts. Defaults to artifacts/trace_analysis/<trace stem> "
+            "when trace analysis is enabled."
+        ),
+    )
+    parser.add_argument(
+        "--trace-analysis",
+        action=argparse.BooleanOptionalAction,
+        default=env_bool("STS2_BENCH_TRACE_ANALYSIS", True),
+        help="After the run, split the JSONL trace per seed and write replay/report artifacts",
+    )
     args = parser.parse_args(argv)
+    resolved_trace_analysis_dir = _resolve_trace_analysis_dir(
+        out=args.out,
+        trace_analysis_enabled=args.trace_analysis,
+        trace_analysis_dir=args.trace_analysis_dir,
+    )
+    if args.trace_analysis and resolved_trace_analysis_dir is None:
+        parser.error("--trace-analysis requires --out so the replay/report analyzer has a trace to read")
+    args.trace_analysis_dir = str(resolved_trace_analysis_dir) if resolved_trace_analysis_dir is not None else None
 
     seeds = load_seeds(args.seeds, args.count)
     run_config = build_run_config(args, seeds, list(argv if argv is not None else sys.argv[1:]))
@@ -568,7 +765,21 @@ def main(argv: list[str] | None = None) -> int:
             turn_chat_update_mode=args.turn_chat_update_mode,
             turn_chat_assistant_history=args.turn_chat_assistant_history,
             turn_chat_plan_enabled=args.turn_chat_plan,
+            turn_check_enabled=args.turn_chat_plan,
+            route_plan_enabled=args.route_plan_enabled,
+            route_plan_enforcement=args.route_plan_enforcement,
             reward_posterior_evaluator_enabled=args.reward_posterior_evaluator,
+            self_consistency_enabled=args.self_consistency_enabled,
+            self_consistency_samples=args.self_consistency_samples,
+            self_consistency_decisions=args.self_consistency_decisions,
+            self_consistency_mode=args.self_consistency_mode,
+            reflection_enabled=args.reflection_enabled,
+            reflection_decisions=args.reflection_decisions,
+            reflection_mode=args.reflection_mode,
+            reflection_max_options=args.reflection_max_options,
+            action_prompt_order=args.action_prompt_order,
+            action_prompt_order_seed=args.action_prompt_order_seed,
+            combat_card_sequences_enabled=args.combat_card_sequences_enabled,
         )
         for seed in seeds:
             result = run_one(
@@ -584,14 +795,22 @@ def main(argv: list[str] | None = None) -> int:
                 print_model_output=args.print_model_output,
                 include_full_map=args.include_full_map,
                 allow_repeat_views=args.allow_repeat_views,
+                allow_custom_sequences=args.allow_custom_sequences,
+                combat_card_sequences_enabled=args.combat_card_sequences_enabled,
                 log_level=args.log_level,
+                route_plan_enabled=args.route_plan_enabled,
+                route_plan_enforcement=args.route_plan_enforcement,
             )
             results.append(result)
             print(json.dumps({"seed": seed, "result": result.to_dict()}, ensure_ascii=False), flush=True)
+        exit_code = 0 if all(result.error is None for result in results) else 1
         print(json.dumps({"summary": summarize(results)}, ensure_ascii=False, indent=2))
-        return 0 if all(result.error is None for result in results) else 1
     finally:
         logger.close()
+    if args.trace_analysis_dir:
+        analysis_index = analyze_benchmark_trace(args.out, args.trace_analysis_dir)
+        print(json.dumps({"trace_analysis": analysis_index}, ensure_ascii=False, indent=2), flush=True)
+    return exit_code
 
 
 if __name__ == "__main__":

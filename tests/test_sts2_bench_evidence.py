@@ -8,6 +8,7 @@ from sts2_bench.evidence import (
     EvidenceBundle,
     build_evidence_bundle,
     render_evidence_context,
+    validate_action_reason,
     validate_occ_context_contract,
     validate_no_policy_fields,
 )
@@ -63,6 +64,26 @@ def test_reward_evidence_includes_skip_card_reward_as_peer_candidate():
     skip = next(candidate for candidate in bundle.to_dict()["candidate_evidence"] if candidate["kind"] == "card_reward_skip")
     assert "keeps deck size unchanged" in " ".join(skip["evidence_for"])
     assert bundle.skip_action_visible is True
+
+
+def test_combat_reward_evidence_describes_unopened_card_reward_actions():
+    state = {
+        "decision": "combat_reward",
+        "context": {"act": 1, "floor": 2, "room_type": "Monster"},
+        "player": {"hp": 64, "max_hp": 80, "gold": 118, "deck_size": 8},
+        "rewards": [{"index": 0, "kind": "card_reward", "can_claim": True, "can_skip": True}],
+    }
+    legal_actions = build_legal_actions(state)
+
+    bundle = build_evidence_bundle(state, legal_actions)
+    candidates = {candidate["label"]: candidate for candidate in bundle.to_dict()["candidate_evidence"]}
+
+    open_candidate = candidates["open card reward 0: reveal offered cards"]
+    skip_candidate = candidates["skip unopened card reward 0"]
+    assert "reveals offered card candidates" in " ".join(open_candidate["evidence_for"])
+    assert "does not add a card before the next card_reward decision" in " ".join(open_candidate["evidence_for"])
+    assert "leaves the card_reward pack unopened" in " ".join(skip_candidate["evidence_against"])
+    assert "keeps deck size unchanged" not in " ".join(skip_candidate["evidence_for"])
 
 
 def test_card_reward_posterior_audit_describes_post_action_deck_without_policy_fields():
@@ -157,25 +178,50 @@ def test_render_evidence_context_states_advisory_contract_and_no_scores():
     assert "skip card reward" in rendered
 
 
-def test_occ_empty_run_plan_patch_requires_no_context_change_reason_for_non_view_action():
+def test_occ_empty_run_plan_patch_without_no_context_reason_is_not_a_hard_validation_error():
+    state = _card_reward_state()
+    legal_actions = build_legal_actions(state)
+    skip = next(action for action in legal_actions if action.kind == "card_reward_skip")
+    card_pick = next(action for action in legal_actions if action.kind == "card_reward")
+    view = next(action for action in legal_actions if action.command.get("cmd") == "bench_view")
+    event = LegalAction(
+        action_id=99,
+        label="choose option 0: test",
+        command={"cmd": "action", "action": "choose", "args": {"index": 0}},
+        kind="event",
+    )
+    map_action = LegalAction(
+        action_id=100,
+        label="go to Monster at col=1 row=1",
+        command={"cmd": "action", "action": "select_map_node", "args": {"col": 1, "row": 1}},
+        kind="map",
+    )
+
+    assert (
+        validate_occ_context_contract(
+            {"run_plan_patch": {}, "no_context_change_reason": "Skipping does not change the current route plan."},
+            event,
+            active_agent="occ",
+        )
+        is None
+    )
+    assert validate_occ_context_contract({"run_plan_patch": {}}, event, active_agent="occ") is None
+    assert validate_occ_context_contract({"run_plan_patch": {}}, card_pick, active_agent="occ") is None
+    assert validate_occ_context_contract({"run_plan_patch": {}}, skip, active_agent="occ") is None
+    assert validate_occ_context_contract({"run_plan_patch": {}}, map_action, active_agent="occ") is None
+    assert validate_occ_context_contract({"run_plan_patch": {}}, view, active_agent="occ") is None
+    assert validate_occ_context_contract({"run_plan_patch": {}}, skip, active_agent="ca") is None
+
+
+def test_action_reason_required_for_real_actions_but_not_view_actions():
     state = _card_reward_state()
     legal_actions = build_legal_actions(state)
     skip = next(action for action in legal_actions if action.kind == "card_reward_skip")
     view = next(action for action in legal_actions if action.command.get("cmd") == "bench_view")
 
-    error = validate_occ_context_contract({"run_plan_patch": {}}, skip, active_agent="occ")
-
-    assert "no_context_change_reason is required" in error
-    assert (
-        validate_occ_context_contract(
-            {"run_plan_patch": {}, "no_context_change_reason": "Skipping does not change the current route plan."},
-            skip,
-            active_agent="occ",
-        )
-        is None
-    )
-    assert validate_occ_context_contract({"run_plan_patch": {}}, view, active_agent="occ") is None
-    assert validate_occ_context_contract({"run_plan_patch": {}}, skip, active_agent="ca") is None
+    assert validate_action_reason({}, skip) == "reason must be a non-empty string for the selected action"
+    assert validate_action_reason({"reason": "Skip because none of the offered cards improves the deck."}, skip) is None
+    assert validate_action_reason({}, view) is None
 
 
 class _EvidenceRefScriptAgent:
@@ -202,6 +248,32 @@ class _EvidenceRefScriptAgent:
                 "no_context_change_reason": "Skipping does not change the current run plan.",
             },
         }
+
+    def receive_external_feedback(self, state, action, meta, feedback, legal_actions):
+        self.feedback.append(feedback)
+
+
+class _MissingReasonThenReasonAgent:
+    def __init__(self):
+        self.calls = 0
+        self.feedback = []
+
+    def build_prompt(self, state, legal_actions):
+        return ""
+
+    def choose(self, state, legal_actions, *, prompt=None):
+        self.calls += 1
+        skip = next(action for action in legal_actions if action.kind == "card_reward_skip")
+        parsed = {
+            "action_id": skip.action_id,
+            "selected_action_label": skip.label,
+            "evidence_refs": [skip.action_id],
+            "run_plan_patch": {},
+            "run_memory_facts": [],
+        }
+        if self.calls > 1:
+            parsed["reason"] = "Skip because the current deck is better unchanged."
+        return skip, {"agent": "missing_reason_script", "parsed": parsed}
 
     def receive_external_feedback(self, state, action, meta, feedback, legal_actions):
         self.feedback.append(feedback)
@@ -261,3 +333,30 @@ def test_runner_reasks_when_evidence_refs_do_not_match_candidate_actions(tmp_pat
     assert "reason" in feedback_event["details"]
     assert action_rows[-1]["agent_meta"]["feedback_events"][0] == feedback_event
     assert action_rows[-1]["agent_meta"]["parsed"]["action_id"] == action_rows[-1]["action"]["action_id"]
+
+
+def test_runner_reasks_when_real_action_omits_reason(tmp_path):
+    agent = _MissingReasonThenReasonAgent()
+    out = tmp_path / "run.jsonl"
+    logger = JsonlLogger(out)
+    try:
+        result = run_one(
+            agent=agent,
+            seed="missing-reason",
+            process=_CardRewardProcess(),
+            logger=logger,
+            max_steps=2,
+        )
+    finally:
+        logger.close()
+
+    rows = [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines() if line.strip()]
+    error_row = next(row for row in rows if row.get("type") == "evidence_validation_error")
+    feedback_event = error_row["feedback_event"]
+
+    assert result.error is None
+    assert agent.calls == 2
+    assert len(agent.feedback) == 1
+    assert "reason must be a non-empty string" in agent.feedback[0]
+    assert feedback_event["validator"] == "action_reason"
+    assert feedback_event["code"] == "missing_action_reason"

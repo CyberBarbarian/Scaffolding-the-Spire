@@ -49,6 +49,15 @@ def validate_custom_sequence(
             False,
             f"custom sequence validation accepts at most {MAX_CUSTOM_SEQUENCE_VALIDATION_LENGTH} card steps",
         )
+    preflight_error = _modifier_changing_sequence_preflight(sequence, current_state)
+    if preflight_error:
+        return SequenceValidationResult(False, preflight_error)
+    preflight_error = _target_specific_lethal_preflight(sequence, current_state)
+    if preflight_error:
+        return SequenceValidationResult(False, preflight_error)
+    preflight_error = _one_shot_free_attack_preflight(sequence, current_state)
+    if preflight_error:
+        return SequenceValidationResult(False, preflight_error)
 
     factory = process_factory or Sts2Process
     proc = factory()
@@ -104,6 +113,229 @@ def validate_custom_sequence(
 def state_fingerprint(state: dict[str, Any]) -> str:
     payload = _canonical_state(state)
     return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _target_specific_lethal_preflight(sequence: list[dict[str, int]], current_state: dict[str, Any]) -> str | None:
+    hand = current_state.get("hand") if isinstance(current_state.get("hand"), list) else []
+    enemies = current_state.get("enemies") if isinstance(current_state.get("enemies"), list) else []
+    hand_by_index = {card.get("index"): card for card in hand if isinstance(card, dict)}
+    enemies_by_index = {enemy.get("index"): enemy for enemy in enemies if isinstance(enemy, dict)}
+    cumulative_by_target: dict[int, float] = {}
+    lethal_step_by_target: dict[int, int] = {}
+
+    for step_number, step in enumerate(sequence, start=1):
+        card = hand_by_index.get(step.get("card_index"))
+        target_index = step.get("target_index")
+        if not isinstance(card, dict) or target_index is None:
+            continue
+        if str(card.get("target_type") or "") != "AnyEnemy":
+            continue
+        if target_index in lethal_step_by_target:
+            return (
+                "target-specific damage_by_target preview kills enemy target "
+                f"{target_index} after step {lethal_step_by_target[target_index]}; "
+                f"later step {step_number} still targets it"
+            )
+        target = enemies_by_index.get(target_index)
+        hp = _numeric_value(target.get("hp") if isinstance(target, dict) else None)
+        damage = _target_specific_damage(card, target_index)
+        if hp is None or hp <= 0 or damage is None or damage <= 0:
+            continue
+        cumulative = cumulative_by_target.get(target_index, 0.0) + damage
+        cumulative_by_target[target_index] = cumulative
+        if cumulative >= hp:
+            lethal_step_by_target[target_index] = step_number
+
+    return None
+
+
+def _one_shot_free_attack_preflight(sequence: list[dict[str, int]], current_state: dict[str, Any]) -> str | None:
+    charges = _one_shot_free_attack_charges(current_state)
+    if charges is None:
+        return None
+
+    hand = current_state.get("hand") if isinstance(current_state.get("hand"), list) else []
+    hand_by_index = {card.get("index"): card for card in hand if isinstance(card, dict)}
+    attack_steps = 0
+    for step in sequence:
+        card = hand_by_index.get(step.get("card_index"))
+        if isinstance(card, dict) and _is_attack_card(card):
+            attack_steps += 1
+
+    if attack_steps <= charges:
+        return None
+    return (
+        f"one-shot free attack power covers only {charges} attack step(s); "
+        f"custom sequence contains {attack_steps} attack steps"
+    )
+
+
+def _modifier_changing_sequence_preflight(sequence: list[dict[str, int]], current_state: dict[str, Any]) -> str | None:
+    hand = current_state.get("hand") if isinstance(current_state.get("hand"), list) else []
+    hand_by_index = {card.get("index"): card for card in hand if isinstance(card, dict)}
+
+    for step_number, step in enumerate(sequence, start=1):
+        card = hand_by_index.get(step.get("card_index"))
+        if not isinstance(card, dict):
+            continue
+        target_index = step.get("target_index")
+        if target_index is not None and _changes_target_damage_modifiers(card):
+            later_step = _later_attack_against_target(sequence, hand_by_index, start=step_number, target_index=target_index)
+            if later_step is not None:
+                return (
+                    f"step {step_number} changes enemy target {target_index} damage modifiers; "
+                    f"later step {later_step} still attacks that target. Stop the sequence at the "
+                    "modifier-changing step and wait for the next state"
+                )
+        if _changes_player_damage_modifiers(card):
+            later_step = _later_damage_or_block_step(sequence, hand_by_index, start=step_number)
+            if later_step is not None:
+                return (
+                    f"step {step_number} changes player damage/block modifiers; later step {later_step} "
+                    "depends on recalculated previews. Stop the sequence at the modifier-changing step "
+                    "and wait for the next state"
+                )
+
+    return None
+
+
+def _later_attack_against_target(
+    sequence: list[dict[str, int]],
+    hand_by_index: dict[Any, dict[str, Any]],
+    *,
+    start: int,
+    target_index: int,
+) -> int | None:
+    for later_step_number, later_step in enumerate(sequence[start:], start=start + 1):
+        later_card = hand_by_index.get(later_step.get("card_index"))
+        if not isinstance(later_card, dict) or not _is_damage_card(later_card):
+            continue
+        target_type = str(later_card.get("target_type") or "")
+        if target_type == "AllEnemies" or later_step.get("target_index") == target_index:
+            return later_step_number
+    return None
+
+
+def _later_damage_or_block_step(
+    sequence: list[dict[str, int]],
+    hand_by_index: dict[Any, dict[str, Any]],
+    *,
+    start: int,
+) -> int | None:
+    for later_step_number, later_step in enumerate(sequence[start:], start=start + 1):
+        later_card = hand_by_index.get(later_step.get("card_index"))
+        if isinstance(later_card, dict) and (_is_damage_card(later_card) or _is_block_card(later_card)):
+            return later_step_number
+    return None
+
+
+def _changes_target_damage_modifiers(card: dict[str, Any]) -> bool:
+    keys = _stat_keys(card)
+    return any("vulnerable" in key or "weak" in key for key in keys)
+
+
+def _changes_player_damage_modifiers(card: dict[str, Any]) -> bool:
+    keys = _stat_keys(card)
+    return any("strength" in key or "dexterity" in key for key in keys)
+
+
+def _is_damage_card(card: dict[str, Any]) -> bool:
+    stats = card.get("stats") if isinstance(card.get("stats"), dict) else {}
+    target_type = str(card.get("target_type") or "")
+    return (
+        str(card.get("type") or "") == "Attack"
+        or target_type in {"AnyEnemy", "AllEnemies"}
+        or any(key in stats for key in ("damage", "calculateddamage", "damage_by_target", "calculateddamage_by_target"))
+    )
+
+
+def _is_attack_card(card: dict[str, Any]) -> bool:
+    return str(card.get("type") or "") == "Attack"
+
+
+def _is_block_card(card: dict[str, Any]) -> bool:
+    stats = card.get("stats") if isinstance(card.get("stats"), dict) else {}
+    return any("block" in str(key).lower() for key in stats)
+
+
+def _stat_keys(card: dict[str, Any]) -> set[str]:
+    stats = card.get("stats") if isinstance(card.get("stats"), dict) else {}
+    return {str(key).lower() for key in stats}
+
+
+def _target_specific_damage(card: dict[str, Any], target_index: int) -> float | None:
+    stats = card.get("stats") if isinstance(card.get("stats"), dict) else {}
+    for damage_by_target_key in ("damage_by_target", "calculateddamage_by_target"):
+        damage = _target_specific_damage_from_entries(stats.get(damage_by_target_key), target_index)
+        if damage is not None:
+            return damage
+    return None
+
+
+def _target_specific_damage_from_entries(damage_by_target: Any, target_index: int) -> float | None:
+    entry: Any = None
+    if isinstance(damage_by_target, list):
+        entry = next(
+            (
+                item
+                for item in damage_by_target
+                if isinstance(item, dict) and item.get("target_index") == target_index
+            ),
+            None,
+        )
+    elif isinstance(damage_by_target, dict):
+        if target_index in damage_by_target:
+            entry = damage_by_target[target_index]
+        elif str(target_index) in damage_by_target:
+            entry = damage_by_target[str(target_index)]
+    if isinstance(entry, dict):
+        for key in ("unblocked_damage", "damage", "calculateddamage"):
+            value = entry.get(key)
+            if value is not None:
+                return _numeric_value(value)
+        return None
+    return _numeric_value(entry)
+
+
+def _numeric_value(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    return None
+
+
+def _one_shot_free_attack_charges(state: dict[str, Any]) -> int | None:
+    for power in _player_powers(state):
+        text = _power_search_text(power)
+        if "free_attack_power" not in text and not (
+            "next attack" in text and ("costs 0" in text or "cost 0" in text or "free" in text)
+        ):
+            continue
+        amount = _numeric_value(power.get("amount"))
+        if amount is None:
+            return 1
+        return max(1, int(amount))
+    return None
+
+
+def _player_powers(state: dict[str, Any]) -> list[dict[str, Any]]:
+    direct = state.get("player_powers")
+    if isinstance(direct, list):
+        return [power for power in direct if isinstance(power, dict)]
+    player = state.get("player") if isinstance(state.get("player"), dict) else {}
+    powers = player.get("powers") if isinstance(player.get("powers"), list) else []
+    return [power for power in powers if isinstance(power, dict)]
+
+
+def _power_search_text(power: dict[str, Any]) -> str:
+    parts = [
+        str(power.get("id") or ""),
+        _name(power.get("name")),
+        str(power.get("description") or ""),
+        str(power.get("raw_description") or ""),
+    ]
+    return " ".join(parts).replace("[E]", "0").lower()
 
 
 def _canonical_state(state: dict[str, Any]) -> dict[str, Any]:

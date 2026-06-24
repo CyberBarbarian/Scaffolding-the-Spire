@@ -53,6 +53,111 @@ def analyze_trace(
     return report
 
 
+def analyze_benchmark_trace(
+    trace_path: str | Path,
+    out_dir: str | Path,
+    *,
+    low_hp_ratio: float = LOW_HP_RATIO,
+    large_loss_hp: int = LARGE_LOSS_HP,
+    large_loss_ratio: float = LARGE_LOSS_RATIO,
+) -> dict[str, Any]:
+    """Analyze a benchmark trace, splitting multi-run JSONL logs per seed."""
+
+    source = Path(trace_path)
+    out_path = Path(out_dir)
+    out_path.mkdir(parents=True, exist_ok=True)
+
+    run_paths = _write_split_run_traces(source, out_path)
+    if not run_paths:
+        report = analyze_trace(
+            source,
+            out_path,
+            low_hp_ratio=low_hp_ratio,
+            large_loss_hp=large_loss_hp,
+            large_loss_ratio=large_loss_ratio,
+        )
+        index = {
+            "source": str(source),
+            "out_dir": str(out_path),
+            "run_count": 1,
+            "runs": [
+                {
+                    "seed": (report.get("run") or {}).get("seed"),
+                    "trace": str(source),
+                    "out_dir": str(out_path),
+                    "summary": report.get("run"),
+                }
+            ],
+        }
+        (out_path / "index.json").write_text(json.dumps(index, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        return index
+
+    runs = []
+    for run_path in run_paths:
+        run_out = out_path / run_path.stem
+        report = analyze_trace(
+            run_path,
+            run_out,
+            low_hp_ratio=low_hp_ratio,
+            large_loss_hp=large_loss_hp,
+            large_loss_ratio=large_loss_ratio,
+        )
+        runs.append(
+            {
+                "seed": (report.get("run") or {}).get("seed"),
+                "trace": str(run_path),
+                "out_dir": str(run_out),
+                "summary": report.get("run"),
+            }
+        )
+
+    index = {
+        "source": str(source),
+        "out_dir": str(out_path),
+        "run_count": len(runs),
+        "runs": runs,
+    }
+    (out_path / "index.json").write_text(json.dumps(index, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return index
+
+
+def _write_split_run_traces(source: Path, out_dir: Path) -> list[Path]:
+    run_config_lines: list[str] = []
+    current_lines: list[str] = []
+    run_paths: list[Path] = []
+    saw_run_start = False
+    run_index = 0
+
+    for raw_line in source.read_text(encoding="utf-8").splitlines():
+        if not raw_line.strip():
+            continue
+        obj = json.loads(raw_line)
+        event_type = obj.get("type")
+        if event_type == "run_config" and not current_lines:
+            run_config_lines.append(raw_line)
+            continue
+        if event_type == "start":
+            saw_run_start = True
+            current_lines = [*run_config_lines, raw_line]
+            continue
+        if not current_lines:
+            continue
+        current_lines.append(raw_line)
+        if event_type == "result":
+            seed = ((obj.get("result") or {}).get("seed")) or f"run_{run_index:04d}"
+            run_path = out_dir / f"{run_index:02d}_{_safe_name(seed)}.jsonl"
+            run_path.write_text("\n".join(current_lines) + "\n", encoding="utf-8")
+            run_paths.append(run_path)
+            current_lines = []
+            run_index += 1
+
+    if len(run_paths) <= 1 and not saw_run_start:
+        for path in run_paths:
+            path.unlink(missing_ok=True)
+        return []
+    return run_paths
+
+
 def _load_trace(path: Path) -> dict[str, Any]:
     raw_lines = path.read_text(encoding="utf-8").splitlines()
     entries: list[dict[str, Any]] = []
@@ -148,7 +253,9 @@ def _build_report(
     card_rewards = _extract_card_rewards(actions)
     rest_sites = _extract_rest_sites(actions)
     shops = _extract_shops(actions)
-    final_deck = _extract_final_deck(actions, trace.get("result") or {})
+    start = trace.get("start") or {}
+    result = trace.get("result") or {}
+    final_deck = _extract_final_deck(actions, result, start)
     route_plan_events = _extract_route_plan_events(trace["entries"])
     route_plan_validation_errors = _extract_route_plan_validation_errors(trace["entries"])
     high_risk_events = _extract_high_risk_events(map_choices, low_hp_ratio=low_hp_ratio)
@@ -160,8 +267,6 @@ def _build_report(
         room["large_loss"] = bool(room.get("hp_loss", 0) >= threshold or room.get("terminal_death"))
         room["large_loss_threshold"] = threshold
 
-    result = trace.get("result") or {}
-    start = trace.get("start") or {}
     return {
         "source": str(trace["path"]),
         "run": {
@@ -356,7 +461,12 @@ def _extract_card_rewards(actions: list[dict[str, Any]]) -> list[dict[str, Any]]
     rewards = []
     for action in actions:
         state = action.get("before_state") or {}
-        if state.get("decision") != "card_reward" and action.get("kind") not in {"card_reward", "card_reward_skip"}:
+        unopened = _is_unopened_combat_card_reward_skip(action)
+        visible_card_reward = state.get("decision") == "card_reward" or action.get("kind") in {
+            "card_reward",
+            "card_reward_skip",
+        }
+        if not visible_card_reward and not unopened:
             continue
         cards = state.get("cards") or []
         offered = [_card_name(card) for card in cards if _card_name(card)]
@@ -368,6 +478,7 @@ def _extract_card_rewards(actions: list[dict[str, Any]]) -> list[dict[str, Any]]
             ]
         selected_card = None if _is_card_reward_skip(action) else _card_name_from_label(action.get("label"))
         hp = _hp_info(state)
+        offered_unavailable_reason = "skipped_before_opening_card_reward" if unopened and not offered else None
         rewards.append(
             {
                 "step": action.get("step"),
@@ -383,13 +494,19 @@ def _extract_card_rewards(actions: list[dict[str, Any]]) -> list[dict[str, Any]]
                 "selected_card_zh": _card_zh_name(selected_card) if selected_card else None,
                 "selected_card_bilingual": _card_bilingual_name(selected_card) if selected_card else None,
                 "skipped": _is_card_reward_skip(action),
+                "unopened": unopened,
+                "offered_unavailable_reason": offered_unavailable_reason,
             }
         )
     return rewards
 
 
-def _extract_final_deck(actions: list[dict[str, Any]], result: dict[str, Any]) -> dict[str, Any]:
+def _extract_final_deck(actions: list[dict[str, Any]], result: dict[str, Any], start: dict[str, Any] | None = None) -> dict[str, Any]:
     initial_deck = _initial_deck_from_first_card_select(actions)
+    initial_source = "trace_card_select"
+    if not initial_deck:
+        initial_deck = _starter_deck_for_character((result or {}).get("character") or (start or {}).get("character"))
+        initial_source = "starter_deck_fallback" if initial_deck else "unavailable"
     deck = list(initial_deck)
     events: list[dict[str, Any]] = []
     warnings: list[str] = []
@@ -423,6 +540,7 @@ def _extract_final_deck(actions: list[dict[str, Any]], result: dict[str, Any]) -
     counts = Counter(deck)
     return {
         "source": "reconstructed_from_trace_deck_changes",
+        "initial_source": initial_source,
         "initial_size": len(initial_deck),
         "size": len(deck),
         "result_deck_size": result.get("deck_size"),
@@ -439,20 +557,80 @@ def _extract_final_deck(actions: list[dict[str, Any]], result: dict[str, Any]) -
     }
 
 
+def _starter_deck_for_character(character: Any) -> list[str]:
+    if str(character or "") == "Ironclad":
+        return ["Strike"] * 5 + ["Defend"] * 4 + ["Bash"]
+    return []
+
+
 def _initial_deck_from_first_card_select(actions: list[dict[str, Any]]) -> list[str]:
     for action in actions:
         before = action.get("before_state") or {}
         if before.get("decision") != "card_select":
+            if _deck_changes_after_action(action):
+                break
             continue
-        deck = [
-            card
-            for card in (_card_name_from_label(item.get("label")) for item in action.get("legal_actions") or [])
-            if card
-        ]
         deck_size = _deck_size_info(before)
+        deck = _deck_from_state(before)
         if deck and (deck_size is None or len(deck) == deck_size):
             return deck
+        deck = _initial_deck_from_card_select_actions(action.get("legal_actions") or [], deck_size=deck_size)
+        if deck and (deck_size is None or len(deck) == deck_size):
+            return deck
+        if _deck_changes_after_action(action):
+            break
     return []
+
+
+def _deck_from_state(state: dict[str, Any]) -> list[str]:
+    player = state.get("player") if isinstance(state.get("player"), dict) else {}
+    raw_deck = player.get("deck") or state.get("deck")
+    if not isinstance(raw_deck, list):
+        return []
+    return [name for name in (_card_name(card) for card in raw_deck) if name]
+
+
+def _initial_deck_from_card_select_actions(legal_actions: list[dict[str, Any]], *, deck_size: int | None) -> list[str]:
+    indexed_names: dict[int, set[str]] = {}
+    single_select_names: list[str] = []
+    for item in legal_actions:
+        if item.get("kind") != "card_select":
+            continue
+        label = item.get("label")
+        cards_by_index = _card_names_by_index_from_multi_select_label(label)
+        if cards_by_index:
+            for index, name in cards_by_index.items():
+                indexed_names.setdefault(index, set()).add(name)
+            continue
+        card = _card_name_from_label(label)
+        if card:
+            single_select_names.append(card)
+
+    if indexed_names:
+        indexes = sorted(indexed_names)
+        expected_indexes = list(range(deck_size)) if deck_size is not None else list(range(indexes[-1] + 1))
+        if indexes == expected_indexes and all(len(names) == 1 for names in indexed_names.values()):
+            return [next(iter(indexed_names[index])) for index in indexes]
+
+    if single_select_names and (deck_size is None or len(single_select_names) == deck_size):
+        return single_select_names
+    return []
+
+
+def _card_names_by_index_from_multi_select_label(label: Any) -> dict[int, str]:
+    if not label:
+        return {}
+    match = re.search(r"select cards\s+(?P<indexes>\d+(?:,\d+)*)\s*:\s*(?P<cards>.+)$", str(label))
+    if not match:
+        return {}
+    try:
+        indexes = [int(item) for item in match.group("indexes").split(",")]
+    except ValueError:
+        return {}
+    cards = [item.strip() for item in re.split(r"\s+\+\s+", match.group("cards")) if item.strip()]
+    if len(indexes) != len(cards):
+        return {}
+    return dict(zip(indexes, cards))
 
 
 def _deck_changes_after_action(action: dict[str, Any]) -> list[dict[str, Any]]:
@@ -475,16 +653,26 @@ def _deck_changes_from_text(raw_change: Any) -> list[dict[str, Any]]:
     replace = re.match(r"^-(?P<old>.+?)\s+\+(?P<new>.+)$", body)
     if replace:
         return [
-            {"operation": "remove", "name": replace.group("old").strip(), "raw": text},
-            {"operation": "add", "name": replace.group("new").strip(), "raw": text},
+            *_expand_counted_deck_change("remove", replace.group("old").strip(), text),
+            *_expand_counted_deck_change("add", replace.group("new").strip(), text),
         ]
     add = re.match(r"^\+(?P<new>.+)$", body)
     if add:
-        return [{"operation": "add", "name": add.group("new").strip(), "raw": text}]
+        return _expand_counted_deck_change("add", add.group("new").strip(), text)
     remove = re.match(r"^-(?P<old>.+)$", body)
     if remove:
-        return [{"operation": "remove", "name": remove.group("old").strip(), "raw": text}]
+        return _expand_counted_deck_change("remove", remove.group("old").strip(), text)
     return []
+
+
+def _expand_counted_deck_change(operation: str, name: str, raw: str) -> list[dict[str, Any]]:
+    match = re.match(r"^(?P<name>.+?)x(?P<count>[2-9]\d*)$", name)
+    if match:
+        name = match.group("name").strip()
+        count = int(match.group("count"))
+    else:
+        count = 1
+    return [{"operation": operation, "name": name, "raw": raw} for _ in range(count)]
 
 
 def _remove_card_from_deck(deck: list[str], card: str) -> bool:
@@ -790,6 +978,8 @@ def _write_replay_markdown(report: dict[str, Any], path: Path) -> None:
     lines.extend(["", "## Card Rewards", ""])
     for reward in report.get("card_rewards") or []:
         offered = reward.get("offered_bilingual") or reward.get("offered") or []
+        if not offered and reward.get("unopened"):
+            offered = ["candidates unavailable; skipped before opening card_reward"]
         selected = reward.get("selected_card_bilingual") or reward.get("selected")
         lines.append(
             f"- step {reward.get('step')} offered {offered} -> `{selected}`"
@@ -869,7 +1059,11 @@ def _write_deck_and_card_rewards_markdown(report: dict[str, Any], path: Path) ->
             f"{offer_index}. {name}"
             for offer_index, name in enumerate(reward.get("offered_bilingual") or reward.get("offered") or [], start=1)
         )
+        if not offered and reward.get("unopened"):
+            offered = "未展开 / candidates unavailable"
         selected = reward.get("selected_card_bilingual") or ("跳过 / skip" if reward.get("skipped") else reward.get("selected"))
+        if reward.get("unopened"):
+            selected = f"{selected}<br>（未打开 card_reward，trace 没有候选牌）"
         lines.append(f"| {index} | {reward.get('step')} | {pos} | {hp_text} | {offered} | **{selected}** |")
 
     lines.extend(
@@ -901,12 +1095,15 @@ def _write_deck_and_card_rewards_markdown(report: dict[str, Any], path: Path) ->
             "## 直接可读结论",
             "",
             f"- 本局终局 deck_size 为 {final_deck.get('result_deck_size')}，重构牌组为 {final_deck.get('size')}。",
-            "- 所有 card reward 的候选项都优先从 trace state.cards 读取；compact state 缺失时，从 legal action label 恢复。",
+            "- 已展开的 card reward 候选项优先从 trace state.cards 读取；compact state 缺失时，从 legal action label 恢复。",
+            "- 如果在 combat_reward 层直接跳过未展开的 card_reward，trace 不包含候选牌，只能标记为 candidates unavailable。",
         ]
     )
     if card_rewards:
         last_reward = card_rewards[-1]
         offered = "、".join(last_reward.get("offered_bilingual") or last_reward.get("offered") or [])
+        if not offered and last_reward.get("unopened"):
+            offered = "未展开 / candidates unavailable"
         selected = last_reward.get("selected_card_bilingual") or last_reward.get("selected")
         lines.append(
             f"- 最后一次 card reward 是 step {last_reward.get('step')}，候选为 {offered}，选择 {selected}。"
@@ -2753,6 +2950,13 @@ def _selected_card_from_label(label: Any) -> str | None:
 
 def _is_card_reward_skip(action: dict[str, Any]) -> bool:
     return "skip" in str(action.get("kind") or "").lower() or "skip" in str(action.get("label") or "").lower()
+
+
+def _is_unopened_combat_card_reward_skip(action: dict[str, Any]) -> bool:
+    if str(action.get("kind") or "") != "combat_reward_skip":
+        return False
+    label = str(action.get("label") or "").lower()
+    return "card_reward" in label or "card reward" in label
 
 
 def _localized_card(name: str) -> dict[str, Any]:

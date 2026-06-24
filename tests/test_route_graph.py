@@ -77,3 +77,23 @@ def test_build_route_graph_omits_children_not_visible_in_snapshot():
 
     monster = next(node for node in graph["nodes"] if node["node_key"] == "0:1")
     assert monster["children"] == []
+
+
+def test_build_route_graph_can_expose_winged_boots_remaining_jumps():
+    full_map = {
+        "type": "map",
+        "current_coord": {"col": 0, "row": 0},
+        "rows": [
+            [{"col": 0, "row": 0, "type": "Ancient", "children": [{"col": 0, "row": 1}]}],
+            [{"col": 0, "row": 1, "type": "Monster", "children": []}],
+        ],
+    }
+
+    graph = build_route_graph(
+        full_map,
+        [{"col": 0, "row": 1, "type": "Monster"}],
+        winged_boots_remaining=2,
+    )
+
+    assert graph["constraints"]["winged_boots_max_forward_jumps"] == 3
+    assert graph["constraints"]["winged_boots_remaining_forward_jumps"] == 2

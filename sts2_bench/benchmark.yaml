@@ -11,12 +11,30 @@ base_url: ""
 # 调用的模型名称。需要和对应 API provider 支持的模型名一致。
 model: ""
 
+# Non-secret relay model catalog for local experiment overrides.
+# Keep API keys in .env. For APiHY, use STS2_BENCH_BASE_URL=https://zgc.apihy.com/v1.
+model_catalog:
+  apihy_deepseek:
+    base_url: "https://zgc.apihy.com/v1"
+    env_key: "DEEPSEEK_API_KEY"
+    registry_env_key: "APIHY_DEEPSEEK_API_KEY"
+    default_model: "deepseek-v4-pro"
+    chat_models: "deepseek-r1, deepseek-r1-250528, deepseek-v3, deepseek-v3.1-250821, deepseek-v3.1-think-250821, deepseek-v3.2, deepseek-v3.2-think, deepseek-v4-flash, deepseek-v4-pro, glm-5.1"
+  apihy_openai:
+    base_url: "https://zgc.apihy.com/v1"
+    env_key: "OPENAI_API_KEY"
+    registry_env_key: "APIHY_OPENAI_API_KEY"
+    default_model: "gpt-5.5"
+    chat_models: "gpt-5, gpt-5-2025-08-07, gpt-5-mini, gpt-5-mini-2025-08-07, gpt-5.1, gpt-5.1-2025-11-13, gpt-5.1-codex, gpt-5.2, gpt-5.2-2025-12-11, gpt-5.2-codex, gpt-5.3-codex, gpt-5.4, gpt-5.4-mini, gpt-5.5"
+    non_chat_models: "gpt-image-2"
+    notes: "gpt-5.5 chat works through this relay when max_tokens is omitted."
+
 # 单次 LLM HTTP 请求超时时间，单位秒。调试 DeepSeek 卡住时可以先设为 15-30。
-llm_timeout: 30
+llm_timeout: 120
 
 # LLM 请求或 JSON 解析失败后的重试次数。正式 benchmark 至少保留 1 次严格纠错请求；
 # 调试连通性时可以临时设为 0，避免每一步等待太久。
-llm_max_retries: 1
+llm_max_retries: 5
 
 # 所有 LLM 重试失败后的处理。error 会停止当前 run 并记录错误；action 才会使用确定性动作回退。
 llm_fallback_mode: error
@@ -45,7 +63,9 @@ run_summary_enabled: false
 
 # Agent 侧上下文管理方法。single_turn 是当前每步独立 prompt；turn_chat 只在同一个玩家出牌回合内保留短 chat history。
 context_management:
-  mode: single_turn
+  mode: combat_mdp_state
+  turn_check:
+    enabled: false
   turn_chat:
     # 同一玩家出牌回合内保留最近多少组 user/assistant 消息。
     window: 10
@@ -58,6 +78,27 @@ context_management:
       enabled: true
 
 # 选择角色。可选 Ironclad、Silent、Defect、Regent、Necrobinder。
+route_plan:
+  enabled: true
+  enforcement: hard
+
+combat_card_sequences_enabled: true
+
+diagnostics:
+  self_consistency:
+    enabled: false
+    samples: 3
+    decisions: "map_select,card_reward"
+    mode: diagnostic
+  reflection_verifier:
+    enabled: false
+    decisions: "card_reward"
+    mode: diagnostic
+    max_options: 8
+  action_prompt_order:
+    mode: default
+    seed: 0
+
 character: Ironclad
 
 # 进阶等级。0 表示无进阶，适合初始 benchmark。
@@ -80,6 +121,9 @@ out: results/random_ironclad_a0.jsonl
 
 # JSONL 记录详细程度。metrics 最小；decisions 记录轻量决策摘要；full 记录完整 state、prompt、raw response。
 log_level: metrics
+
+# Generate replay/report artifacts after each benchmark trace is closed.
+trace_analysis: true
 
 # 是否在终端打印每一步发给模型的 prompt。调试时可以 true，正式 benchmark 建议 false。
 print_prompts: false

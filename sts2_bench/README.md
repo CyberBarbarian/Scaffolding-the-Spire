@@ -81,10 +81,14 @@ Important action categories:
 - `card_reward_skip`, `combat_reward_skip`, `card_select_skip`,
   `shop_leave`, and event leave actions - skipping or leaving is represented as
   a first-class legal action when the engine exposes it.
-- `combat_card_sequence` - deterministic precomputed card sequences that are
-  already legal from the visible hand.
-- `combat_custom_sequence` - a model-proposed sequence.  The runner validates it
-  with an engine-backed probe before converting it into `bench_sequence`.
+- `combat_card_sequence` - deterministic precomputed card sequences used by
+  internal/non-LLM action surfaces and by validated custom sequence execution;
+  LLM agents do not see these as legal actions.
+- `combat_custom_sequence` - a model-proposed deterministic sequence bound to
+  the initial visible hand/enemy snapshot.  The runner validates it with an
+  engine-backed probe before converting it into `bench_sequence`; cards with
+  draw, random, modal choice, generated-card, or other state-changing uncertainty
+  should be handled as single legal actions instead.
 
 By default, view actions are exposed at most once per decision point.  Set
 `allow_repeat_views: true` to expose repeated views at the same decision.
@@ -239,9 +243,9 @@ The LLM cannot mutate this store directly.  It may return:
 The coordinator validates allowed keys, decorates entries with floor/action
 metadata, applies accepted patches, and logs rejected patches in agent metadata.
 
-For OCC non-view actions, an empty `run_plan_patch` is valid, but the model must
-include `no_context_change_reason`.  This prevents the schema from pressuring
-the model into inventing fake plan updates.
+For OCC non-view actions, an empty `run_plan_patch` is valid and does not need a
+separate explanation field.  The action-level `reason` explains why the selected
+legal action is being taken.
 
 ## LLM Response Contract
 
@@ -265,7 +269,6 @@ schema.  The minimal important fields are:
   "evidence_refs": [3],
   "run_plan_patch": {},
   "run_memory_facts": [],
-  "no_context_change_reason": "why no RunContext change is needed",
   "reason": "short final reason"
 }
 ```
@@ -273,13 +276,17 @@ schema.  The minimal important fields are:
 Only `action_id`, `selected_action_label`, and `reason` are broadly relevant to
 every decision.  `sequence` is only meaningful for `combat_custom_sequence`.
 `route_plan_event` is required when creating or changing a map route plan and
-must contain the complete visible route from the selected node to a visible
-terminal node in the prompt's `Route graph JSON`.  Copy each plan node's exact
-`col`, `row`, and `type` from that graph; the ASCII map is human-readable
-context only.  Omit `route_plan_event` when executing the active plan's next
-node.  With Winged Boots, the route may contain at most three disconnected
-forward jumps.  `evidence_refs` must refer to candidate action ids present in
-the current evidence bundle.
+must contain a complete `new_plan` starting at the selected legal map node and
+continuing through visible connected nodes to the visible Boss, or to the visible
+terminal node when Boss is not present in the route graph.  Copy each submitted
+plan node's exact `col`, `row`, and `type` from that graph; the ASCII map is
+human-readable context only.  Omit `route_plan_event` when executing
+`active_route_plan.expected_next`, but still include the normal action-level
+`reason`.  `route_plan_created` and `route_plan_updated` events must include a
+non-empty route `reason`.  With Winged Boots, submitted route jumps may use only
+the remaining forward-jump charges shown in `route_graph.constraints`.
+`evidence_refs` must refer to candidate action ids present in the current
+evidence bundle.
 
 Action validation is strict:
 
@@ -325,9 +332,8 @@ Fields:
 - `message` - natural-language correction sent to the model.
 - `retry` - zero-based retry count at the time this event is created.
 - `retryable` - whether the runner still has retry budget for this failure.
-- `code` - optional machine-readable reason, such as
-  `invalid_evidence_refs`, `missing_no_context_change_reason`, or a route-plan
-  error code.
+- `code` - optional machine-readable reason, such as `invalid_evidence_refs`
+  or a route-plan error code.
 - `step`, `decision`, `action_id`, `action_label`, `validator`, and
   `evidence_bundle_hash` - trace linkage for the invalid attempt.
 - `max_retries` - retry budget for this validation family.
@@ -348,8 +354,7 @@ Fields:
 
 Current uses:
 
-- Evidence validation checks bad `evidence_refs` and missing OCC
-  `no_context_change_reason`.
+- Evidence validation checks bad `evidence_refs`.
 - Route-plan validation checks whether emitted route-plan events match current
   legal map actions and the active route plan.
 - Custom-sequence validation checks model-proposed combat sequences against an
@@ -468,8 +473,10 @@ Supported `benchmark.yaml` keys include:
   `memory_window`, `memory_mode`, `run_summary_enabled`,
   `context_management`
 - run setup: `character`, `ascension`, `lang`, `seeds`, `count`, `max_steps`
-- logging: `out`, `log_level`, `print_prompts`, `print_model_output`
-- benchmark views: `include_full_map`, `allow_repeat_views`
+- logging: `out`, `log_level`, `print_prompts`, `print_model_output`,
+  `trace_analysis`, `trace_analysis_dir`
+- benchmark action surface: `include_full_map`, `allow_repeat_views`,
+  `allow_custom_sequences`
 
 Precedence is: CLI arguments, shell environment variables, `.env`,
 `sts2_bench/benchmark.yaml`, then code defaults.
@@ -504,6 +511,7 @@ python -m sts2_bench.run_benchmark \
   --max-steps 10000 \
   --no-print-prompts \
   --no-print-model-output \
+  --no-allow-custom-sequences \
   --log-level metrics \
   --out results/coordinator_floor_benchmark.jsonl
 ```
@@ -580,6 +588,12 @@ python -m sts2_bench.trace_analysis \
   results/coordinator_floor_benchmark.jsonl \
   --out-dir artifacts/trace_analysis/coordinator_floor_benchmark
 ```
+
+Benchmark runs generate these artifacts by default after the JSONL trace is
+closed.  Unless `--trace-analysis-dir <dir>` is provided, `run_benchmark` writes
+them under `artifacts/trace_analysis/<trace-stem>`.  Multi-run traces are split
+per seed under that directory and indexed by `index.json`.  Use
+`--no-trace-analysis` only for runs that intentionally skip report generation.
 
 The analyzer is offline.  It does not change benchmark execution or the runner
 hot path.  It writes:

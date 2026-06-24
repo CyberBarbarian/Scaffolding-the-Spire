@@ -52,12 +52,14 @@ class RunPlan:
 class RunMemory:
     facts: list[dict[str, Any]] = field(default_factory=list)
     combat_reports: list[dict[str, Any]] = field(default_factory=list)
+    route_steps: list[dict[str, Any]] = field(default_factory=list)
     pending_mandates: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "facts": [dict(item) for item in self.facts],
             "combat_reports": [dict(item) for item in self.combat_reports],
+            "route_steps": [dict(item) for item in self.route_steps],
             "pending_mandates": [dict(item) for item in self.pending_mandates],
         }
 
@@ -66,6 +68,7 @@ class RunMemory:
         return cls(
             facts=[dict(item) for item in data.get("facts") or [] if isinstance(item, dict)],
             combat_reports=[dict(item) for item in data.get("combat_reports") or [] if isinstance(item, dict)],
+            route_steps=[dict(item) for item in data.get("route_steps") or [] if isinstance(item, dict)],
             pending_mandates=[dict(item) for item in data.get("pending_mandates") or [] if isinstance(item, dict)],
         )
 
@@ -106,6 +109,7 @@ class RunContextStore:
                 "recent_facts": self.run_memory.facts[-max_facts:],
                 "pending_mandates": list(self.run_memory.pending_mandates),
                 "recent_combat_reports": self.run_memory.combat_reports[-max_facts:],
+                "recent_route_steps": self.run_memory.route_steps[-max_facts:],
             },
             "snapshot_hash": self.snapshot_hash(),
         }
@@ -256,9 +260,8 @@ def render_out_of_combat_context(store: RunContextStore, state: dict[str, Any]) 
         [
             "",
             "OCC output contract:",
-            "Return one legal action_id, selected_action_label, reason, evidence_refs, run_plan_patch, run_memory_facts, and no_context_change_reason.",
+            "Return one legal action_id, selected_action_label, reason, evidence_refs, run_plan_patch, and run_memory_facts.",
             'Use "run_plan_patch": {} and "run_memory_facts": [] when nothing should change.',
-            "When run_plan_patch is empty for a real OCC non-view action, include no_context_change_reason instead of inventing a plan update.",
             "For map/event choices, update route_plan, resource_policy, open_threads, delayed_effects, or pending_mandates as relevant.",
             "For shops, update resource_policy as relevant. Card reward decisions use a separate history-free reward context and do not update build_plan.",
             "Allowed run_plan_patch keys: route_plan, build_plan, resource_policy, open_threads, delayed_effects, pending_mandates.",

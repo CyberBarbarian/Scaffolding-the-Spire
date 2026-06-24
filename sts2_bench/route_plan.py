@@ -51,6 +51,26 @@ class ActiveRoutePlan:
             "act": self.act,
         }
 
+    def to_prompt_context(self) -> dict[str, Any]:
+        remaining = [dict(node) for node in self.remaining]
+        return {
+            "plan_id": self.plan_id,
+            "role": "advisory_current_state_feature",
+            "decision_basis": (
+                "choose from current state, legal_actions, route_graph, deck, relics, boss, "
+                "and recent state changes"
+            ),
+            "past_plan_semantics": "previous plan is context, not a binding commitment",
+            "remaining": remaining,
+            "expected_next": dict(remaining[0]) if remaining else None,
+            "actions": {
+                "follow": "select expected_next and omit route_plan_event",
+                "change": "select a different legal map action and emit route_plan_updated with reason",
+            },
+            "based_on_map_revision": self.map_revision,
+            "act": self.act,
+        }
+
 
 class RoutePlanTracker:
     """Validate explicit route-plan events emitted by map-select policies.
@@ -62,6 +82,11 @@ class RoutePlanTracker:
     def __init__(self) -> None:
         self.active: ActiveRoutePlan | None = None
         self._next_plan_id = 1
+
+    def active_context(self) -> dict[str, Any] | None:
+        if self.active is None or not self.active.remaining:
+            return None
+        return self.active.to_prompt_context()
 
     def validate_and_apply(
         self,
@@ -92,7 +117,7 @@ class RoutePlanTracker:
         map_snapshot = _map_snapshot(state)
         map_revision = map_revision_for_state(state)
         state_act = _state_act(state)
-        winged_boots_available = _has_winged_boots(state)
+        winged_boots_remaining = winged_boots_remaining_for_state(state)
         act_changed = bool(self.active and self.active.act is not None and state_act is not None and self.active.act != state_act)
         map_changed = bool(
             self.active
@@ -130,7 +155,7 @@ class RoutePlanTracker:
                     map_revision=map_revision,
                     map_changed=True,
                     act=state_act,
-                    winged_boots_available=winged_boots_available,
+                    winged_boots_remaining=winged_boots_remaining,
                     step=step,
                 )
 
@@ -164,7 +189,7 @@ class RoutePlanTracker:
                         map_revision=map_revision,
                         map_changed=True,
                         act=state_act,
-                        winged_boots_available=winged_boots_available,
+                        winged_boots_remaining=winged_boots_remaining,
                         step=step,
                     )
                 return RoutePlanValidationResult(
@@ -203,7 +228,7 @@ class RoutePlanTracker:
                 map_revision=map_revision,
                 map_changed=False,
                 act=state_act,
-                winged_boots_available=winged_boots_available,
+                winged_boots_remaining=winged_boots_remaining,
                 step=step,
             )
 
@@ -231,7 +256,7 @@ class RoutePlanTracker:
                 map_revision=map_revision,
                 map_changed=map_changed,
                 act=state_act,
-                winged_boots_available=winged_boots_available,
+                winged_boots_remaining=winged_boots_remaining,
                 step=step,
             )
 
@@ -255,14 +280,34 @@ class RoutePlanTracker:
         map_revision: str | None,
         map_changed: bool,
         act: int | None,
-        winged_boots_available: bool,
+        winged_boots_remaining: int,
         step: int,
     ) -> RoutePlanValidationResult:
+        if not event.get("reason"):
+            code = "route_plan_update_reason_required" if event_type == "route_plan_updated" else "route_plan_reason_required"
+            message = (
+                "route_plan_updated must include a non-empty reason explaining why the active route is changing."
+                if event_type == "route_plan_updated"
+                else "route_plan_created must include a non-empty reason explaining the route decision."
+            )
+            return RoutePlanValidationResult(
+                [],
+                self._error(
+                    code,
+                    message,
+                    event=event,
+                ),
+            )
+
         plan = _normalize_plan(event.get("new_plan") or event.get("plan") or event.get("route"))
         if not plan:
             return RoutePlanValidationResult(
                 [],
-                self._error("route_plan_empty", f"{event_type} must include a non-empty new_plan.", event=event),
+                self._error(
+                    "route_plan_empty",
+                    "route_plan_event must include a complete new_plan starting from the selected map action.",
+                    event=event,
+                ),
             )
         first = plan[0]
         if _coord(first) != _coord(selected):
@@ -288,7 +333,7 @@ class RoutePlanTracker:
         topology = _validate_plan_topology(
             decorated_plan,
             map_snapshot,
-            winged_boots_available=winged_boots_available,
+            winged_boots_remaining=winged_boots_remaining,
         )
         if topology["route_validity"] == "invalid":
             return RoutePlanValidationResult(
@@ -304,7 +349,7 @@ class RoutePlanTracker:
                 [],
                 self._error(
                     "route_plan_incomplete",
-                    topology.get("reason") or "new_plan must include the complete visible route from the selected node.",
+                    topology.get("reason") or "new_plan prefix must identify a route that can be completed through the visible graph.",
                     event=event,
                 ),
             )
@@ -330,6 +375,11 @@ class RoutePlanTracker:
         }
         if topology.get("winged_boots_jumps_used"):
             logged["winged_boots_jumps_used"] = topology["winged_boots_jumps_used"]
+            logged["winged_boots_remaining_before"] = winged_boots_remaining
+            logged["winged_boots_remaining_after"] = max(
+                0,
+                winged_boots_remaining - int(topology["winged_boots_jumps_used"]),
+            )
         self.active = active_for_log if remaining else None
         return RoutePlanValidationResult([logged])
 
@@ -392,16 +442,28 @@ def _state_act(state: dict[str, Any]) -> int | None:
         return None
 
 
-def _has_winged_boots(state: dict[str, Any]) -> bool:
+def winged_boots_remaining_for_state(state: dict[str, Any]) -> int:
+    """Return remaining Winged Boots forward jumps exposed by the current state."""
+
+    for relic in _state_relics(state):
+        if not _relic_matches_winged_boots(relic):
+            continue
+        counter = _winged_boots_counter(relic)
+        return max(0, min(3, counter if counter is not None else 3))
+    return 0
+
+
+def _state_relics(state: dict[str, Any]) -> list[Any]:
     relics: list[Any] = []
     player = state.get("player")
     if isinstance(player, dict):
-        relics.extend(player.get("relics") or [])
-    relics.extend(state.get("relics") or [])
-    for relic in relics:
-        if _relic_matches_winged_boots(relic):
-            return True
-    return False
+        player_relics = player.get("relics")
+        if isinstance(player_relics, list):
+            relics.extend(player_relics)
+    state_relics = state.get("relics")
+    if isinstance(state_relics, list):
+        relics.extend(state_relics)
+    return relics
 
 
 def _relic_matches_winged_boots(relic: Any) -> bool:
@@ -427,13 +489,61 @@ def _relic_matches_winged_boots(relic: Any) -> bool:
     return False
 
 
-def _normalize_route_plan_event(value: Any) -> dict[str, Any] | None:
-    if not isinstance(value, dict):
+def _winged_boots_counter(relic: Any) -> int | None:
+    if not isinstance(relic, dict):
         return None
-    event_type = value.get("type") or value.get("event_type")
+    counter_keys = (
+        "charges",
+        "remaining",
+        "uses_remaining",
+        "jumps_remaining",
+        "counter",
+        "show_counter",
+        "display_amount",
+        "amount",
+    )
+    for key in counter_keys:
+        value = _int_value(relic.get(key))
+        if value is not None:
+            return value
+    for nested_key in ("vars", "state", "metadata"):
+        nested = relic.get(nested_key)
+        if not isinstance(nested, dict):
+            continue
+        for key in counter_keys:
+            value = _int_value(nested.get(key))
+            if value is not None:
+                return value
+    return None
+
+
+def _int_value(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str) and re.fullmatch(r"-?\d+", value.strip()):
+        return int(value.strip())
+    return None
+
+
+def _normalize_route_plan_event(value: Any) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        return {"event_type": str(value)}
+    if not value:
+        return None
+    raw_event_type = value.get("type")
+    if raw_event_type is None or raw_event_type == "":
+        raw_event_type = value.get("event_type")
+    event_type = raw_event_type.strip() if isinstance(raw_event_type, str) else raw_event_type
+    payload = {k: v for k, v in value.items() if k not in {"type", "event_type"}}
     if event_type not in ROUTE_PLAN_EVENT_TYPES:
-        return {"event_type": str(event_type or ""), **{k: v for k, v in value.items() if k not in {"type", "event_type"}}}
-    event = {k: v for k, v in value.items() if k not in {"type", "event_type"}}
+        return {"event_type": str(event_type or ""), **payload}
+    event = dict(payload)
     event["event_type"] = event_type
     event["reason"] = _one_line(event.get("reason"))
     event["reason_tags"] = _string_list(event.get("reason_tags"))
@@ -508,7 +618,7 @@ def _validate_plan_topology(
     plan: list[dict[str, Any]],
     snapshot: dict[str, Any] | None,
     *,
-    winged_boots_available: bool,
+    winged_boots_remaining: int,
 ) -> dict[str, Any]:
     base = {"override_used": False, "winged_boots_jumps_used": 0}
     if snapshot is None:
@@ -552,27 +662,38 @@ def _validate_plan_topology(
             current,
             plan_coords[0],
             edges,
-            winged_boots_available=winged_boots_available,
+            winged_boots_available=winged_boots_remaining > 0,
         )
         if transition["route_validity"] == "invalid":
             return transition
         jumps_used += transition["winged_boots_jumps_used"]
+        if jumps_used > winged_boots_remaining:
+            return _too_many_winged_boots_jumps(jumps_used, winged_boots_remaining)
     for prev, nxt in zip(plan_coords, plan_coords[1:]):
         transition = _validate_route_transition(
             prev,
             nxt,
             edges,
-            winged_boots_available=winged_boots_available,
+            winged_boots_available=winged_boots_remaining > 0,
         )
         if transition["route_validity"] == "invalid":
             return transition
         jumps_used += transition["winged_boots_jumps_used"]
-        if jumps_used > 3:
+        if jumps_used > winged_boots_remaining:
+            return _too_many_winged_boots_jumps(jumps_used, winged_boots_remaining)
+
+    if plan_coords:
+        boss_coords = {
+            coord
+            for coord, node in node_map.items()
+            if str(node.get("type") or "").casefold() == "boss"
+        }
+        if boss_coords and plan_coords[-1] not in boss_coords:
             return {
-                "route_validity": "invalid",
-                "override_used": True,
+                "route_validity": "incomplete",
+                "override_used": bool(jumps_used),
                 "winged_boots_jumps_used": jumps_used,
-                "reason": "Winged Boots permits at most three disconnected forward jumps in one route plan.",
+                "reason": "new_plan must continue to the visible Boss node when Boss is present in route_graph.",
             }
 
     if plan_coords and any(child in node_map for child in edges.get(plan_coords[-1], set())):
@@ -580,13 +701,27 @@ def _validate_plan_topology(
             "route_validity": "incomplete",
             "override_used": bool(jumps_used),
             "winged_boots_jumps_used": jumps_used,
-            "reason": "new_plan must include the complete visible route from the selected node to a visible terminal node.",
+            "reason": "new_plan must be a complete visible route; it cannot stop before visible child nodes.",
         }
 
     return {
         "route_validity": "winged_boots_override" if jumps_used else "topological",
         "override_used": bool(jumps_used),
         "winged_boots_jumps_used": jumps_used,
+    }
+
+
+def _too_many_winged_boots_jumps(jumps_used: int, winged_boots_remaining: int) -> dict[str, Any]:
+    jump_text = "jump" if winged_boots_remaining == 1 else "jumps"
+    limit_text = "three (3)" if winged_boots_remaining == 3 else str(winged_boots_remaining)
+    return {
+        "route_validity": "invalid",
+        "override_used": True,
+        "winged_boots_jumps_used": jumps_used,
+        "reason": (
+            f"Winged Boots permits at most {limit_text} disconnected forward "
+            f"{jump_text} in this route plan because that many charges remain."
+        ),
     }
 
 
@@ -646,7 +781,7 @@ def _route_plan_feedback(code: str, message: str) -> str:
     if code == "route_plan_missing_created_event":
         missing_created_hint = (
             "There is no active route to execute or update. For this retry, emit route_plan_created with a "
-            "complete visible new_plan whose first node is the selected legal map node. "
+            "complete new_plan whose first node is the selected legal map node. "
         )
     topology_hint = ""
     if code == "route_plan_topology_invalid":
@@ -654,23 +789,24 @@ def _route_plan_feedback(code: str, message: str) -> str:
             "Do not include inferred or remembered future nodes that are absent from the current route_graph. "
             "Copy each new_plan node's exact col, row, and type from route_graph.nodes. "
             "Every adjacent pair in new_plan must be connected by the map unless Winged Boots is available; with "
-            "Winged Boots, at most three disconnected jumps are allowed and every jump must move forward to a later row. "
+            "Winged Boots, disconnected jumps cannot exceed the remaining charges and every jump must move forward "
+            "to a later row. "
         )
     incomplete_hint = ""
     if code == "route_plan_incomplete":
         incomplete_hint = (
-            "A map route_plan_event is a full visible route commitment, not a one-step prefix. Continue the new_plan "
-            "through the current route_graph until the selected path reaches a visible terminal node. "
+            "The submitted new_plan ends before the visible route is complete. Continue it through the current "
+            "route_graph until the selected path reaches the visible Boss node, or the visible terminal node when "
+            "Boss is not present in route_graph. "
         )
     return (
         f"Your previous map choice violated route-plan validation ({code}): {message} "
         f"{missing_created_hint}"
         f"{topology_hint}"
         f"{incomplete_hint}"
-        "If you have no active route plan, emit route_plan_created with a complete visible new_plan whose first node is the selected legal map node. "
+        "If you have no active route plan, emit route_plan_created with a complete new_plan whose first node is the selected legal map node. "
         "If you are executing the active route, choose the planned next node and do not emit route_plan_event. "
-        "If you need to change route, emit route_plan_updated with old_plan_remaining, new_plan, reason_tags, and reason; "
-        "the new_plan must be complete and its first node must be in current legal_actions. "
+        "If you need to change route, emit route_plan_updated with reason_tags, a non-empty reason, and a complete new_plan from the selected legal node. "
         "If the map changed, include reason_tags containing map_changed. Then choose again."
     )
 

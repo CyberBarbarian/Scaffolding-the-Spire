@@ -1,7 +1,17 @@
 import os
 import sys
+from pathlib import Path
 
-from sts2_bench.run_benchmark import load_benchmark_config, load_env_file, load_seeds
+from sts2_bench import run_benchmark as run_benchmark_module
+from sts2_bench.run_benchmark import (
+    _default_trace_analysis_dir,
+    _load_simple_yaml_mapping,
+    _resolve_trace_analysis_dir,
+    load_benchmark_config,
+    load_env_file,
+    load_seeds,
+)
+from sts2_bench.runner import RunResult
 
 
 def test_load_benchmark_config_falls_back_to_simple_scalar_parser(tmp_path, monkeypatch):
@@ -14,9 +24,11 @@ def test_load_benchmark_config_falls_back_to_simple_scalar_parser(tmp_path, monk
                 "base_url: \"\"",
                 "model: ''",
                 "include_json_state: false",
+                "allow_custom_sequences: false",
                 "memory_window: 8",
                 "max_steps: 300",
                 "out: results/random_ironclad_a0.jsonl",
+                "trace_analysis: true",
             ]
         ),
         encoding="utf-8",
@@ -26,9 +38,11 @@ def test_load_benchmark_config_falls_back_to_simple_scalar_parser(tmp_path, monk
         "STS2_BENCH_BASE_URL",
         "STS2_BENCH_MODEL",
         "STS2_BENCH_INCLUDE_JSON_STATE",
+        "STS2_BENCH_ALLOW_CUSTOM_SEQUENCES",
         "STS2_BENCH_MEMORY_WINDOW",
         "STS2_BENCH_MAX_STEPS",
         "STS2_BENCH_OUT",
+        "STS2_BENCH_TRACE_ANALYSIS",
     ):
         monkeypatch.delenv(key, raising=False)
     monkeypatch.setitem(sys.modules, "omegaconf", None)
@@ -39,9 +53,11 @@ def test_load_benchmark_config_falls_back_to_simple_scalar_parser(tmp_path, monk
     assert os.environ["STS2_BENCH_MODEL"] == ""
     assert os.environ["STS2_BENCH_AGENT"] == "random"
     assert os.environ["STS2_BENCH_INCLUDE_JSON_STATE"] == "false"
+    assert os.environ["STS2_BENCH_ALLOW_CUSTOM_SEQUENCES"] == "false"
     assert os.environ["STS2_BENCH_MEMORY_WINDOW"] == "8"
     assert os.environ["STS2_BENCH_MAX_STEPS"] == "300"
     assert os.environ["STS2_BENCH_OUT"] == "results/random_ironclad_a0.jsonl"
+    assert os.environ["STS2_BENCH_TRACE_ANALYSIS"] == "true"
 
 
 def test_load_benchmark_config_falls_back_to_simple_nested_parser(tmp_path, monkeypatch):
@@ -76,6 +92,124 @@ context_management:
     assert os.environ["STS2_BENCH_TURN_CHAT_UPDATE_MODE"] == "delta"
     assert os.environ["STS2_BENCH_TURN_CHAT_ASSISTANT_HISTORY"] == "compact"
     assert os.environ["STS2_BENCH_TURN_CHAT_PLAN_ENABLED"] == "true"
+
+
+def test_tracked_benchmark_config_allows_reverse_proxy_llm_latency(monkeypatch):
+    config = Path(__file__).resolve().parents[1] / "sts2_bench" / "benchmark.yaml"
+    monkeypatch.delenv("STS2_BENCH_LLM_TIMEOUT", raising=False)
+    monkeypatch.delenv("STS2_BENCH_LLM_MAX_RETRIES", raising=False)
+
+    load_benchmark_config(config)
+
+    assert float(os.environ["STS2_BENCH_LLM_TIMEOUT"]) >= 90.0
+    assert int(os.environ["STS2_BENCH_LLM_MAX_RETRIES"]) >= 5
+
+
+def test_tracked_benchmark_config_defaults_to_combat_mdp_state(monkeypatch):
+    config = Path(__file__).resolve().parents[1] / "sts2_bench" / "benchmark.yaml"
+    monkeypatch.delenv("STS2_BENCH_CONTEXT_MODE", raising=False)
+
+    load_benchmark_config(config)
+
+    assert os.environ["STS2_BENCH_CONTEXT_MODE"] == "combat_mdp_state"
+
+
+def test_tracked_benchmark_config_enables_trace_analysis(monkeypatch):
+    config = Path(__file__).resolve().parents[1] / "sts2_bench" / "benchmark.yaml"
+    monkeypatch.delenv("STS2_BENCH_TRACE_ANALYSIS", raising=False)
+
+    load_benchmark_config(config)
+
+    assert os.environ["STS2_BENCH_TRACE_ANALYSIS"] == "true"
+
+
+def test_tracked_benchmark_config_documents_apihy_model_catalog():
+    config = Path(__file__).resolve().parents[1] / "sts2_bench" / "benchmark.yaml"
+
+    data = _load_simple_yaml_mapping(config)
+    catalog = data["model_catalog"]
+    deepseek = catalog["apihy_deepseek"]
+    openai = catalog["apihy_openai"]
+
+    assert deepseek["base_url"] == "https://zgc.apihy.com/v1"
+    assert deepseek["default_model"] == "deepseek-v4-pro"
+    assert "deepseek-v4-pro" in deepseek["chat_models"].split(", ")
+    assert "deepseek-v4-flash" in deepseek["chat_models"].split(", ")
+    assert openai["base_url"] == "https://zgc.apihy.com/v1"
+    assert openai["default_model"] == "gpt-5.5"
+    assert "gpt-5.5" in openai["chat_models"].split(", ")
+    assert "gpt-image-2" in openai["non_chat_models"].split(", ")
+
+
+def test_trace_analysis_dir_defaults_to_artifact_bundle_for_trace_out():
+    assert _default_trace_analysis_dir("results/sts2bench_run.jsonl") == Path(
+        "artifacts/trace_analysis/sts2bench_run"
+    )
+    assert _resolve_trace_analysis_dir(
+        out="results/sts2bench_run.jsonl",
+        trace_analysis_enabled=True,
+        trace_analysis_dir=None,
+    ) == Path("artifacts/trace_analysis/sts2bench_run")
+
+
+def test_trace_analysis_dir_respects_explicit_dir_and_disable_switch():
+    assert _resolve_trace_analysis_dir(
+        out="results/sts2bench_run.jsonl",
+        trace_analysis_enabled=True,
+        trace_analysis_dir="artifacts/reports/custom",
+    ) == Path("artifacts/reports/custom")
+    assert (
+        _resolve_trace_analysis_dir(
+            out="results/sts2bench_run.jsonl",
+            trace_analysis_enabled=False,
+            trace_analysis_dir="artifacts/reports/custom",
+        )
+        is None
+    )
+
+
+def test_run_benchmark_main_runs_trace_analysis_by_default(tmp_path, monkeypatch):
+    out = tmp_path / "results" / "sts2bench_run.jsonl"
+    calls = []
+
+    monkeypatch.setattr(run_benchmark_module, "load_benchmark_env", lambda: None)
+    monkeypatch.setattr(run_benchmark_module, "agent_from_args", lambda *args, **kwargs: object())
+
+    def fake_run_one(*, seed, character, ascension, **kwargs):
+        return RunResult(
+            seed=seed,
+            character=character,
+            ascension=ascension,
+            decision="game_over",
+            act=1,
+            floor=1,
+            room_type="Monster",
+        )
+
+    def fake_analyze_benchmark_trace(trace_path, out_dir):
+        calls.append((Path(trace_path), Path(out_dir)))
+        return {"source": str(trace_path), "out_dir": str(out_dir), "run_count": 1, "runs": []}
+
+    monkeypatch.setattr(run_benchmark_module, "run_one", fake_run_one)
+    monkeypatch.setattr(run_benchmark_module, "analyze_benchmark_trace", fake_analyze_benchmark_trace)
+
+    exit_code = run_benchmark_module.main(
+        [
+            "--agent",
+            "random",
+            "--context-mode",
+            "single_turn",
+            "--count",
+            "1",
+            "--out",
+            str(out),
+            "--max-steps",
+            "1",
+        ]
+    )
+
+    assert exit_code == 0
+    assert calls == [(out, Path("artifacts/trace_analysis/sts2bench_run"))]
 
 
 def test_load_env_file_handles_utf8_bom(tmp_path, monkeypatch):

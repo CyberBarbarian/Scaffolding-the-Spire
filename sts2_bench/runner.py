@@ -11,6 +11,7 @@ from typing import Any, Callable, Iterable, Literal
 
 from .actions import LegalAction, build_legal_actions
 from .agents import (
+    ActionPromptOrderMode,
     Agent,
     ConversationMode,
     FallbackMode,
@@ -26,7 +27,7 @@ from .evidence import (
     EvidenceBundle,
     build_evidence_bundle,
     evidence_ref_feedback,
-    validate_occ_context_contract,
+    validate_action_reason,
     validate_evidence_refs,
 )
 from .feedback import FeedbackBus
@@ -34,13 +35,14 @@ from .multi_agent import CoordinatorAgent, OutOfCombatContextAgent
 from .posterior import LLMRewardPosteriorEvaluator
 from .process import Sts2Process
 from .route_plan import RoutePlanTracker
-from .sequences import execute_card_sequence
+from .sequences import MAX_CUSTOM_SEQUENCE_VALIDATION_LENGTH, execute_card_sequence
 from .sequence_validation import validate_custom_sequence
 from .run_context import RunContextStore
 from .routing import route_state
 
 
 LogLevel = Literal["metrics", "decisions", "full"]
+RoutePlanEnforcement = Literal["hard", "soft"]
 CUSTOM_SEQUENCE_VALIDATION_RETRIES = 2
 ROUTE_PLAN_VALIDATION_RETRIES = 2
 EVIDENCE_VALIDATION_RETRIES = 2
@@ -116,17 +118,30 @@ def run_one(
     print_model_output: bool = False,
     include_full_map: bool = False,
     allow_repeat_views: bool = False,
+    allow_custom_sequences: bool | None = None,
+    combat_card_sequences_enabled: bool = True,
     log_level: LogLevel = "decisions",
     sequence_probe_factory: Callable[[], Sts2Process] | None = None,
+    route_plan_enabled: bool = True,
+    route_plan_enforcement: RoutePlanEnforcement = "hard",
 ) -> RunResult:
     """Run one game and return summary metrics."""
+
+    if route_plan_enforcement not in {"hard", "soft"}:
+        raise ValueError(f"Unsupported route_plan_enforcement: {route_plan_enforcement}")
 
     owns_process = process is None
     proc = process or Sts2Process()
     started = time.time()
     result = RunResult(seed=seed, character=character, ascension=ascension)
     action_tape: list[dict[str, Any]] = []
-    route_plan_tracker = RoutePlanTracker()
+    route_plan_tracker = RoutePlanTracker() if route_plan_enabled else None
+    skipped_card_reward_claims: dict[tuple[Any, ...], set[Any]] = {}
+    open_card_reward_claim: tuple[tuple[Any, ...], Any] | None = None
+    custom_sequences_enabled = (
+        _allow_custom_sequences_for_agent(agent) if allow_custom_sequences is None else allow_custom_sequences
+    )
+    card_sequences_enabled = combat_card_sequences_enabled and _allow_card_sequences_for_agent(agent)
 
     state: dict[str, Any] | None = None
     try:
@@ -141,6 +156,10 @@ def run_one(
                 "ascension": ascension,
                 "log_level": log_level,
                 "allow_repeat_views": allow_repeat_views,
+                "allow_card_sequences": card_sequences_enabled,
+                "allow_custom_sequences": custom_sequences_enabled,
+                "route_plan_enabled": route_plan_enabled,
+                "route_plan_enforcement": route_plan_enforcement,
             }
         )
 
@@ -154,11 +173,19 @@ def run_one(
                 map_state = proc.send({"cmd": "get_map"})
                 if map_state.get("type") == "map":
                     state = {**state, "full_map": map_state}
+            if route_plan_tracker is not None:
+                state = _attach_route_plan_context(state, route_plan_tracker)
 
+            reward_room_key = _reward_room_key(state)
+            blocked_card_reward_claims = (
+                skipped_card_reward_claims.get(reward_room_key) if decision == "combat_reward" else None
+            )
             legal_actions = build_legal_actions(
                 state,
                 allow_repeat_views=allow_repeat_views,
-                allow_custom_sequences=_allow_custom_sequences_for_agent(agent),
+                allow_card_sequences=card_sequences_enabled,
+                allow_custom_sequences=custom_sequences_enabled,
+                blocked_card_reward_claims=blocked_card_reward_claims,
             )
             evidence_bundle = build_evidence_bundle(
                 state,
@@ -210,6 +237,8 @@ def run_one(
                 lang=lang,
                 sequence_probe_factory=sequence_probe_factory,
                 route_plan_tracker=route_plan_tracker,
+                route_plan_enabled=route_plan_enabled,
+                route_plan_enforcement=route_plan_enforcement,
                 evidence_bundle=evidence_bundle,
             )
             if validation_error:
@@ -264,6 +293,13 @@ def run_one(
                 return result
             action_tape.append(_copy_command(action.command))
             state = _attach_last_action_result(old_state, next_state, action)
+            open_card_reward_claim = _update_card_reward_reopen_guard(
+                skipped_card_reward_claims,
+                open_card_reward_claim,
+                old_state,
+                action,
+                state,
+            )
             _record_agent_transition(agent, old_state, action, meta, state)
             if _max_game_actions_reached(result, max_game_actions, state):
                 return result
@@ -302,7 +338,9 @@ def _choose_action_with_runner_validation(
     ascension: int,
     lang: str,
     sequence_probe_factory: Callable[[], Sts2Process] | None,
-    route_plan_tracker: RoutePlanTracker,
+    route_plan_tracker: RoutePlanTracker | None,
+    route_plan_enabled: bool,
+    route_plan_enforcement: RoutePlanEnforcement,
     evidence_bundle: EvidenceBundle,
 ) -> tuple[LegalAction, dict[str, Any], str | None]:
     feedback_bus = FeedbackBus(
@@ -311,7 +349,7 @@ def _choose_action_with_runner_validation(
         evidence_bundle_hash=evidence_bundle.bundle_hash(),
         retry_limits={
             "custom_sequence_validation": CUSTOM_SEQUENCE_VALIDATION_RETRIES,
-            "route_plan_validation": ROUTE_PLAN_VALIDATION_RETRIES,
+            "route_plan_validation": ROUTE_PLAN_VALIDATION_RETRIES if route_plan_enforcement == "hard" else 0,
             "evidence_validation": EVIDENCE_VALIDATION_RETRIES,
         },
     )
@@ -335,23 +373,47 @@ def _choose_action_with_runner_validation(
         if print_model_output:
             _print_model_output(step=step, decision=decision, action=action, meta=meta)
 
-        evidence_error = None
-        evidence_error_code = "invalid_evidence_refs"
         parsed = meta.get("parsed") if isinstance(meta.get("parsed"), dict) else None
-        if isinstance(parsed, dict):
-            evidence_error = validate_evidence_refs(parsed, evidence_bundle)
-            if evidence_error is None:
-                evidence_error = validate_occ_context_contract(
-                    parsed,
-                    action,
-                    active_agent=_active_agent_for_validation(state, meta),
+        reason_error = validate_action_reason(parsed, action) if parsed is not None else None
+        if reason_error is not None:
+            event = feedback_bus.make_event(
+                kind="evidence_validation",
+                validator="action_reason",
+                code="missing_action_reason",
+                message=(
+                    f"Your previous response was invalid: {reason_error}. "
+                    "Choose again from the current legal actions and include a concise reason for the same selected action."
+                ),
+                action=action,
+                details={"reason": reason_error},
+            )
+            if logger:
+                logger.write(
+                    feedback_bus.trace_entry(
+                        event,
+                        entry_type="evidence_validation_error",
+                        reason=reason_error,
+                    )
                 )
-                evidence_error_code = "missing_no_context_change_reason"
+            if not feedback_bus.dispatch_retry(
+                agent=agent,
+                state=state,
+                action=action,
+                meta=meta,
+                event=event,
+                legal_actions=legal_actions,
+                result_extra=result.extra,
+                result_extra_key="evidence_validation_retry_count",
+            ):
+                return action, meta, f"evidence validation failed: {reason_error}"
+            continue
+
+        evidence_error = validate_evidence_refs(parsed, evidence_bundle) if isinstance(parsed, dict) else None
         if evidence_error is not None:
             event = feedback_bus.make_event(
                 kind="evidence_validation",
-                validator="evidence_refs" if evidence_error_code == "invalid_evidence_refs" else "occ_context_contract",
-                code=evidence_error_code,
+                validator="evidence_refs",
+                code="invalid_evidence_refs",
                 message=evidence_ref_feedback(evidence_error),
                 action=action,
                 details={"reason": evidence_error},
@@ -380,51 +442,62 @@ def _choose_action_with_runner_validation(
         if logger:
             logger.write(_action_log_entry(log_level=log_level, step=step, decision=decision, action=action, meta=meta))
 
-        route_plan_result = route_plan_tracker.validate_and_apply(
-            state=state,
-            legal_actions=legal_actions,
-            action=action,
-            meta=meta,
-            step=step,
-        )
-        if route_plan_result.error is not None:
-            error = route_plan_result.error
-            event = feedback_bus.make_event(
-                kind="route_plan_validation",
-                validator="route_plan",
-                code=error.code,
-                message=error.feedback,
-                action=action,
-                details={"reason": error.message, "event": error.event},
-            )
-            if logger:
-                logger.write(
-                    feedback_bus.trace_entry(
-                        event,
-                        entry_type="route_plan_validation_error",
-                        reason=error.message,
-                        event=error.event,
-                    )
-                )
-            if not feedback_bus.dispatch_retry(
-                agent=agent,
+        if route_plan_enabled and route_plan_tracker is not None:
+            route_plan_result = route_plan_tracker.validate_and_apply(
                 state=state,
+                legal_actions=legal_actions,
                 action=action,
                 meta=meta,
-                event=event,
-                legal_actions=legal_actions,
-                result_extra=result.extra,
-                result_extra_key="route_plan_validation_retry_count",
-            ):
-                return action, meta, f"route plan validation failed: {error.code}: {error.message}"
-            continue
-
-        if route_plan_result.events:
-            for event in route_plan_result.events:
-                logger and logger.write(event)
-            result.extra["route_plan_event_count"] = int(result.extra.get("route_plan_event_count") or 0) + len(
-                route_plan_result.events
+                step=step,
             )
+            if route_plan_result.error is not None:
+                error = route_plan_result.error
+                event = feedback_bus.make_event(
+                    kind="route_plan_validation",
+                    validator="route_plan",
+                    code=error.code,
+                    message=error.feedback,
+                    action=action,
+                    details={"reason": error.message, "event": error.event},
+                )
+                if logger:
+                    logger.write(
+                        feedback_bus.trace_entry(
+                            event,
+                            entry_type="route_plan_validation_error",
+                            reason=error.message,
+                            event=error.event,
+                            enforcement=route_plan_enforcement,
+                        )
+                    )
+                result.extra["route_plan_validation_error_count"] = int(
+                    result.extra.get("route_plan_validation_error_count") or 0
+                ) + 1
+                if route_plan_enforcement == "soft":
+                    result.extra["route_plan_validation_soft_error_count"] = int(
+                        result.extra.get("route_plan_validation_soft_error_count") or 0
+                    ) + 1
+                if not feedback_bus.dispatch_retry(
+                    agent=agent,
+                    state=state,
+                    action=action,
+                    meta=meta,
+                    event=event,
+                    legal_actions=legal_actions,
+                    result_extra=result.extra,
+                    result_extra_key="route_plan_validation_retry_count",
+                ):
+                    if route_plan_enforcement == "hard":
+                        return action, meta, f"route plan validation failed: {error.code}: {error.message}"
+                if route_plan_enforcement == "hard":
+                    continue
+
+            if route_plan_result.events:
+                for event in route_plan_result.events:
+                    logger and logger.write(event)
+                result.extra["route_plan_event_count"] = int(result.extra.get("route_plan_event_count") or 0) + len(
+                    route_plan_result.events
+                )
 
         if action.command.get("cmd") != "bench_custom_sequence":
             return action, meta, None
@@ -456,7 +529,7 @@ def _choose_action_with_runner_validation(
             logger.write(
                 feedback_bus.trace_entry(
                     event,
-                    entry_type="custom_sequence_validation_error",
+                    entry_type="custom_sequence_validation_feedback",
                     reason=validation_error,
                     sequence=sequence_payload,
                 )
@@ -540,8 +613,22 @@ def _custom_sequence_feedback(validation_error: str) -> str:
         f"Your previous response was invalid: custom sequence validation failed: {validation_error}. "
         "Choose again from the current legal actions. Do not use combat_custom_sequence for cards with random, "
         "choose, select, discover, or other manual-choice effects; play those cards as single legal actions "
-        "or choose a listed deterministic combat_card_sequence. For custom sequence payloads, card_index values "
-        "come from the current visible hand snapshot; do not predict shifted card indices after earlier cards are played."
+        "instead. For custom sequence payloads, sum step costs against current energy, bind card_index values "
+        "to the initial visible hand snapshot, and every bound "
+        "card must remain playable after earlier sequence steps resolve. combat_custom_sequence may contain at "
+        f"most {MAX_CUSTOM_SEQUENCE_VALIDATION_LENGTH} card steps; if a useful line is longer, submit the first "
+        "safe prefix and wait for the next state. If an earlier step can kill or remove "
+        "a targeted enemy, do not point later steps at that enemy; stop the sequence before the removal and "
+        "wait for the next state. Include a combat_notes cost audit and lethal-target audit; for attacks, use "
+        "the target-specific damage_by_target or calculateddamage_by_target entry for that target, preferring "
+        "unblocked_damage when present, not the base stats.damage value. If any step applies Vulnerable, Weak, "
+        "Strength, Dexterity, or another modifier that can change later damage or block previews, stop the "
+        "sequence at that modifier-changing step and wait for the next state. If shown damage is lethal against "
+        "that enemy's current hp before "
+        "later targeted steps, stop the sequence at the lethal/removal step and wait for the next state. "
+        "Track cumulative target-specific shown damage per target; once cumulative damage reaches that "
+        "enemy's current hp, no later sequence step may target it. If you cannot verify the whole "
+        "sequence, choose a single legal action."
     )
 
 
@@ -587,6 +674,58 @@ def _allow_custom_sequences_for_agent(agent: Agent) -> bool:
     return not isinstance(agent, RandomAgent)
 
 
+def _allow_card_sequences_for_agent(agent: Agent) -> bool:
+    return True
+
+
+def _reward_room_key(state: dict[str, Any]) -> tuple[Any, ...]:
+    context = state.get("context") if isinstance(state.get("context"), dict) else {}
+    return (
+        context.get("act", state.get("act")),
+        context.get("floor", state.get("floor")),
+        context.get("room_type"),
+    )
+
+
+def _card_reward_claim_index(state: dict[str, Any], action: LegalAction) -> Any | None:
+    if state.get("decision") != "combat_reward" or action.kind != "combat_reward":
+        return None
+    command = action.command if isinstance(action.command, dict) else {}
+    if command.get("action") != "claim_reward":
+        return None
+    args = command.get("args") if isinstance(command.get("args"), dict) else {}
+    reward_index = args.get("reward_index")
+    for reward in state.get("rewards") or []:
+        if not isinstance(reward, dict) or reward.get("index") != reward_index:
+            continue
+        reward_kind = reward.get("kind", reward.get("type_name"))
+        if reward_kind == "card_reward":
+            return reward_index
+    return None
+
+
+def _update_card_reward_reopen_guard(
+    skipped_card_reward_claims: dict[tuple[Any, ...], set[Any]],
+    open_card_reward_claim: tuple[tuple[Any, ...], Any] | None,
+    old_state: dict[str, Any],
+    action: LegalAction,
+    next_state: dict[str, Any],
+) -> tuple[tuple[Any, ...], Any] | None:
+    opened_index = _card_reward_claim_index(old_state, action)
+    if opened_index is not None:
+        return (_reward_room_key(old_state), opened_index)
+
+    if old_state.get("decision") == "card_reward" and open_card_reward_claim is not None:
+        if action.kind == "card_reward_skip":
+            room_key, reward_index = open_card_reward_claim
+            skipped_card_reward_claims.setdefault(room_key, set()).add(reward_index)
+        return None
+
+    if next_state.get("decision") not in {"combat_reward", "card_reward"}:
+        return None
+    return open_card_reward_claim
+
+
 def _agent_run_context_store(agent: Agent) -> RunContextStore | None:
     if isinstance(agent, CoordinatorAgent):
         return agent.store
@@ -629,6 +768,24 @@ def _apply_view_action(proc: Sts2Process, state: dict[str, Any], command: dict[s
     if view in {"draw", "discard", "exhaust"}:
         return {**state, f"view_{view}_pile": True}
     return state
+
+
+def _attach_route_plan_context(state: dict[str, Any], tracker: RoutePlanTracker) -> dict[str, Any]:
+    if state.get("decision") != "map_select":
+        if "active_route_plan" in state:
+            clean = dict(state)
+            clean.pop("active_route_plan", None)
+            return clean
+        return state
+
+    active_context = tracker.active_context()
+    if active_context is None:
+        if "active_route_plan" not in state:
+            return state
+        clean = dict(state)
+        clean.pop("active_route_plan", None)
+        return clean
+    return {**state, "active_route_plan": active_context}
 
 
 def _matching_sequence_action(sequence_payload: Any, legal_actions: list[LegalAction]) -> LegalAction | None:
@@ -757,6 +914,9 @@ def _decision_log_entry(
     map_snapshot = _map_snapshot_for_trace(state)
     if map_snapshot is not None:
         entry["map_snapshot"] = map_snapshot
+    enemy_snapshot = _enemy_snapshot_for_trace(state)
+    if enemy_snapshot is not None:
+        entry["enemy_snapshot"] = enemy_snapshot
     if evidence_bundle is not None:
         entry["evidence_bundle_hash"] = evidence_bundle.bundle_hash()
         entry["deck_summary_visible"] = evidence_bundle.deck_summary_visible
@@ -786,6 +946,34 @@ def _map_snapshot_for_trace(state: dict[str, Any]) -> dict[str, Any] | None:
     if isinstance(full_map, dict) and full_map.get("type") == "map":
         return full_map
     return None
+
+
+def _enemy_snapshot_for_trace(state: dict[str, Any]) -> list[dict[str, Any]] | None:
+    combat = state.get("combat")
+    source = combat if isinstance(combat, dict) and isinstance(combat.get("enemies"), list) else state
+    enemies = source.get("enemies") if isinstance(source, dict) else None
+    if not isinstance(enemies, list):
+        return None
+    snapshot: list[dict[str, Any]] = []
+    for enemy in enemies:
+        if not isinstance(enemy, dict):
+            continue
+        snapshot.append(
+            {
+                "index": enemy.get("index"),
+                "name": enemy.get("name"),
+                "hp": enemy.get("hp"),
+                "max_hp": enemy.get("max_hp"),
+                "block": enemy.get("block", 0),
+                "intent": enemy.get("intent"),
+                "intents": [
+                    dict(intent)
+                    for intent in enemy.get("intents") or []
+                    if isinstance(intent, dict)
+                ],
+            }
+        )
+    return snapshot or None
 
 
 def _action_log_entry(
@@ -843,6 +1031,14 @@ def _state_summary(state: dict[str, Any]) -> dict[str, Any]:
     last_action_result = _last_action_result_summary(state.get("last_action_result"))
     if last_action_result is not None:
         summary["last_action_result"] = last_action_result
+    active_route_plan = state.get("active_route_plan")
+    if isinstance(active_route_plan, dict):
+        remaining = active_route_plan.get("remaining") if isinstance(active_route_plan.get("remaining"), list) else []
+        summary["active_route_plan"] = {
+            "plan_id": active_route_plan.get("plan_id"),
+            "expected_next": active_route_plan.get("expected_next"),
+            "remaining_count": len(remaining),
+        }
     return summary
 
 
@@ -903,6 +1099,10 @@ def _agent_meta_summary(meta: dict[str, Any]) -> dict[str, Any]:
         "reward_posterior_usage",
         "run_context_patch",
         "run_context_hash",
+        "action_prompt_order",
+        "action_prompt_order_changed",
+        "action_prompt_map_action_ids",
+        "reflection_verifier_selected_action_id",
     ):
         if key in meta and meta[key] is not None:
             summary[key] = meta[key]
@@ -913,12 +1113,33 @@ def _agent_meta_summary(meta: dict[str, Any]) -> dict[str, Any]:
             "candidate_analysis_count": len(posterior.get("candidate_deck_analyses") or []),
             "global_uncertainty_count": len(posterior.get("global_uncertainties") or []),
         }
+    self_consistency = meta.get("self_consistency")
+    if isinstance(self_consistency, dict):
+        summary["self_consistency"] = {
+            "mode": self_consistency.get("mode"),
+            "primary_action_id": self_consistency.get("primary_action_id"),
+            "selected_action_id": self_consistency.get("selected_action_id"),
+            "top_action_id": self_consistency.get("top_action_id"),
+            "top_vote_count": self_consistency.get("top_vote_count"),
+            "majority_vote_applied": self_consistency.get("majority_vote_applied"),
+            "disagreement": self_consistency.get("disagreement"),
+        }
+    reflection = meta.get("reflection_verifier")
+    if isinstance(reflection, dict):
+        summary["reflection_verifier"] = {
+            "mode": reflection.get("mode"),
+            "primary_action_id": reflection.get("primary_action_id"),
+            "selected_action_id": reflection.get("selected_action_id"),
+            "verifier_vote_applied": reflection.get("verifier_vote_applied"),
+            "verifier_vote_allowed": reflection.get("verifier_vote_allowed"),
+            "override_block_reason": reflection.get("override_block_reason"),
+        }
 
     parsed = meta.get("parsed")
     if isinstance(parsed, dict):
         summary["parsed"] = {
             key: parsed[key]
-            for key in ("action_id", "reason", "route_plan_event", "evidence_refs", "no_context_change_reason")
+            for key in ("action_id", "reason", "route_plan_event", "evidence_refs")
             if key in parsed
         }
     return summary
@@ -1001,8 +1222,24 @@ def agent_from_args(
     turn_chat_update_mode: TurnChatUpdateMode = "delta",
     turn_chat_assistant_history: TurnChatAssistantHistory = "compact",
     turn_chat_plan_enabled: bool = False,
+    turn_check_enabled: bool | None = None,
+    route_plan_enabled: bool = True,
+    route_plan_enforcement: RoutePlanEnforcement = "hard",
     reward_posterior_evaluator_enabled: bool = True,
+    self_consistency_enabled: bool = False,
+    self_consistency_samples: int = 3,
+    self_consistency_decisions: tuple[str, ...] | str = ("map_select", "card_reward"),
+    self_consistency_mode: str = "diagnostic",
+    reflection_enabled: bool = False,
+    reflection_decisions: tuple[str, ...] | str = ("card_reward",),
+    reflection_mode: str = "diagnostic",
+    reflection_max_options: int = 8,
+    action_prompt_order: ActionPromptOrderMode = "default",
+    action_prompt_order_seed: int | None = 0,
+    combat_card_sequences_enabled: bool = True,
 ) -> Agent:
+    if route_plan_enforcement not in {"hard", "soft"}:
+        raise ValueError(f"Unsupported route_plan_enforcement: {route_plan_enforcement}")
     if kind == "random":
         if conversation_mode != "single_turn":
             raise ValueError("turn_chat context management is only supported by the llm agent")
@@ -1023,6 +1260,7 @@ def agent_from_args(
                 "Set --api-key, DEEPSEEK_API_KEY, or OPENAI_API_KEY for non-local LLM endpoints"
             )
         if kind == "coordinator":
+            ca_conversation_mode = "combat_mdp_state" if conversation_mode == "combat_mdp_state" else "turn_chat"
             store = RunContextStore()
             ca_agent = OpenAICompatAgent(
                 base_url=base_url,
@@ -1036,11 +1274,25 @@ def agent_from_args(
                 prompt_style=prompt_style,
                 memory_enabled=False,
                 run_summary_enabled=run_summary_enabled,
-                conversation_mode="turn_chat",
+                conversation_mode=ca_conversation_mode,
                 turn_chat_window=turn_chat_window,
                 turn_chat_update_mode=turn_chat_update_mode,
                 turn_chat_assistant_history=turn_chat_assistant_history,
                 turn_chat_plan_enabled=turn_chat_plan_enabled,
+                turn_check_enabled=turn_check_enabled,
+                route_plan_enabled=False,
+                context_patch_fields_enabled=False,
+                self_consistency_enabled=False,
+                self_consistency_samples=self_consistency_samples,
+                self_consistency_decisions=self_consistency_decisions,
+                self_consistency_mode=self_consistency_mode,  # type: ignore[arg-type]
+                reflection_enabled=False,
+                reflection_decisions=reflection_decisions,
+                reflection_mode=reflection_mode,  # type: ignore[arg-type]
+                reflection_max_options=reflection_max_options,
+                action_prompt_order=action_prompt_order,
+                action_prompt_order_seed=action_prompt_order_seed,
+                combat_card_sequences_enabled=combat_card_sequences_enabled,
             )
             occ_inner = OpenAICompatAgent(
                 base_url=base_url,
@@ -1059,6 +1311,20 @@ def agent_from_args(
                 turn_chat_update_mode=turn_chat_update_mode,
                 turn_chat_assistant_history=turn_chat_assistant_history,
                 turn_chat_plan_enabled=False,
+                turn_check_enabled=False,
+                route_plan_enabled=route_plan_enabled,
+                context_patch_fields_enabled=True,
+                self_consistency_enabled=self_consistency_enabled,
+                self_consistency_samples=self_consistency_samples,
+                self_consistency_decisions=self_consistency_decisions,
+                self_consistency_mode=self_consistency_mode,  # type: ignore[arg-type]
+                reflection_enabled=reflection_enabled,
+                reflection_decisions=reflection_decisions,
+                reflection_mode=reflection_mode,  # type: ignore[arg-type]
+                reflection_max_options=reflection_max_options,
+                action_prompt_order=action_prompt_order,
+                action_prompt_order_seed=action_prompt_order_seed,
+                combat_card_sequences_enabled=combat_card_sequences_enabled,
             )
             reward_posterior_evaluator = (
                 LLMRewardPosteriorEvaluator(occ_inner, max_retries=llm_max_retries)
@@ -1095,6 +1361,20 @@ def agent_from_args(
             turn_chat_update_mode=turn_chat_update_mode,
             turn_chat_assistant_history=turn_chat_assistant_history,
             turn_chat_plan_enabled=turn_chat_plan_enabled,
+            turn_check_enabled=turn_check_enabled,
+            route_plan_enabled=route_plan_enabled,
+            context_patch_fields_enabled=True,
+            self_consistency_enabled=self_consistency_enabled,
+            self_consistency_samples=self_consistency_samples,
+            self_consistency_decisions=self_consistency_decisions,
+            self_consistency_mode=self_consistency_mode,  # type: ignore[arg-type]
+            reflection_enabled=reflection_enabled,
+            reflection_decisions=reflection_decisions,
+            reflection_mode=reflection_mode,  # type: ignore[arg-type]
+            reflection_max_options=reflection_max_options,
+            action_prompt_order=action_prompt_order,
+            action_prompt_order_seed=action_prompt_order_seed,
+            combat_card_sequences_enabled=combat_card_sequences_enabled,
         )
     raise ValueError(f"Unknown agent kind: {kind}")
 

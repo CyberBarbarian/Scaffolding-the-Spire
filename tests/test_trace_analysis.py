@@ -4,7 +4,7 @@ import re
 from sts2_bench.actions import LegalAction
 from sts2_bench.evidence import build_evidence_bundle
 from sts2_bench.runner import _decision_log_entry
-from sts2_bench.trace_analysis import analyze_trace
+from sts2_bench.trace_analysis import analyze_benchmark_trace, analyze_trace
 
 
 def _write_jsonl(path, rows):
@@ -136,6 +136,164 @@ def test_decision_log_entry_records_map_snapshot_outside_state():
     assert entry["map_snapshot"]["type"] == "map"
     assert "full_map" not in entry["state"]
     assert "map_snapshot" not in entry["state"]
+
+
+def test_decision_log_entry_records_enemy_snapshot_outside_state():
+    state = _state(
+        "combat_play",
+        act=1,
+        floor=2,
+        room="Monster",
+        hp=70,
+        enemies=[
+            {
+                "index": 0,
+                "name": "Jaw Worm",
+                "hp": 20,
+                "max_hp": 40,
+                "block": 3,
+                "intent": "Attack",
+                "intents": [{"type": "Attack", "damage": 11}],
+            }
+        ],
+    )
+
+    entry = _decision_log_entry(
+        log_level="decisions",
+        step=0,
+        state=state,
+        legal_actions=[
+            LegalAction(
+                action_id=0,
+                label="end turn",
+                command={"cmd": "action", "action": "end_turn"},
+                kind="combat_end_turn",
+            )
+        ],
+        prompt=None,
+    )
+
+    assert entry["enemy_snapshot"] == [
+        {
+            "index": 0,
+            "name": "Jaw Worm",
+            "hp": 20,
+            "max_hp": 40,
+            "block": 3,
+            "intent": "Attack",
+            "intents": [{"type": "Attack", "damage": 11}],
+        }
+    ]
+    assert "enemies" not in entry["state"]
+    assert "enemy_snapshot" not in entry["state"]
+
+
+def test_decision_log_entry_records_nested_combat_enemy_snapshot():
+    state = _state(
+        "card_select",
+        act=1,
+        floor=2,
+        room="Monster",
+        hp=70,
+        combat={
+            "enemies": [
+                {
+                    "index": 1,
+                    "name": "Spike Slime",
+                    "hp": 9,
+                    "max_hp": 12,
+                    "block": 0,
+                    "intent": "Debuff",
+                }
+            ]
+        },
+    )
+
+    entry = _decision_log_entry(
+        log_level="decisions",
+        step=1,
+        state=state,
+        legal_actions=[
+            LegalAction(
+                action_id=0,
+                label="select card 0: Strike",
+                command={"cmd": "action", "action": "select_card", "args": {"card_index": 0}},
+                kind="card_select",
+            )
+        ],
+        prompt=None,
+    )
+
+    assert entry["enemy_snapshot"] == [
+        {
+            "index": 1,
+            "name": "Spike Slime",
+            "hp": 9,
+            "max_hp": 12,
+            "block": 0,
+            "intent": "Debuff",
+            "intents": [],
+        }
+    ]
+
+
+def test_analyze_benchmark_trace_splits_multi_run_reports(tmp_path):
+    trace_path = tmp_path / "multi_run.jsonl"
+    rows = [
+        {"type": "run_config", "config": {"logging": {"log_level": "decisions"}}},
+        {"type": "start", "seed": "seed_a", "character": "Ironclad", "ascension": 0},
+        {
+            "type": "result",
+            "result": {
+                "seed": "seed_a",
+                "character": "Ironclad",
+                "ascension": 0,
+                "decision": "game_over",
+                "act": 1,
+                "floor": 2,
+                "room_type": "Monster",
+                "hp": 0,
+                "max_hp": 80,
+                "deck_size": 10,
+                "victory": False,
+                "truncated": False,
+                "error": None,
+            },
+        },
+        {"type": "start", "seed": "seed_b", "character": "Ironclad", "ascension": 0},
+        {
+            "type": "result",
+            "result": {
+                "seed": "seed_b",
+                "character": "Ironclad",
+                "ascension": 0,
+                "decision": "game_over",
+                "act": 1,
+                "floor": 3,
+                "room_type": "Elite",
+                "hp": 0,
+                "max_hp": 80,
+                "deck_size": 11,
+                "victory": False,
+                "truncated": False,
+                "error": None,
+            },
+        },
+    ]
+    _write_jsonl(trace_path, rows)
+
+    out_dir = tmp_path / "analysis"
+    index = analyze_benchmark_trace(trace_path, out_dir)
+
+    assert index["run_count"] == 2
+    assert [run["seed"] for run in index["runs"]] == ["seed_a", "seed_b"]
+    assert (out_dir / "00_seed_a.jsonl").is_file()
+    assert (out_dir / "00_seed_a" / "summary.json").is_file()
+    assert (out_dir / "00_seed_a" / "replay.md").is_file()
+    assert (out_dir / "01_seed_b.jsonl").is_file()
+    assert (out_dir / "01_seed_b" / "deck_and_card_rewards_zh.md").is_file()
+    saved_index = json.loads((out_dir / "index.json").read_text(encoding="utf-8"))
+    assert saved_index["run_count"] == 2
 
 
 def test_decision_log_entry_records_evidence_summary_flags():
@@ -643,6 +801,65 @@ def test_card_rewards_fallback_to_legal_actions_and_localize_names(tmp_path):
     assert "热修复 / Hotfix" in replay
 
 
+def test_unopened_combat_card_reward_skip_is_reported_as_unknown_candidates(tmp_path):
+    trace_path = tmp_path / "unopened_card_reward_skip.jsonl"
+    out_dir = tmp_path / "analysis"
+    rows = [
+        {"type": "start", "seed": "seed-a", "character": "Ironclad", "ascension": 0},
+        _decision(
+            0,
+            _state(
+                "combat_reward",
+                act=1,
+                floor=2,
+                room="Monster",
+                hp=64,
+                rewards=[{"index": 0, "kind": "card_reward", "can_claim": True, "can_skip": True}],
+            ),
+            [
+                {"action_id": 0, "kind": "combat_reward", "label": "claim reward 0: card_reward"},
+                {"action_id": 1, "kind": "combat_reward_skip", "label": "skip reward 0: card_reward"},
+            ],
+        ),
+        _action(
+            0,
+            "combat_reward",
+            "skip reward 0: card_reward",
+            "combat_reward_skip",
+            action_id=1,
+            reason="No card options are visible.",
+        ),
+        {
+            "type": "result",
+            "result": {
+                "seed": "seed-a",
+                "character": "Ironclad",
+                "ascension": 0,
+                "victory": False,
+                "decision": "game_over",
+                "act": 1,
+                "floor": 2,
+                "room_type": "Monster",
+                "hp": 64,
+                "max_hp": 80,
+                "deck_size": 10,
+                "error": None,
+                "truncated": False,
+            },
+        },
+    ]
+    _write_jsonl(trace_path, rows)
+
+    report = analyze_trace(trace_path, out_dir)
+    deck_report = (out_dir / "deck_and_card_rewards_zh.md").read_text(encoding="utf-8")
+
+    assert report["card_rewards"][0]["skipped"] is True
+    assert report["card_rewards"][0]["unopened"] is True
+    assert report["card_rewards"][0]["offered"] == []
+    assert report["card_rewards"][0]["offered_unavailable_reason"] == "skipped_before_opening_card_reward"
+    assert "未展开 / candidates unavailable" in deck_report
+
+
 def test_analyze_trace_reconstructs_final_deck_and_writes_chinese_deck_report(tmp_path):
     trace_path = tmp_path / "deck_reconstruction.jsonl"
     out_dir = tmp_path / "analysis"
@@ -768,6 +985,226 @@ def test_analyze_trace_reconstructs_final_deck_and_writes_chinese_deck_report(tm
     assert "终局牌组（重构）" in deck_report
     assert "战鼓 / Drum of Battle" in deck_report
     assert "岩石铠甲 / Stone Armor" in deck_report
+
+
+def test_analyze_trace_reconstructs_deck_from_multi_card_select_combinations(tmp_path):
+    trace_path = tmp_path / "multi_card_select_deck.jsonl"
+    out_dir = tmp_path / "analysis"
+    legal_actions = [
+        {"action_id": 0, "kind": "view_deck", "label": "view deck"},
+        {"action_id": 1, "kind": "card_select", "label": "select cards 0,1: Strike + Strike"},
+        {"action_id": 2, "kind": "card_select", "label": "select cards 0,2: Strike + Defend"},
+        {"action_id": 3, "kind": "card_select", "label": "select cards 0,3: Strike + Bash"},
+        {"action_id": 4, "kind": "card_select", "label": "select cards 1,2: Strike + Defend"},
+        {"action_id": 5, "kind": "card_select", "label": "select cards 1,3: Strike + Bash"},
+        {"action_id": 6, "kind": "card_select", "label": "select cards 2,3: Defend + Bash"},
+    ]
+    rows = [
+        {"type": "start", "seed": "seed-a", "character": "Ironclad", "ascension": 0},
+        _decision(
+            0,
+            _state(
+                "card_select",
+                act=1,
+                floor=1,
+                room="Event",
+                hp=80,
+                max_hp=80,
+                player={"hp": 80, "max_hp": 80, "gold": 99, "deck_size": 4},
+            ),
+            legal_actions,
+        ),
+        _action(0, "card_select", "select cards 0,1: Strike + Strike", "card_select"),
+        _decision(
+            1,
+            _state(
+                "map_select",
+                act=1,
+                floor=1,
+                room="Map",
+                hp=80,
+                max_hp=80,
+                last_action_result={
+                    "action_label": "select cards 0,1: Strike + Strike",
+                    "changes": ["deck: -Strikex2"],
+                },
+            ),
+            [],
+        ),
+        {
+            "type": "result",
+            "result": {
+                "seed": "seed-a",
+                "character": "Ironclad",
+                "ascension": 0,
+                "victory": False,
+                "decision": "game_over",
+                "act": 1,
+                "floor": 1,
+                "room_type": "Event",
+                "hp": 80,
+                "max_hp": 80,
+                "deck_size": 2,
+                "error": None,
+                "truncated": False,
+            },
+        },
+    ]
+    _write_jsonl(trace_path, rows)
+
+    report = analyze_trace(trace_path, out_dir)
+
+    assert report["final_deck"]["initial_size"] == 4
+    assert [card["name"] for card in report["final_deck"]["cards"]] == ["Defend", "Bash"]
+    assert report["final_deck"]["size"] == 2
+    assert report["final_deck"]["result_deck_size"] == 2
+    assert report["final_deck"]["matches_result_deck_size"] is True
+    assert report["final_deck"]["warnings"] == []
+
+
+def test_analyze_trace_uses_character_starter_deck_when_trace_has_no_deck_snapshot(tmp_path):
+    trace_path = tmp_path / "starter_fallback_deck.jsonl"
+    out_dir = tmp_path / "analysis"
+    rows = [
+        {"type": "start", "seed": "seed-a", "character": "Ironclad", "ascension": 0},
+        _decision(
+            0,
+            _state("card_reward", act=1, floor=2, room="Monster", hp=80, max_hp=80),
+            [{"action_id": 0, "kind": "card_reward", "label": "pick card 0: Twin Strike"}],
+        ),
+        _action(0, "card_reward", "pick card 0: Twin Strike", "card_reward"),
+        _decision(
+            1,
+            _state(
+                "map_select",
+                act=1,
+                floor=2,
+                room="Map",
+                hp=80,
+                max_hp=80,
+                last_action_result={
+                    "action_label": "pick card 0: Twin Strike",
+                    "changes": ["deck: +Twin Strike"],
+                },
+            ),
+            [],
+        ),
+        {
+            "type": "result",
+            "result": {
+                "seed": "seed-a",
+                "character": "Ironclad",
+                "ascension": 0,
+                "victory": False,
+                "decision": "game_over",
+                "act": 1,
+                "floor": 2,
+                "room_type": "Monster",
+                "hp": 80,
+                "max_hp": 80,
+                "deck_size": 11,
+                "error": None,
+                "truncated": False,
+            },
+        },
+    ]
+    _write_jsonl(trace_path, rows)
+
+    report = analyze_trace(trace_path, out_dir)
+
+    counts = {item["name"]: item["count"] for item in report["final_deck"]["counts"]}
+    assert report["final_deck"]["initial_size"] == 10
+    assert report["final_deck"]["initial_source"] == "starter_deck_fallback"
+    assert report["final_deck"]["size"] == 11
+    assert report["final_deck"]["matches_result_deck_size"] is True
+    assert counts == {"Strike": 5, "Defend": 4, "Bash": 1, "Twin Strike": 1}
+
+
+def test_analyze_trace_does_not_use_mid_run_card_select_as_initial_deck(tmp_path):
+    trace_path = tmp_path / "mid_run_card_select_not_initial.jsonl"
+    out_dir = tmp_path / "analysis"
+    rows = [
+        {"type": "start", "seed": "seed-a", "character": "Ironclad", "ascension": 0},
+        _decision(
+            0,
+            _state("card_reward", act=1, floor=2, room="Monster", hp=80, max_hp=80),
+            [{"action_id": 0, "kind": "card_reward", "label": "pick card 0: Dark Shackles"}],
+        ),
+        _action(0, "card_reward", "pick card 0: Dark Shackles", "card_reward"),
+        _decision(
+            1,
+            _state(
+                "card_select",
+                act=1,
+                floor=7,
+                room="RestSite",
+                hp=80,
+                max_hp=80,
+                player={"hp": 80, "max_hp": 80, "gold": 99, "deck_size": 11},
+                last_action_result={
+                    "action_label": "pick card 0: Dark Shackles",
+                    "changes": ["deck: +Dark Shackles"],
+                },
+            ),
+            [
+                {"action_id": 0, "kind": "card_select", "label": "select card 0: Strike"},
+                {"action_id": 1, "kind": "card_select", "label": "select card 1: Strike"},
+                {"action_id": 2, "kind": "card_select", "label": "select card 2: Strike"},
+                {"action_id": 3, "kind": "card_select", "label": "select card 3: Strike"},
+                {"action_id": 4, "kind": "card_select", "label": "select card 4: Strike"},
+                {"action_id": 5, "kind": "card_select", "label": "select card 5: Defend"},
+                {"action_id": 6, "kind": "card_select", "label": "select card 6: Defend"},
+                {"action_id": 7, "kind": "card_select", "label": "select card 7: Defend"},
+                {"action_id": 8, "kind": "card_select", "label": "select card 8: Defend"},
+                {"action_id": 9, "kind": "card_select", "label": "select card 9: Bash"},
+                {"action_id": 10, "kind": "card_select", "label": "select card 10: Dark Shackles"},
+            ],
+        ),
+        _action(1, "card_select", "select card 9: Bash", "card_select"),
+        _decision(
+            2,
+            _state(
+                "map_select",
+                act=1,
+                floor=7,
+                room="Map",
+                hp=80,
+                max_hp=80,
+                last_action_result={
+                    "action_label": "select card 9: Bash",
+                    "changes": ["deck: -Bash +Bash+"],
+                },
+            ),
+            [],
+        ),
+        {
+            "type": "result",
+            "result": {
+                "seed": "seed-a",
+                "character": "Ironclad",
+                "ascension": 0,
+                "victory": False,
+                "decision": "game_over",
+                "act": 1,
+                "floor": 7,
+                "room_type": "RestSite",
+                "hp": 80,
+                "max_hp": 80,
+                "deck_size": 11,
+                "error": None,
+                "truncated": False,
+            },
+        },
+    ]
+    _write_jsonl(trace_path, rows)
+
+    report = analyze_trace(trace_path, out_dir)
+
+    counts = {item["name"]: item["count"] for item in report["final_deck"]["counts"]}
+    assert report["final_deck"]["initial_source"] == "starter_deck_fallback"
+    assert report["final_deck"]["size"] == 11
+    assert report["final_deck"]["matches_result_deck_size"] is True
+    assert counts == {"Strike": 5, "Defend": 4, "Dark Shackles": 1, "Bash+": 1}
 
 
 def test_analyze_trace_summarizes_route_plan_events(tmp_path):

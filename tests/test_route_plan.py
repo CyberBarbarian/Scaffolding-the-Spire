@@ -27,6 +27,11 @@ def _map_state(*, choices, full_map=None, hp=80, act=1, floor=1, relics=None):
     }
 
 
+def _json_block_after(prompt, marker, next_marker):
+    payload = prompt.split(marker + "\n", 1)[1].split("\n\n" + next_marker, 1)[0]
+    return json.loads(payload)
+
+
 def _full_map(*, current=(0, 0), edges=None, nodes=None):
     edges = edges or {}
     nodes = nodes or {
@@ -92,7 +97,7 @@ def test_route_plan_created_records_topological_plan_and_remaining_route():
     assert event["active_plan"]["remaining"] == [{"col": 1, "row": 2, "type": "Elite"}]
 
 
-def test_route_plan_created_requires_complete_visible_route():
+def test_route_plan_created_rejects_incomplete_visible_suffix():
     tracker = RoutePlanTracker()
     action = _map_action(0, "Monster", 0, 1)
     state = _map_state(
@@ -110,7 +115,43 @@ def test_route_plan_created_requires_complete_visible_route():
 
     assert result.error is not None
     assert result.error.code == "route_plan_incomplete"
-    assert "complete visible route" in result.error.feedback
+
+
+def test_route_plan_created_rejects_partial_segment_until_visible_branch():
+    tracker = RoutePlanTracker()
+    action = _map_action(0, "Monster", 0, 1)
+    state = _map_state(
+        choices=[{"col": 0, "row": 1, "type": "Monster"}],
+        full_map=_full_map(
+            nodes={
+                (0, 0): "Ancient",
+                (0, 1): "Monster",
+                (0, 2): "Shop",
+                (0, 3): "Unknown",
+                (0, 4): "Monster",
+                (1, 5): "Elite",
+                (2, 5): "RestSite",
+            },
+            edges={
+                (0, 0): [(0, 1)],
+                (0, 1): [(0, 2)],
+                (0, 2): [(0, 3)],
+                (0, 3): [(0, 4)],
+                (0, 4): [(1, 5), (2, 5)],
+            },
+        ),
+    )
+
+    result = tracker.validate_and_apply(
+        state=state,
+        legal_actions=[action],
+        action=action,
+        meta={"parsed": {"route_plan_event": _event("route_plan_created", [(0, 1, "Monster"), (0, 2, "Shop")])}},
+        step=0,
+    )
+
+    assert result.error is not None
+    assert result.error.code == "route_plan_incomplete"
 
 
 def test_route_plan_created_rejects_invalid_future_suffix_in_visible_map():
@@ -184,6 +225,34 @@ def test_route_plan_rejects_node_type_that_does_not_match_route_graph():
     assert result.error is not None
     assert result.error.code == "route_plan_topology_invalid"
     assert "exact type" in result.error.message
+
+
+def test_route_plan_created_requires_reason():
+    tracker = RoutePlanTracker()
+    action = _map_action(0, "Monster", 0, 1)
+    state = _map_state(
+        choices=[{"col": 0, "row": 1, "type": "Monster"}],
+        full_map=_full_map(edges={(0, 0): [(0, 1)], (0, 1): [(1, 2)]}),
+    )
+
+    result = tracker.validate_and_apply(
+        state=state,
+        legal_actions=[action],
+        action=action,
+        meta={
+            "parsed": {
+                "route_plan_event": _event(
+                    "route_plan_created",
+                    [(0, 1, "Monster"), (1, 2, "Elite")],
+                    reason="",
+                )
+            }
+        },
+        step=0,
+    )
+
+    assert result.error is not None
+    assert result.error.code == "route_plan_reason_required"
 
 
 def test_route_plan_missing_created_event_rejected_when_no_active_plan():
@@ -302,6 +371,44 @@ def test_route_plan_allows_up_to_three_forward_jumps_with_winged_boots():
         {"col": 2, "row": 2, "type": "RestSite"},
         {"col": 1, "row": 3, "type": "Boss"},
     ]
+
+
+def test_route_plan_rejects_forward_jumps_over_winged_boots_remaining_counter():
+    tracker = RoutePlanTracker()
+    action = _map_action(0, "Monster", 0, 1)
+    state = _map_state(
+        choices=[{"col": 0, "row": 1, "type": "Monster"}],
+        relics=[{"id": "winged_boots", "counter": 2}],
+        full_map=_full_map(
+            nodes={
+                (0, 0): "Ancient",
+                (0, 1): "Monster",
+                (2, 2): "RestSite",
+                (4, 3): "Shop",
+                (1, 4): "Boss",
+            },
+            edges={(0, 0): [(0, 1)]},
+        ),
+    )
+
+    result = tracker.validate_and_apply(
+        state=state,
+        legal_actions=[action],
+        action=action,
+        meta={
+            "parsed": {
+                "route_plan_event": _event(
+                    "route_plan_created",
+                    [(0, 1, "Monster"), (2, 2, "RestSite"), (4, 3, "Shop"), (1, 4, "Boss")],
+                )
+            }
+        },
+        step=0,
+    )
+
+    assert result.error is not None
+    assert result.error.code == "route_plan_topology_invalid"
+    assert "at most 2" in result.error.message
 
 
 def test_route_plan_rejects_more_than_three_forward_jumps_with_winged_boots():
@@ -466,6 +573,145 @@ def test_route_plan_update_records_reason_and_replaces_remaining_plan():
     assert event["old_plan_remaining"] == [{"col": 1, "row": 2, "type": "Elite"}]
     assert event["reason_tags"] == ["low_hp", "avoid_elite"]
     assert event["active_plan"]["remaining"] == []
+
+
+def test_route_plan_update_requires_explicit_new_plan():
+    tracker = RoutePlanTracker()
+    first_action = _map_action(0, "Monster", 0, 1)
+    first_state = _map_state(
+        choices=[{"col": 0, "row": 1, "type": "Monster"}],
+        full_map=_full_map(
+            nodes={(0, 0): "Ancient", (0, 1): "Monster", (1, 2): "Elite", (2, 2): "RestSite", (3, 3): "Boss"},
+            edges={(0, 0): [(0, 1)], (0, 1): [(1, 2), (2, 2)], (1, 2): [(3, 3)], (2, 2): [(3, 3)]},
+        ),
+    )
+    tracker.validate_and_apply(
+        state=first_state,
+        legal_actions=[first_action],
+        action=first_action,
+        meta={
+            "parsed": {
+                "route_plan_event": _event(
+                    "route_plan_created",
+                    [(0, 1, "Monster"), (1, 2, "Elite"), (3, 3, "Boss")],
+                )
+            }
+        },
+        step=0,
+    )
+    elite = _map_action(0, "Elite", 1, 2)
+    rest = _map_action(1, "RestSite", 2, 2)
+    next_state = _map_state(
+        choices=[{"col": 1, "row": 2, "type": "Elite"}, {"col": 2, "row": 2, "type": "RestSite"}],
+        full_map=_full_map(
+            current=(0, 1),
+            nodes={(0, 1): "Monster", (1, 2): "Elite", (2, 2): "RestSite", (3, 3): "Boss"},
+            edges={(0, 1): [(1, 2), (2, 2)], (1, 2): [(3, 3)], (2, 2): [(3, 3)]},
+        ),
+        hp=18,
+    )
+
+    result = tracker.validate_and_apply(
+        state=next_state,
+        legal_actions=[elite, rest],
+        action=rest,
+        meta={
+            "parsed": {
+                "route_plan_event": {
+                    "type": "route_plan_updated",
+                    "reason_tags": ["low_hp", "avoid_elite"],
+                    "reason": "HP dropped to 18/80, so change to the rest route.",
+                }
+            }
+        },
+        step=1,
+    )
+
+    assert result.error is not None
+    assert result.error.code == "route_plan_empty"
+
+
+def test_route_plan_update_requires_reason_for_route_change():
+    tracker = RoutePlanTracker()
+    first_action = _map_action(0, "Monster", 0, 1)
+    first_state = _map_state(
+        choices=[{"col": 0, "row": 1, "type": "Monster"}],
+        full_map=_full_map(edges={(0, 0): [(0, 1)], (0, 1): [(1, 2), (2, 2)]}),
+    )
+    tracker.validate_and_apply(
+        state=first_state,
+        legal_actions=[first_action],
+        action=first_action,
+        meta={"parsed": {"route_plan_event": _event("route_plan_created", [(0, 1, "Monster"), (1, 2, "Elite")])}},
+        step=0,
+    )
+    rest = _map_action(1, "RestSite", 2, 2)
+    next_state = _map_state(
+        choices=[{"col": 1, "row": 2, "type": "Elite"}, {"col": 2, "row": 2, "type": "RestSite"}],
+        full_map=_full_map(current=(0, 1), edges={(0, 1): [(1, 2), (2, 2)]}),
+        hp=18,
+    )
+
+    result = tracker.validate_and_apply(
+        state=next_state,
+        legal_actions=[_map_action(0, "Elite", 1, 2), rest],
+        action=rest,
+        meta={"parsed": {"route_plan_event": {"type": "route_plan_updated", "reason_tags": ["low_hp"]}}},
+        step=1,
+    )
+
+    assert result.error is not None
+    assert result.error.code == "route_plan_update_reason_required"
+
+
+def test_empty_route_plan_event_placeholder_is_treated_as_omitted_when_following_active_route():
+    tracker = RoutePlanTracker()
+    first_action = _map_action(0, "Monster", 0, 1)
+    snapshot = _full_map(edges={(0, 0): [(0, 1)], (0, 1): [(1, 2)]})
+    tracker.validate_and_apply(
+        state=_map_state(choices=[{"col": 0, "row": 1, "type": "Monster"}], full_map=snapshot),
+        legal_actions=[first_action],
+        action=first_action,
+        meta={"parsed": {"route_plan_event": _event("route_plan_created", [(0, 1, "Monster"), (1, 2, "Elite")])}},
+        step=0,
+    )
+    elite = _map_action(0, "Elite", 1, 2)
+
+    result = tracker.validate_and_apply(
+        state=_map_state(choices=[{"col": 1, "row": 2, "type": "Elite"}], full_map=snapshot),
+        legal_actions=[elite],
+        action=elite,
+        meta={"parsed": {"route_plan_event": {}}},
+        step=1,
+    )
+
+    assert result.error is None
+    assert result.events == []
+
+
+def test_blank_route_plan_event_type_is_rejected_when_following_active_route():
+    tracker = RoutePlanTracker()
+    first_action = _map_action(0, "Monster", 0, 1)
+    snapshot = _full_map(edges={(0, 0): [(0, 1)], (0, 1): [(1, 2)]})
+    tracker.validate_and_apply(
+        state=_map_state(choices=[{"col": 0, "row": 1, "type": "Monster"}], full_map=snapshot),
+        legal_actions=[first_action],
+        action=first_action,
+        meta={"parsed": {"route_plan_event": _event("route_plan_created", [(0, 1, "Monster"), (1, 2, "Elite")])}},
+        step=0,
+    )
+    elite = _map_action(0, "Elite", 1, 2)
+
+    result = tracker.validate_and_apply(
+        state=_map_state(choices=[{"col": 1, "row": 2, "type": "Elite"}], full_map=snapshot),
+        legal_actions=[elite],
+        action=elite,
+        meta={"parsed": {"route_plan_event": {"type": ""}}},
+        step=1,
+    )
+
+    assert result.error is not None
+    assert result.error.code == "route_plan_unexpected_event_type"
 
 
 def test_route_plan_invalid_next_not_legal_rejects_when_map_revision_is_unchanged():
@@ -635,7 +881,140 @@ def test_map_prompt_instructs_llm_to_emit_route_plan_event():
     assert "reason_tags" in prompt
     assert "Route graph JSON:" in prompt
     assert '"node_key":"0:1"' in prompt
+    assert "each adjacent pair in new_plan must appear in the previous node's children" in prompt
     assert "Route graph exact nodes:" not in prompt
+
+
+def test_map_prompt_can_omit_route_plan_instructions_when_disabled():
+    state = _map_state(
+        choices=[{"col": 0, "row": 1, "type": "Monster"}],
+        full_map=_full_map(edges={(0, 0): [(0, 1)]}),
+    )
+    action = _map_action(0, "Monster", 0, 1)
+
+    prompt = build_llm_prompt(state, [action], route_plan_enabled=False)
+
+    assert "route_plan_event" not in prompt
+    assert "route_plan_created" not in prompt
+    assert "route_plan_updated" not in prompt
+    assert "Route graph JSON:" in prompt
+
+
+def test_map_prompt_uses_structured_route_state_without_text_map_duplication():
+    state = _map_state(
+        choices=[{"col": 0, "row": 1, "type": "Monster"}],
+        full_map=_full_map(edges={(0, 0): [(0, 1)]}),
+        hp=18,
+    )
+    state["player"]["deck"] = [
+        {"name": "Strike", "type": "Attack", "cost": 1},
+        {"name": "Strike", "type": "Attack", "cost": 1},
+        {"name": "Defend", "type": "Skill", "cost": 1},
+    ]
+    state["last_action_result"] = {
+        "action_label": "go to Monster at col=0 row=1",
+        "action_kind": "map",
+        "decision_before": "map_select",
+        "decision_after": "combat_play",
+        "changes": ["hp: 45/80 -> 18/80", "room: Map -> Monster"],
+    }
+    state["active_route_plan"] = {
+        "plan_id": "rp_001",
+        "remaining": [{"col": 0, "row": 1, "type": "Monster"}],
+        "expected_next": {"col": 0, "row": 1, "type": "Monster"},
+    }
+    action = _map_action(0, "Monster", 0, 1)
+
+    prompt = build_llm_prompt(state, [action])
+    route_state = _json_block_after(prompt, "Route decision state JSON:", "Legal actions:")
+
+    assert "Route decision state JSON:" in prompt
+    assert "Game state:" not in prompt
+    assert "Full map:" not in prompt
+    assert "Map choices (" not in prompt
+    assert "\nActive route plan:\n" not in prompt
+    assert "Compact state JSON:" not in prompt
+    assert route_state["player"]["hp"] == 18
+    assert route_state["deck_summary"]["visible"] is True
+    assert route_state["deck_summary"]["groups"][0]["name"] == "Defend"
+    assert route_state["recent_state_changes"]["hp_changes"] == ["hp: 45/80 -> 18/80"]
+
+
+def test_map_prompt_includes_active_route_plan_context():
+    state = _map_state(
+        choices=[{"col": 1, "row": 2, "type": "Elite"}, {"col": 2, "row": 2, "type": "RestSite"}],
+        full_map=_full_map(current=(0, 1), edges={(0, 1): [(1, 2), (2, 2)]}),
+    )
+    state["active_route_plan"] = {
+        "plan_id": "rp_001",
+        "remaining": [{"col": 1, "row": 2, "type": "Elite"}],
+        "expected_next": {"col": 1, "row": 2, "type": "Elite"},
+    }
+
+    prompt = build_llm_prompt(state, [_map_action(0, "Elite", 1, 2), _map_action(1, "RestSite", 2, 2)])
+
+    assert "Active route plan JSON:" in prompt
+    assert '"expected_next":{"col":1,"row":2,"type":"Elite"}' in prompt
+    assert '"role":"advisory_current_state_feature"' in prompt
+    assert "Active route plan is advisory context, not a binding commitment" in prompt
+    assert "choose from current state, legal_actions, route_graph, deck, relics, boss, and recent state changes" in prompt
+    assert "select expected_next and omit route_plan_event" in prompt
+    assert "route_plan_updated" in prompt
+    assert "risk_score" not in prompt
+    assert "stickiness" not in prompt
+
+
+def test_runner_exposes_active_route_plan_to_next_map_decision(tmp_path):
+    class _CaptureStateAgent(_RoutePlanScriptAgent):
+        def __init__(self, responses):
+            super().__init__(responses)
+            self.seen_states = []
+
+        def choose(self, state, legal_actions, *, prompt=None):
+            self.seen_states.append(state)
+            return super().choose(state, legal_actions, prompt=prompt)
+
+    boss_nodes = {(0, 0): "Ancient", (0, 1): "Monster", (1, 2): "Elite", (3, 3): "Boss"}
+    first_map = _full_map(
+        nodes=boss_nodes,
+        edges={(0, 0): [(0, 1)], (0, 1): [(1, 2)], (1, 2): [(3, 3)]},
+    )
+    second_map = _full_map(
+        current=(0, 1),
+        nodes={key: value for key, value in boss_nodes.items() if key != (0, 0)},
+        edges={(0, 1): [(1, 2)], (1, 2): [(3, 3)]},
+    )
+    process = _RoutePlanProcess(
+        [
+            _map_state(choices=[{"col": 0, "row": 1, "type": "Monster"}], full_map=first_map),
+            _map_state(choices=[{"col": 1, "row": 2, "type": "Elite"}], full_map=second_map, hp=62),
+            {"decision": "game_over", "victory": False, "player": {"hp": 54, "max_hp": 80}},
+        ]
+    )
+    agent = _CaptureStateAgent(
+        [
+            {
+                "action_index": 5,
+                "parsed": {
+                    "reason": "create route",
+                    "route_plan_event": _event(
+                        "route_plan_created",
+                        [(0, 1, "Monster"), (1, 2, "Elite"), (3, 3, "Boss")],
+                    ),
+                },
+            },
+            {"action_index": 5, "parsed": {"reason": "follow planned elite"}},
+        ]
+    )
+    out = tmp_path / "run.jsonl"
+    logger = JsonlLogger(out)
+    try:
+        result = run_one(agent=agent, seed="route-plan", process=process, logger=logger, max_steps=5)
+    finally:
+        logger.close()
+
+    assert result.error is None
+    assert agent.seen_states[1]["active_route_plan"]["expected_next"] == {"col": 1, "row": 2, "type": "Elite"}
 
 
 class _RoutePlanScriptAgent:
@@ -685,8 +1064,16 @@ def _read_jsonl(path):
 
 
 def test_runner_logs_route_plan_created_and_silent_execution(tmp_path):
-    first_map = _full_map(edges={(0, 0): [(0, 1)], (0, 1): [(1, 2)]})
-    second_map = _full_map(current=(0, 1), edges={(0, 1): [(1, 2)]})
+    boss_nodes = {(0, 0): "Ancient", (0, 1): "Monster", (1, 2): "Elite", (3, 3): "Boss"}
+    first_map = _full_map(
+        nodes=boss_nodes,
+        edges={(0, 0): [(0, 1)], (0, 1): [(1, 2)], (1, 2): [(3, 3)]},
+    )
+    second_map = _full_map(
+        current=(0, 1),
+        nodes={key: value for key, value in boss_nodes.items() if key != (0, 0)},
+        edges={(0, 1): [(1, 2)], (1, 2): [(3, 3)]},
+    )
     process = _RoutePlanProcess(
         [
             _map_state(choices=[{"col": 0, "row": 1, "type": "Monster"}], full_map=first_map),
@@ -700,7 +1087,10 @@ def test_runner_logs_route_plan_created_and_silent_execution(tmp_path):
                 "action_index": 5,
                 "parsed": {
                     "reason": "create route",
-                    "route_plan_event": _event("route_plan_created", [(0, 1, "Monster"), (1, 2, "Elite")]),
+                    "route_plan_event": _event(
+                        "route_plan_created",
+                        [(0, 1, "Monster"), (1, 2, "Elite"), (3, 3, "Boss")],
+                    ),
                 },
             },
             {"action_index": 5, "parsed": {"reason": "follow planned elite"}},
@@ -718,9 +1108,52 @@ def test_runner_logs_route_plan_created_and_silent_execution(tmp_path):
     assert [event["event_type"] for event in events] == ["route_plan_created"]
 
 
+def test_runner_can_disable_route_plan_validation(tmp_path):
+    full_map = _full_map(edges={(0, 0): [(0, 1)], (0, 1): [(1, 2)]})
+    process = _RoutePlanProcess(
+        [
+            _map_state(choices=[{"col": 0, "row": 1, "type": "Monster"}], full_map=full_map),
+            {"decision": "game_over", "victory": False, "player": {"hp": 54, "max_hp": 80}},
+        ]
+    )
+    agent = _RoutePlanScriptAgent([{"action_index": 5, "parsed": {"reason": "choose map without plan"}}])
+    out = tmp_path / "run.jsonl"
+    logger = JsonlLogger(out)
+    try:
+        result = run_one(
+            agent=agent,
+            seed="route-plan-disabled",
+            process=process,
+            logger=logger,
+            max_steps=2,
+            route_plan_enabled=False,
+        )
+    finally:
+        logger.close()
+
+    assert result.error is None
+    rows = _read_jsonl(out)
+    assert not any(row.get("type") == "route_plan_validation_error" for row in rows)
+    assert not any(row.get("type") == "route_plan_event" for row in rows)
+
+
 def test_runner_reasks_when_map_choice_deviates_without_route_plan_update(tmp_path):
-    first_map = _full_map(edges={(0, 0): [(0, 1)], (0, 1): [(1, 2), (2, 2)]})
-    second_map = _full_map(current=(0, 1), edges={(0, 1): [(1, 2), (2, 2)]})
+    boss_nodes = {
+        (0, 0): "Ancient",
+        (0, 1): "Monster",
+        (1, 2): "Elite",
+        (2, 2): "RestSite",
+        (3, 3): "Boss",
+    }
+    first_map = _full_map(
+        nodes=boss_nodes,
+        edges={(0, 0): [(0, 1)], (0, 1): [(1, 2), (2, 2)], (1, 2): [(3, 3)], (2, 2): [(3, 3)]},
+    )
+    second_map = _full_map(
+        current=(0, 1),
+        nodes={key: value for key, value in boss_nodes.items() if key != (0, 0)},
+        edges={(0, 1): [(1, 2), (2, 2)], (1, 2): [(3, 3)], (2, 2): [(3, 3)]},
+    )
     process = _RoutePlanProcess(
         [
             _map_state(choices=[{"col": 0, "row": 1, "type": "Monster"}], full_map=first_map),
@@ -738,7 +1171,10 @@ def test_runner_reasks_when_map_choice_deviates_without_route_plan_update(tmp_pa
                 "action_index": 5,
                 "parsed": {
                     "reason": "create route",
-                    "route_plan_event": _event("route_plan_created", [(0, 1, "Monster"), (1, 2, "Elite")]),
+                    "route_plan_event": _event(
+                        "route_plan_created",
+                        [(0, 1, "Monster"), (1, 2, "Elite"), (3, 3, "Boss")],
+                    ),
                 },
             },
             {"action_index": 6, "parsed": {"reason": "rest without saying why"}},
@@ -748,7 +1184,7 @@ def test_runner_reasks_when_map_choice_deviates_without_route_plan_update(tmp_pa
                     "reason": "update route after feedback",
                     "route_plan_event": _event(
                         "route_plan_updated",
-                        [(2, 2, "RestSite")],
+                        [(2, 2, "RestSite"), (3, 3, "Boss")],
                         reason_tags=["low_hp", "avoid_elite"],
                         reason="HP is low, so take the rest site instead of the elite.",
                     ),
@@ -773,3 +1209,73 @@ def test_runner_reasks_when_map_choice_deviates_without_route_plan_update(tmp_pa
     events = [row for row in rows if row.get("type") == "route_plan_event"]
     assert [event["event_type"] for event in events] == ["route_plan_created", "route_plan_updated"]
     assert events[-1]["reason_tags"] == ["low_hp", "avoid_elite"]
+
+
+def test_runner_can_soft_log_route_plan_validation_without_reask(tmp_path):
+    boss_nodes = {
+        (0, 0): "Ancient",
+        (0, 1): "Monster",
+        (1, 2): "Elite",
+        (2, 2): "RestSite",
+        (3, 3): "Boss",
+    }
+    first_map = _full_map(
+        nodes=boss_nodes,
+        edges={(0, 0): [(0, 1)], (0, 1): [(1, 2), (2, 2)], (1, 2): [(3, 3)], (2, 2): [(3, 3)]},
+    )
+    second_map = _full_map(
+        current=(0, 1),
+        nodes={key: value for key, value in boss_nodes.items() if key != (0, 0)},
+        edges={(0, 1): [(1, 2), (2, 2)], (1, 2): [(3, 3)], (2, 2): [(3, 3)]},
+    )
+    process = _RoutePlanProcess(
+        [
+            _map_state(choices=[{"col": 0, "row": 1, "type": "Monster"}], full_map=first_map),
+            _map_state(
+                choices=[{"col": 1, "row": 2, "type": "Elite"}, {"col": 2, "row": 2, "type": "RestSite"}],
+                full_map=second_map,
+                hp=18,
+            ),
+            {"decision": "game_over", "victory": False, "player": {"hp": 38, "max_hp": 80}},
+        ]
+    )
+    agent = _RoutePlanScriptAgent(
+        [
+            {
+                "action_index": 5,
+                "parsed": {
+                    "reason": "create route",
+                    "route_plan_event": _event(
+                        "route_plan_created",
+                        [(0, 1, "Monster"), (1, 2, "Elite"), (3, 3, "Boss")],
+                    ),
+                },
+            },
+            {"action_index": 6, "parsed": {"reason": "rest without update"}},
+        ]
+    )
+    out = tmp_path / "run.jsonl"
+    logger = JsonlLogger(out)
+    try:
+        result = run_one(
+            agent=agent,
+            seed="route-plan-soft",
+            process=process,
+            logger=logger,
+            max_steps=5,
+            route_plan_enforcement="soft",
+        )
+    finally:
+        logger.close()
+
+    assert result.error is None
+    assert agent.feedback == []
+    assert result.extra["route_plan_validation_soft_error_count"] == 1
+    map_commands = [cmd for cmd in process.sent if cmd.get("action") == "select_map_node"]
+    assert [cmd["args"] for cmd in map_commands] == [{"col": 0, "row": 1}, {"col": 2, "row": 2}]
+    rows = _read_jsonl(out)
+    validation_errors = [row for row in rows if row.get("type") == "route_plan_validation_error"]
+    assert len(validation_errors) == 1
+    assert validation_errors[0]["enforcement"] == "soft"
+    events = [row for row in rows if row.get("type") == "route_plan_event"]
+    assert [event["event_type"] for event in events] == ["route_plan_created"]

@@ -298,28 +298,30 @@ def validate_evidence_refs(parsed: dict[str, Any], bundle: EvidenceBundle) -> st
     return None
 
 
+def validate_action_reason(parsed: dict[str, Any] | None, action: LegalAction) -> str | None:
+    if action.command.get("cmd") == "bench_view":
+        return None
+    if not isinstance(parsed, dict):
+        return "reason must be a non-empty string for the selected action"
+    reason = parsed.get("reason")
+    if not isinstance(reason, str) or not reason.strip():
+        return "reason must be a non-empty string for the selected action"
+    return None
+
+
 def validate_occ_context_contract(
     parsed: dict[str, Any],
     action: LegalAction,
     *,
     active_agent: str | None,
 ) -> str | None:
-    if active_agent != "occ":
-        return None
-    if action.command.get("cmd") == "bench_view":
-        return None
-    if parsed.get("run_plan_patch") != {}:
-        return None
-    if _one_line(parsed.get("no_context_change_reason")):
-        return None
-    return "no_context_change_reason is required when run_plan_patch is empty for an OCC non-view action"
+    return None
 
 
 def evidence_ref_feedback(error: str) -> str:
     return (
         f"Your previous response was invalid: {error}. "
-        "Choose again from the current legal actions. Keep evidence_refs tied to current candidate_evidence action_ids, "
-        "and include no_context_change_reason when an OCC non-view action leaves run_plan_patch empty."
+        "Choose again from the current legal actions. Keep evidence_refs tied to current candidate_evidence action_ids."
     )
 
 
@@ -491,6 +493,20 @@ def _reward_candidates(legal_actions: list[LegalAction]) -> list[CandidateEviden
             continue
         label = action.label.lower()
         if "skip" in action.kind or "skip" in label:
+            if action.kind == "combat_reward_skip" and _label_mentions_card_reward(action.label):
+                result.append(
+                    CandidateEvidence(
+                        action_id=action.action_id,
+                        label=action.label,
+                        kind=action.kind,
+                        evidence_for=["skip is a current legal shortcut"],
+                        evidence_against=[
+                            "leaves the card_reward pack unopened",
+                            "offered card candidates are not visible until the card_reward is opened/revealed",
+                        ],
+                    )
+                )
+                continue
             result.append(
                 CandidateEvidence(
                     action_id=action.action_id,
@@ -498,6 +514,19 @@ def _reward_candidates(legal_actions: list[LegalAction]) -> list[CandidateEviden
                     kind=action.kind,
                     evidence_for=["skip is a current legal action", "keeps deck size unchanged"],
                     evidence_against=["does not add any offered card or reward"],
+                )
+            )
+        elif action.kind == "combat_reward" and _label_mentions_card_reward(action.label):
+            result.append(
+                CandidateEvidence(
+                    action_id=action.action_id,
+                    label=action.label,
+                    kind=action.kind,
+                    evidence_for=[
+                        "reveals offered card candidates",
+                        "does not add a card before the next card_reward decision",
+                    ],
+                    evidence_against=["requires a follow-up pick or skip decision after candidates are visible"],
                 )
             )
         elif action.kind.startswith("card_reward") or action.kind in {"combat_reward", "treasure"}:
@@ -513,6 +542,11 @@ def _reward_candidates(legal_actions: list[LegalAction]) -> list[CandidateEviden
         else:
             result.append(_candidate_from_action(action))
     return result
+
+
+def _label_mentions_card_reward(label: str) -> bool:
+    normalized = label.lower().replace("_", " ")
+    return "card reward" in normalized
 
 
 def _reward_posterior_audit(state: dict[str, Any], legal_actions: list[LegalAction]) -> dict[str, Any] | None:

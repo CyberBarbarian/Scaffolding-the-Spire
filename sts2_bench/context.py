@@ -7,6 +7,7 @@ from collections import Counter
 from typing import Any
 
 from .route_graph import build_route_graph
+from .route_plan import winged_boots_remaining_for_state
 
 
 DROP_KEYS = {
@@ -125,7 +126,11 @@ def compact_state(state: dict[str, Any]) -> dict[str, Any]:
     viewed = []
     full_map = state.get("full_map")
     if isinstance(full_map, dict) and full_map.get("type") == "map":
-        data["route_graph"] = build_route_graph(full_map, state.get("choices", []) or [])
+        data["route_graph"] = build_route_graph(
+            full_map,
+            state.get("choices", []) or [],
+            winged_boots_remaining=winged_boots_remaining_for_state(state),
+        )
 
     if state.get("view_deck"):
         player = state.get("player") or {}
@@ -776,6 +781,28 @@ def append_last_action_result(lines: list[str], result: Any) -> None:
         lines.append(f"  {change}")
 
 
+def append_active_route_plan_lines(lines: list[str], active_route_plan: Any) -> None:
+    if not isinstance(active_route_plan, dict):
+        return
+    expected_next = active_route_plan.get("expected_next")
+    remaining = active_route_plan.get("remaining")
+    if not isinstance(remaining, list):
+        remaining = []
+    lines.append("Active route plan:")
+    lines.append(f"  plan_id={active_route_plan.get('plan_id', '?')} expected_next={_route_node_text(expected_next)}")
+    if remaining:
+        lines.append("  remaining: " + " -> ".join(_route_node_text(node) for node in remaining))
+    lines.append("  follow: select expected_next and omit route_plan_event")
+    lines.append("  change: choose a different legal map action and emit route_plan_updated with reason")
+
+
+def _route_node_text(node: Any) -> str:
+    if not isinstance(node, dict):
+        return "none"
+    room_type = node.get("type", "?")
+    return f"{room_type}({node.get('col', '?')},{node.get('row', '?')})"
+
+
 def player_summary(player: dict[str, Any]) -> str:
     if not player:
         return "unknown player"
@@ -900,6 +927,7 @@ def render_state_text(state: dict[str, Any]) -> str:
         full_map = state.get("full_map")
         if not state.get("view_map") and isinstance(full_map, dict) and full_map.get("type") == "map":
             lines.extend(render_full_map(full_map, choices))
+        append_active_route_plan_lines(lines, state.get("active_route_plan"))
         lines.append(f"Map choices ({len(choices)}):")
         for choice in choices:
             lines.append(f"  col={choice.get('col')} row={choice.get('row')} type={choice.get('type')}")
