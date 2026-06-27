@@ -223,6 +223,22 @@ def test_combat_reward_exposes_skip_and_potion_discard_shortcuts():
     } == {0, 2}
 
 
+def test_combat_reward_labels_card_reward_cleanup_after_skip():
+    state = {
+        "decision": "combat_reward",
+        "rewards": [{"index": 0, "kind": "card_reward", "can_claim": False, "can_skip": True}],
+    }
+
+    actions = build_legal_actions(state)
+
+    cleanup = next(action for action in actions if action.label == "confirm skipped card reward 0")
+    assert cleanup.command == {
+        "cmd": "action",
+        "action": "skip_reward",
+        "args": {"reward_index": 0},
+    }
+
+
 def test_combat_reward_blocked_card_reward_claims_only_hide_matching_pack():
     state = {
         "decision": "combat_reward",
@@ -236,7 +252,7 @@ def test_combat_reward_blocked_card_reward_claims_only_hide_matching_pack():
 
     labels = {action.label for action in actions}
     assert "open card reward 0: reveal offered cards" not in labels
-    assert "skip unopened card reward 0" in labels
+    assert "confirm skipped card reward 0" in labels
     assert "open card reward 1: reveal offered cards" in labels
     assert "skip unopened card reward 1" in labels
 
@@ -1142,6 +1158,8 @@ def test_openai_compat_agent_remaps_when_selected_label_matches_current_action()
     assert meta["attempt"] == 0
     assert meta["action_id_remapped_from"] == end_turn.action_id
     assert meta["resolved_action_id"] == strike.action_id
+    assert meta["parsed"]["action_id"] == strike.action_id
+    assert meta["parsed"]["selected_action_label"] == strike.label
     assert len(sent_messages) == 1
 
 
@@ -1199,6 +1217,8 @@ def test_openai_compat_agent_resolves_missing_action_id_from_exact_selected_labe
     assert meta["attempt"] == 0
     assert meta["action_id_resolved_from_label"] is True
     assert meta["resolved_action_id"] == strike.action_id
+    assert meta["parsed"]["action_id"] == strike.action_id
+    assert meta["parsed"]["selected_action_label"] == strike.label
     assert len(sent_messages) == 1
 
 
@@ -1221,6 +1241,8 @@ def test_openai_compat_agent_resolves_action_alias_as_selected_label():
     assert action == strike
     assert meta["action_id_resolved_from_label"] is True
     assert meta["resolved_action_id"] == strike.action_id
+    assert meta["parsed"]["action_id"] == strike.action_id
+    assert meta["parsed"]["selected_action_label"] == strike.label
     assert len(sent_messages) == 1
 
 
@@ -1405,6 +1427,38 @@ def test_combat_play_exposes_atomic_card_sequence_actions():
             {"card_index": 1},
         ],
     }
+
+
+def test_combat_card_sequence_omits_upgrade_or_choice_cards():
+    state = _combat_turn_state(
+        energy=3,
+        hand=[
+            {
+                "index": 0,
+                "name": "Armaments",
+                "cost": 1,
+                "type": "Skill",
+                "target_type": "None",
+                "can_play": True,
+                "description": "Gain 5 Block. Upgrade a card in your hand for the rest of combat.",
+                "stats": {"block": 5},
+            },
+            {
+                "index": 1,
+                "name": "Strike",
+                "cost": 1,
+                "type": "Attack",
+                "target_type": "AnyEnemy",
+                "can_play": True,
+                "stats": {"damage": 6},
+            },
+        ],
+    )
+
+    actions = build_legal_actions(state)
+
+    assert any(action.label == "play card 0: Armaments" for action in actions)
+    assert not any(action.kind == "combat_card_sequence" and "Armaments" in action.label for action in actions)
 
 
 def test_combat_play_exposes_custom_card_sequence_gateway():
@@ -2704,21 +2758,23 @@ def test_runner_rejects_custom_sequence_over_validation_limit_without_probe():
     assert "at most 4" in result.error
 
 
-def _unsafe_custom_sequence_state():
+def _unsafe_custom_sequence_state(unsafe_card=None):
+    if unsafe_card is None:
+        unsafe_card = {
+            "index": 0,
+            "instance_id": "chaos-a",
+            "name": "Chaos",
+            "cost": 0,
+            "energy_cost": 0,
+            "type": "Skill",
+            "target_type": "None",
+            "can_play": True,
+            "description": "Add a random card to your hand.",
+            "stats": {},
+        }
     return _custom_sequence_state(
         hand=[
-            {
-                "index": 0,
-                "instance_id": "chaos-a",
-                "name": "Chaos",
-                "cost": 0,
-                "energy_cost": 0,
-                "type": "Skill",
-                "target_type": "None",
-                "can_play": True,
-                "description": "Add a random card to your hand.",
-                "stats": {},
-            },
+            unsafe_card,
             {
                 "index": 1,
                 "instance_id": "defend-b",
@@ -2786,6 +2842,72 @@ def test_custom_sequence_validation_rejects_random_or_choice_card_before_probe_r
     assert probe.sent == []
     assert result.validated is False
     assert "non-deterministic" in result.reason
+
+
+@pytest.mark.parametrize(
+    "unsafe_card, expected_marker",
+    [
+        (
+            {
+                "index": 0,
+                "instance_id": "armaments-a",
+                "name": "Armaments",
+                "cost": 1,
+                "energy_cost": 1,
+                "type": "Skill",
+                "target_type": "None",
+                "can_play": True,
+                "description": "Gain 5 Block. Upgrade a card in your hand.",
+                "stats": {"block": 5},
+            },
+            "upgrade",
+        ),
+        (
+            {
+                "index": 0,
+                "instance_id": "burning-pact-a",
+                "name": "Burning Pact",
+                "cost": 1,
+                "energy_cost": 1,
+                "type": "Skill",
+                "target_type": "None",
+                "can_play": True,
+                "description": "Exhaust 1 card. Draw 2 cards.",
+                "stats": {"cards": 2},
+            },
+            "draw",
+        ),
+        (
+            {
+                "index": 0,
+                "instance_id": "wild-strike-a",
+                "name": "Wild Ricochet",
+                "cost": 1,
+                "energy_cost": 1,
+                "type": "Attack",
+                "target_type": "None",
+                "can_play": True,
+                "description": "Deal 8 damage to a random enemy.",
+                "stats": {"damage": 8},
+            },
+            "random",
+        ),
+    ],
+)
+def test_custom_sequence_validation_rejects_non_atomic_cards_before_probe_replay(unsafe_card, expected_marker):
+    result = validate_custom_sequence(
+        [{"card_index": 0}, {"card_index": 1}],
+        current_state=_unsafe_custom_sequence_state(unsafe_card),
+        action_tape=[],
+        character="Ironclad",
+        seed="test",
+        ascension=0,
+        lang="en",
+        process_factory=lambda: pytest.fail("non-atomic custom sequence should be rejected before probe replay"),
+    )
+
+    assert result.validated is False
+    assert expected_marker in result.reason
 
 
 def _free_attack_custom_sequence_state():
@@ -3168,6 +3290,130 @@ def test_openai_compat_agent_combat_mdp_state_keeps_structured_turn_history_with
     assert '"action_id":5' not in process_json
     assert second_meta["conversation_mode"] == "combat_mdp_state"
     assert second_meta["combat_mdp_turn_actions"] == 1
+
+
+def test_openai_compat_agent_combat_mdp_state_can_keep_reasoning_pool():
+    state = _combat_turn_state()
+    next_state = _combat_turn_state(
+        energy=2,
+        hand=[],
+        discard_pile_count=1,
+        last_action_result={
+            "action_label": "play card 0: Strike on enemy 0: Jaw Worm",
+            "action_kind": "combat_play_card",
+            "decision_before": "combat_play",
+            "decision_after": "combat_play",
+            "changes": ["energy: 3/3 -> 2/3"],
+        },
+    )
+    agent, sent_messages = _combat_mdp_agent(
+        [
+            {
+                "turn_check": {
+                    "primary_goal": "damage",
+                    "incoming_damage": "7",
+                },
+                "action_id": 5,
+                "reason": "Strike now to push lethal setup.",
+                "combat_notes": ["6 damage, 2 energy remains"],
+                "calculations": ["do not persist verbose scratchpad"],
+                "candidates": [{"action_id": 5, "label": "play card"}],
+            },
+            {"action_id": 5, "reason": "End after Strike."},
+        ],
+        combat_reasoning_pool_enabled=True,
+        turn_check_enabled=True,
+    )
+
+    first_action, first_meta = agent.choose(state, build_legal_actions(state))
+    agent.record_transition(state, first_action, first_meta, next_state)
+    agent.choose(next_state, build_legal_actions(next_state))
+
+    user_prompt = sent_messages[1][1]["content"]
+    assert '"reasoning_pool"' in user_prompt
+    assert "Strike now to push lethal setup." in user_prompt
+    assert "6 damage, 2 energy remains" in user_prompt
+    assert '"primary_goal":"damage"' in user_prompt
+    assert "calculations" not in user_prompt
+    assert "candidates" not in user_prompt
+    process_json = user_prompt.split("Combat turn process JSON:\n", 1)[1].split("\n\nLegal actions:", 1)[0]
+    assert '"action_id":5' not in process_json
+
+
+def test_openai_compat_agent_combat_mdp_state_can_keep_cross_turn_board():
+    state = _combat_turn_state(
+        energy=0,
+        hand=[],
+        player={"hp": 70, "max_hp": 80, "block": 5, "gold": 0, "deck_size": 10, "potions": []},
+    )
+    next_state = _combat_turn_state(
+        round=2,
+        energy=3,
+        hp=68,
+        hand=[],
+        player={"hp": 68, "max_hp": 80, "block": 0, "gold": 0, "deck_size": 10, "potions": []},
+        last_action_result={
+            "action_label": "end turn",
+            "action_kind": "combat_end_turn",
+            "decision_before": "combat_play",
+            "decision_after": "combat_play",
+            "changes": [
+                "hp: 70/80 -> 68/80",
+                "block: 5 -> 0",
+                "round: 1 -> 2",
+            ],
+        },
+    )
+    agent, sent_messages = _combat_mdp_agent(
+        [
+            {
+                "action_id": 5,
+                "reason": "End the spent turn.",
+                "candidates": [{"action_id": 5}],
+            },
+            {"action_id": 5, "reason": "Fresh turn."},
+        ],
+        combat_turn_board_enabled=True,
+    )
+
+    action, meta = agent.choose(state, build_legal_actions(state))
+    agent.record_transition(state, action, meta, next_state)
+    agent.choose(next_state, build_legal_actions(next_state))
+
+    fresh_prompt = sent_messages[1][1]["content"]
+    assert '"cross_turn_board"' in fresh_prompt
+    assert '"hp_delta":-2' in fresh_prompt
+    assert '"incoming_damage":7' in fresh_prompt
+    assert "End the spent turn." not in fresh_prompt
+    process_json = fresh_prompt.split("Combat turn process JSON:\n", 1)[1].split("\n\nLegal actions:", 1)[0]
+    assert '"action_id":5' not in process_json
+    assert "candidates" not in process_json
+
+
+def test_openai_compat_agent_combat_mdp_state_cross_turn_board_resets_after_combat_exit():
+    state = _combat_turn_state(energy=0, hand=[])
+    reward_state = {
+        "decision": "combat_reward",
+        "context": {"act": 1, "floor": 2, "room_type": "Monster"},
+        "player": {"hp": 70, "max_hp": 80},
+        "last_action_result": {"changes": ["combat ended"]},
+    }
+    later_combat = _combat_turn_state(context={"act": 1, "floor": 3, "room_type": "Monster"})
+    agent, sent_messages = _combat_mdp_agent(
+        [
+            {"action_id": 5, "reason": "End combat."},
+            {"action_id": 5, "reason": "New fight."},
+        ],
+        combat_turn_board_enabled=True,
+    )
+
+    action, meta = agent.choose(state, build_legal_actions(state))
+    agent.record_transition(state, action, meta, reward_state)
+    agent.choose(later_combat, build_legal_actions(later_combat))
+
+    later_prompt = sent_messages[1][1]["content"]
+    assert '"cross_turn_board"' not in later_prompt
+    assert "End combat." not in later_prompt
 
 
 def test_openai_compat_agent_combat_mdp_state_resets_after_end_turn_transition():

@@ -6,21 +6,11 @@ import itertools
 from dataclasses import dataclass
 from typing import Any
 
+from .sequence_safety import is_sequence_atomic_card
+
 
 MAX_CARD_SEQUENCE_LENGTH = 3
 MAX_CARD_SEQUENCE_ACTIONS = 24
-_UNSAFE_SEQUENCE_TEXT = (
-    "draw",
-    "random",
-    "discard",
-    "exhaust",
-    "choose",
-    "select",
-    "shuffle",
-    "generate",
-    "discover",
-)
-_UNSAFE_SEQUENCE_STATS = {"cards", "draw", "discard", "exhaust", "random"}
 
 
 @dataclass(frozen=True)
@@ -51,6 +41,12 @@ def _action(label: str, action: str, kind: str, **args: Any) -> dict[str, Any]:
     if args:
         command["args"] = args
     return {"label": label, "command": command, "kind": kind}
+
+
+def _card_reward_skip_label(reward_index: Any, *, already_handled: bool) -> str:
+    if already_handled:
+        return f"confirm skipped card reward {reward_index}"
+    return f"skip unopened card reward {reward_index}"
 
 
 def _view_action(label: str, view: str, kind: str) -> dict[str, Any]:
@@ -351,14 +347,7 @@ def _numeric_value(value: Any) -> float | None:
 
 
 def _is_sequence_safe_card(card: dict[str, Any]) -> bool:
-    target_type = str(card.get("target_type") or "")
-    if target_type not in {"None", "Self", "AnyEnemy"}:
-        return False
-    stats = card.get("stats") or {}
-    if any(str(key).lower() in _UNSAFE_SEQUENCE_STATS for key in stats):
-        return False
-    text = " ".join(str(card.get(key) or "") for key in ("name", "description", "raw_description")).lower()
-    return not any(marker in text for marker in _UNSAFE_SEQUENCE_TEXT)
+    return is_sequence_atomic_card(card, allowed_target_types={"None", "Self", "AnyEnemy"})
 
 
 def _sequence_step_label(card: dict[str, Any], enemy: dict[str, Any] | None = None) -> str:
@@ -601,7 +590,10 @@ def build_legal_actions(
                 )
             if reward.get("can_skip"):
                 label = (
-                    f"skip unopened card reward {reward_index}"
+                    _card_reward_skip_label(
+                        reward_index,
+                        already_handled=reward.get("can_claim") is False or is_blocked_card_reward,
+                    )
                     if reward_kind == "card_reward"
                     else f"skip reward {reward_index}: {reward_kind}"
                 )

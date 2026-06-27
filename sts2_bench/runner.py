@@ -19,6 +19,7 @@ from .agents import (
     OpenAICompatAgent,
     PromptStyle,
     RandomAgent,
+    RouteMapPromptFormat,
     TurnChatAssistantHistory,
     TurnChatUpdateMode,
 )
@@ -43,6 +44,7 @@ from .routing import route_state
 
 LogLevel = Literal["metrics", "decisions", "full"]
 RoutePlanEnforcement = Literal["hard", "soft"]
+DecisionHook = Callable[[Sts2Process, dict[str, Any], int, list[dict[str, Any]]], None]
 CUSTOM_SEQUENCE_VALIDATION_RETRIES = 2
 ROUTE_PLAN_VALIDATION_RETRIES = 2
 EVIDENCE_VALIDATION_RETRIES = 2
@@ -124,6 +126,8 @@ def run_one(
     sequence_probe_factory: Callable[[], Sts2Process] | None = None,
     route_plan_enabled: bool = True,
     route_plan_enforcement: RoutePlanEnforcement = "hard",
+    decision_hook: DecisionHook | None = None,
+    combat_recorder: Any | None = None,
 ) -> RunResult:
     """Run one game and return summary metrics."""
 
@@ -175,6 +179,10 @@ def run_one(
                     state = {**state, "full_map": map_state}
             if route_plan_tracker is not None:
                 state = _attach_route_plan_context(state, route_plan_tracker)
+            if decision_hook is not None:
+                decision_hook(proc, state, step, action_tape)
+            if combat_recorder is not None:
+                combat_recorder.before_decision(proc, state, step, action_tape)
 
             reward_room_key = _reward_room_key(state)
             blocked_card_reward_claims = (
@@ -255,6 +263,15 @@ def run_one(
                 _count_view_action(result, state, action.command)
                 result.steps = step + 1
                 state = _apply_view_action(proc, state, action.command)
+                if combat_recorder is not None:
+                    combat_recorder.after_action(
+                        step=step,
+                        old_state=old_state,
+                        action=action,
+                        meta=meta,
+                        commands=[],
+                        next_state=state,
+                    )
                 _record_agent_transition(agent, old_state, action, meta, state)
                 continue
             if action.command.get("cmd") == "bench_sequence":
@@ -272,8 +289,18 @@ def run_one(
                     result.error = next_state.get("message") or "Headless engine returned an error state"
                     _fill_result(result, next_state)
                     return result
-                action_tape.extend(_copy_commands(sequence_result.commands_executed))
+                executed_commands = _copy_commands(sequence_result.commands_executed)
+                action_tape.extend(executed_commands)
                 state = _attach_last_action_result(old_state, next_state, action)
+                if combat_recorder is not None:
+                    combat_recorder.after_action(
+                        step=step,
+                        old_state=old_state,
+                        action=action,
+                        meta=meta,
+                        commands=executed_commands,
+                        next_state=state,
+                    )
                 _record_agent_transition(agent, old_state, action, meta, state)
                 if _max_game_actions_reached(result, max_game_actions, state):
                     return result
@@ -293,6 +320,15 @@ def run_one(
                 return result
             action_tape.append(_copy_command(action.command))
             state = _attach_last_action_result(old_state, next_state, action)
+            if combat_recorder is not None:
+                combat_recorder.after_action(
+                    step=step,
+                    old_state=old_state,
+                    action=action,
+                    meta=meta,
+                    commands=[_copy_command(action.command)],
+                    next_state=state,
+                )
             open_card_reward_claim = _update_card_reward_reopen_guard(
                 skipped_card_reward_claims,
                 open_card_reward_claim,
@@ -314,6 +350,8 @@ def run_one(
             _fill_result(result, state)
         return result
     finally:
+        if combat_recorder is not None:
+            combat_recorder.finalize(state, reason="run_finally")
         result.wall_time_sec = time.time() - started
         logger and logger.write({"type": "result", "result": result.to_dict()})
         if owns_process:
@@ -611,9 +649,10 @@ def _prepare_custom_sequence_action(
 def _custom_sequence_feedback(validation_error: str) -> str:
     return (
         f"Your previous response was invalid: custom sequence validation failed: {validation_error}. "
-        "Choose again from the current legal actions. Do not use combat_custom_sequence for cards with random, "
-        "choose, select, discover, or other manual-choice effects; play those cards as single legal actions "
-        "instead. For custom sequence payloads, sum step costs against current energy, bind card_index values "
+        "Choose again from the current legal actions. combat_custom_sequence may contain only atomic card plays. "
+        "Do not use it for cards that draw, discard, exhaust, choose/select, shuffle, generate/discover, upgrade, "
+        "or use random effects or random targets; play those cards as single legal actions instead and wait for "
+        "the next state. For custom sequence payloads, sum step costs against current energy, bind card_index values "
         "to the initial visible hand snapshot, and every bound "
         "card must remain playable after earlier sequence steps resolve. combat_custom_sequence may contain at "
         f"most {MAX_CUSTOM_SEQUENCE_VALIDATION_LENGTH} card steps; if a useful line is longer, submit the first "
@@ -988,6 +1027,7 @@ def _action_log_entry(
         "type": "action",
         "step": step,
         "decision": decision,
+        "command": _copy_command(action.command),
     }
     if log_level == "full":
         entry["action"] = action.to_prompt_dict()
@@ -1139,7 +1179,7 @@ def _agent_meta_summary(meta: dict[str, Any]) -> dict[str, Any]:
     if isinstance(parsed, dict):
         summary["parsed"] = {
             key: parsed[key]
-            for key in ("action_id", "reason", "route_plan_event", "evidence_refs")
+            for key in ("action_id", "reason", "route_plan_event", "evidence_refs", "sequence")
             if key in parsed
         }
     return summary
@@ -1224,6 +1264,7 @@ def agent_from_args(
     turn_chat_plan_enabled: bool = False,
     turn_check_enabled: bool | None = None,
     route_plan_enabled: bool = True,
+    route_map_prompt_format: RouteMapPromptFormat = "canonical",
     route_plan_enforcement: RoutePlanEnforcement = "hard",
     reward_posterior_evaluator_enabled: bool = True,
     self_consistency_enabled: bool = False,
@@ -1237,6 +1278,8 @@ def agent_from_args(
     action_prompt_order: ActionPromptOrderMode = "default",
     action_prompt_order_seed: int | None = 0,
     combat_card_sequences_enabled: bool = True,
+    combat_reasoning_pool_enabled: bool = False,
+    combat_turn_board_enabled: bool = False,
 ) -> Agent:
     if route_plan_enforcement not in {"hard", "soft"}:
         raise ValueError(f"Unsupported route_plan_enforcement: {route_plan_enforcement}")
@@ -1281,6 +1324,7 @@ def agent_from_args(
                 turn_chat_plan_enabled=turn_chat_plan_enabled,
                 turn_check_enabled=turn_check_enabled,
                 route_plan_enabled=False,
+                route_map_prompt_format=route_map_prompt_format,
                 context_patch_fields_enabled=False,
                 self_consistency_enabled=False,
                 self_consistency_samples=self_consistency_samples,
@@ -1293,6 +1337,8 @@ def agent_from_args(
                 action_prompt_order=action_prompt_order,
                 action_prompt_order_seed=action_prompt_order_seed,
                 combat_card_sequences_enabled=combat_card_sequences_enabled,
+                combat_reasoning_pool_enabled=combat_reasoning_pool_enabled,
+                combat_turn_board_enabled=combat_turn_board_enabled,
             )
             occ_inner = OpenAICompatAgent(
                 base_url=base_url,
@@ -1313,6 +1359,7 @@ def agent_from_args(
                 turn_chat_plan_enabled=False,
                 turn_check_enabled=False,
                 route_plan_enabled=route_plan_enabled,
+                route_map_prompt_format=route_map_prompt_format,
                 context_patch_fields_enabled=True,
                 self_consistency_enabled=self_consistency_enabled,
                 self_consistency_samples=self_consistency_samples,
@@ -1325,6 +1372,8 @@ def agent_from_args(
                 action_prompt_order=action_prompt_order,
                 action_prompt_order_seed=action_prompt_order_seed,
                 combat_card_sequences_enabled=combat_card_sequences_enabled,
+                combat_reasoning_pool_enabled=False,
+                combat_turn_board_enabled=False,
             )
             reward_posterior_evaluator = (
                 LLMRewardPosteriorEvaluator(occ_inner, max_retries=llm_max_retries)
@@ -1363,6 +1412,7 @@ def agent_from_args(
             turn_chat_plan_enabled=turn_chat_plan_enabled,
             turn_check_enabled=turn_check_enabled,
             route_plan_enabled=route_plan_enabled,
+            route_map_prompt_format=route_map_prompt_format,
             context_patch_fields_enabled=True,
             self_consistency_enabled=self_consistency_enabled,
             self_consistency_samples=self_consistency_samples,
@@ -1375,6 +1425,8 @@ def agent_from_args(
             action_prompt_order=action_prompt_order,
             action_prompt_order_seed=action_prompt_order_seed,
             combat_card_sequences_enabled=combat_card_sequences_enabled,
+            combat_reasoning_pool_enabled=combat_reasoning_pool_enabled,
+            combat_turn_board_enabled=combat_turn_board_enabled,
         )
     raise ValueError(f"Unknown agent kind: {kind}")
 

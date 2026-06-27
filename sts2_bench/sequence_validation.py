@@ -12,9 +12,7 @@ from .sequences import (
     execute_card_sequence,
     normalize_card_sequence_payload,
 )
-
-
-_CUSTOM_SEQUENCE_BLOCKED_TEXT_MARKERS = ("random", "choose", "select", "discover")
+from .sequence_safety import sequence_card_block_reason
 
 
 @dataclass(frozen=True)
@@ -49,6 +47,9 @@ def validate_custom_sequence(
             False,
             f"custom sequence validation accepts at most {MAX_CUSTOM_SEQUENCE_VALIDATION_LENGTH} card steps",
         )
+    preflight_error = _non_atomic_sequence_preflight(sequence, current_state)
+    if preflight_error:
+        return SequenceValidationResult(False, preflight_error)
     preflight_error = _modifier_changing_sequence_preflight(sequence, current_state)
     if preflight_error:
         return SequenceValidationResult(False, preflight_error)
@@ -113,6 +114,20 @@ def validate_custom_sequence(
 def state_fingerprint(state: dict[str, Any]) -> str:
     payload = _canonical_state(state)
     return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _non_atomic_sequence_preflight(sequence: list[dict[str, int]], current_state: dict[str, Any]) -> str | None:
+    hand = current_state.get("hand") if isinstance(current_state.get("hand"), list) else []
+    hand_by_index = {card.get("index"): card for card in hand if isinstance(card, dict)}
+
+    for step_number, step in enumerate(sequence, start=1):
+        card = hand_by_index.get(step.get("card_index"))
+        if not isinstance(card, dict):
+            continue
+        block_reason = sequence_card_block_reason(card, allowed_target_types={"None", "Self", "AnyEnemy", "AllEnemies"})
+        if block_reason:
+            return f"step {step_number}: {block_reason}. Play this card as a single action and wait for the next state"
+    return None
 
 
 def _target_specific_lethal_preflight(sequence: list[dict[str, int]], current_state: dict[str, Any]) -> str | None:
@@ -449,24 +464,7 @@ def _name(obj: Any) -> str:
 
 
 def _custom_sequence_block_reason(card: dict[str, Any]) -> str | None:
-    text = _card_search_text(card)
-    if any(marker in text for marker in _CUSTOM_SEQUENCE_BLOCKED_TEXT_MARKERS):
-        return f"non-deterministic or manual-choice card is not eligible for custom sequence: {_name(card.get('name'))}"
-    return None
-
-
-def _card_search_text(card: dict[str, Any]) -> str:
-    parts = [
-        _name(card.get("name")),
-        str(card.get("id") or ""),
-        str(card.get("description") or ""),
-        str(card.get("raw_description") or ""),
-        str(card.get("text") or ""),
-    ]
-    keywords = card.get("keywords")
-    if isinstance(keywords, list):
-        parts.extend(str(keyword) for keyword in keywords)
-    return " ".join(parts).lower()
+    return sequence_card_block_reason(card, allowed_target_types={"None", "Self", "AnyEnemy", "AllEnemies"})
 
 
 def _copy_command(command: dict[str, Any]) -> dict[str, Any]:

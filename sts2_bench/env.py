@@ -12,6 +12,7 @@ from typing import Any
 from .actions import LegalAction, build_legal_actions
 from .context import build_last_action_result, compact_state
 from .process import Sts2Process
+from .seeds import DEFAULT_TEST_SEED
 from .sequences import execute_card_sequence
 
 
@@ -40,7 +41,7 @@ class Sts2Env:
     def close(self) -> None:
         self.process.close()
 
-    def reset(self, *, seed: str | None = None) -> tuple[dict[str, Any], dict[str, Any]]:
+    def reset(self, *, seed: str | None = DEFAULT_TEST_SEED) -> tuple[dict[str, Any], dict[str, Any]]:
         self.process.start()
         self.state = self.process.start_run(
             character=self.character,

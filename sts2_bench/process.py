@@ -7,6 +7,7 @@ can own process lifetime, logging, reset, and parallel workers cleanly.
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import shutil
@@ -14,6 +15,8 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import Any
+
+from .seeds import DEFAULT_TEST_SEED
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -145,7 +148,7 @@ class Sts2Process:
         self,
         *,
         character: str = "Ironclad",
-        seed: str | None = None,
+        seed: str | None = DEFAULT_TEST_SEED,
         ascension: int = 0,
         lang: str = "en",
     ) -> dict[str, Any]:
@@ -188,8 +191,18 @@ class Sts2Process:
             proc.wait(timeout=5)
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     """Small smoke-test entry point: start, print ready, quit."""
+
+    args = list(sys.argv[1:] if argv is None else argv)
+    parser = argparse.ArgumentParser(
+        prog="python -m sts2_bench process-smoke",
+        description="Start Sts2Headless, print its ready message, and quit.",
+    )
+    if any(arg in {"-h", "--help"} for arg in args):
+        parser.print_help()
+        return 0
+    parser.parse_args(args)
 
     with Sts2Process(stderr=None) as proc:
         print(json.dumps(proc.ready, ensure_ascii=False))

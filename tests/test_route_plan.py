@@ -1,9 +1,9 @@
 import json
 
 from sts2_bench.actions import LegalAction
-from sts2_bench.agents import build_llm_prompt
+from sts2_bench.agents import OpenAICompatAgent, build_llm_prompt
 from sts2_bench.route_plan import RoutePlanTracker
-from sts2_bench.runner import JsonlLogger, run_one
+from sts2_bench.runner import JsonlLogger, agent_from_args, run_one
 
 
 def _map_action(action_id, room_type, col, row):
@@ -879,10 +879,82 @@ def test_map_prompt_instructs_llm_to_emit_route_plan_event():
     assert "omit route_plan_event" in prompt
     assert "new_plan" in prompt
     assert "reason_tags" in prompt
-    assert "Route graph JSON:" in prompt
-    assert '"node_key":"0:1"' in prompt
-    assert "each adjacent pair in new_plan must appear in the previous node's children" in prompt
+    assert "Canonical route map JSON:" in prompt
+    assert "Route graph JSON:" not in prompt
+    assert '"id":"r01c0"' in prompt
+    assert '"symbol":"M"' in prompt
+    assert "each adjacent pair in new_plan must follow an edge" in prompt
     assert "Route graph exact nodes:" not in prompt
+
+
+def test_map_prompt_uses_canonical_route_map_representation_by_default():
+    state = _map_state(
+        choices=[{"col": 0, "row": 1, "type": "Monster"}],
+        full_map=_full_map(edges={(0, 0): [(0, 1)]}),
+    )
+    action = _map_action(0, "Monster", 0, 1)
+
+    prompt = build_llm_prompt(state, [action])
+
+    assert "Canonical route map JSON:" in prompt
+    assert "Route graph JSON:" not in prompt
+    route_map = json.loads(prompt.split("Canonical route map JSON:\n", 1)[1])
+    assert route_map["schema"] == "sts2_route_map_v1"
+    assert route_map["legal_starts"] == [
+        {"action_id": 0, "node": "r01c0", "symbol": "M", "type": "Monster", "choice_index": 0}
+    ]
+    assert {"id": "r01c0", "col": 0, "row": 1, "symbol": "M", "type": "Monster", "action_id": 0} in route_map["rows"][1]["nodes"]
+    assert route_map["edges"]["r00c0"] == ["r01c0"]
+
+
+def test_map_prompt_can_use_legacy_route_graph_representation_explicitly():
+    state = _map_state(
+        choices=[{"col": 0, "row": 1, "type": "Monster"}],
+        full_map=_full_map(edges={(0, 0): [(0, 1)]}),
+    )
+    action = _map_action(0, "Monster", 0, 1)
+
+    prompt = build_llm_prompt(state, [action], route_map_prompt_format="route_graph")
+
+    assert "Route graph JSON:" in prompt
+    assert "Canonical route map JSON:" not in prompt
+    assert '"node_key":"0:1"' in prompt
+
+
+def test_openai_agent_uses_canonical_route_map_prompt_format_by_default():
+    state = _map_state(
+        choices=[{"col": 0, "row": 1, "type": "Monster"}],
+        full_map=_full_map(edges={(0, 0): [(0, 1)]}),
+    )
+    action = _map_action(0, "Monster", 0, 1)
+    agent = OpenAICompatAgent(
+        base_url="http://127.0.0.1:1/v1",
+        model="dummy",
+    )
+
+    prompt = agent.build_prompt(state, [action])
+
+    assert "Canonical route map JSON:" in prompt
+    assert "Route graph JSON:" not in prompt
+
+
+def test_agent_from_args_uses_canonical_route_map_prompt_format_by_default():
+    state = _map_state(
+        choices=[{"col": 0, "row": 1, "type": "Monster"}],
+        full_map=_full_map(edges={(0, 0): [(0, 1)]}),
+    )
+    action = _map_action(0, "Monster", 0, 1)
+    agent = agent_from_args(
+        "llm",
+        base_url="http://127.0.0.1:1/v1",
+        model="dummy",
+        api_key="local",
+    )
+
+    prompt = agent.build_prompt(state, [action])
+
+    assert "Canonical route map JSON:" in prompt
+    assert "Route graph JSON:" not in prompt
 
 
 def test_map_prompt_can_omit_route_plan_instructions_when_disabled():
@@ -897,7 +969,7 @@ def test_map_prompt_can_omit_route_plan_instructions_when_disabled():
     assert "route_plan_event" not in prompt
     assert "route_plan_created" not in prompt
     assert "route_plan_updated" not in prompt
-    assert "Route graph JSON:" in prompt
+    assert "Canonical route map JSON:" in prompt
 
 
 def test_map_prompt_uses_structured_route_state_without_text_map_duplication():

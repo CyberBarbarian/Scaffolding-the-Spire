@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 
 from .runner import JsonlLogger, agent_from_args, run_one, summarize
+from .seeds import DEFAULT_SEEDS_FILE, read_seed_file
 from .trace_analysis import analyze_benchmark_trace
 
 
@@ -44,6 +45,8 @@ CONFIG_ENV_KEYS = {
     "allow_repeat_views": "STS2_BENCH_ALLOW_REPEAT_VIEWS",
     "allow_custom_sequences": "STS2_BENCH_ALLOW_CUSTOM_SEQUENCES",
     "combat_card_sequences_enabled": "STS2_BENCH_COMBAT_CARD_SEQUENCES",
+    "combat_reasoning_pool_enabled": "STS2_BENCH_COMBAT_REASONING_POOL",
+    "combat_turn_board_enabled": "STS2_BENCH_COMBAT_TURN_BOARD",
     "route_plan_enabled": "STS2_BENCH_ROUTE_PLAN_ENABLED",
     "route_plan_enforcement": "STS2_BENCH_ROUTE_PLAN_ENFORCEMENT",
     "reward_posterior_evaluator": "STS2_BENCH_REWARD_POSTERIOR_EVALUATOR",
@@ -79,24 +82,21 @@ NESTED_CONFIG_ENV_KEYS = {
     ("diagnostics", "reflection_verifier", "max_options"): "STS2_BENCH_REFLECTION_MAX_OPTIONS",
     ("diagnostics", "action_prompt_order", "mode"): "STS2_BENCH_ACTION_PROMPT_ORDER",
     ("diagnostics", "action_prompt_order", "seed"): "STS2_BENCH_ACTION_PROMPT_ORDER_SEED",
+    ("context_management", "combat_reasoning_pool", "enabled"): "STS2_BENCH_COMBAT_REASONING_POOL",
+    ("context_management", "combat_turn_board", "enabled"): "STS2_BENCH_COMBAT_TURN_BOARD",
 }
 
 
 def load_seeds(path: str | None, count: int) -> list[str]:
     if not path:
-        return [f"bench_{i:04d}" for i in range(count)]
-    data = json.loads(Path(path).read_text(encoding="utf-8-sig"))
-    if isinstance(data, list):
-        seeds = []
-        for item in data:
-            if isinstance(item, str):
-                seeds.append(item)
-            elif isinstance(item, dict) and item.get("seed"):
-                seeds.append(str(item["seed"]))
-            else:
-                raise ValueError(f"Unsupported seed entry: {item!r}")
-        return seeds
-    raise ValueError("Seed file must be a JSON list of strings or objects with a seed field")
+        seeds = read_seed_file(DEFAULT_SEEDS_FILE)
+        if count > len(seeds):
+            raise ValueError(
+                f"Requested count={count}, but {DEFAULT_SEEDS_FILE} contains only "
+                f"{len(seeds)} preconfigured fixed seeds. Pass --seeds to declare an explicit seed file."
+            )
+        return seeds[:count]
+    return read_seed_file(path)
 
 
 def load_env_file(path: Path) -> None:
@@ -364,6 +364,8 @@ def build_run_config(args: argparse.Namespace, seeds: list[str], argv: list[str]
         ca_context: dict[str, object] = {"mode": ca_mode}
         if ca_mode == "combat_mdp_state":
             ca_context["turn_process"] = "structured_current_turn_actions"
+            ca_context["combat_reasoning_pool"] = bool(getattr(args, "combat_reasoning_pool_enabled", False))
+            ca_context["combat_turn_board"] = bool(getattr(args, "combat_turn_board_enabled", False))
         else:
             ca_context["turn_chat"] = turn_chat_config
         context_management: dict[str, object] = {
@@ -384,6 +386,12 @@ def build_run_config(args: argparse.Namespace, seeds: list[str], argv: list[str]
         context_management = {
             "mode": args.context_mode,
             "turn_chat": turn_chat_config,
+            "combat_reasoning_pool": {
+                "enabled": bool(getattr(args, "combat_reasoning_pool_enabled", False)),
+            },
+            "combat_turn_board": {
+                "enabled": bool(getattr(args, "combat_turn_board_enabled", False)),
+            },
         }
 
     return {
@@ -408,6 +416,7 @@ def build_run_config(args: argparse.Namespace, seeds: list[str], argv: list[str]
             "route_plan": {
                 "enabled": bool(getattr(args, "route_plan_enabled", True)),
                 "enforcement": getattr(args, "route_plan_enforcement", "hard"),
+                "route_map_prompt_format": getattr(args, "route_map_prompt_format", "canonical"),
             },
             "diagnostics": {
                 "self_consistency": {
@@ -443,6 +452,8 @@ def build_run_config(args: argparse.Namespace, seeds: list[str], argv: list[str]
             "allow_repeat_views": args.allow_repeat_views,
             "allow_custom_sequences": bool(getattr(args, "allow_custom_sequences", True)),
             "combat_card_sequences": bool(getattr(args, "combat_card_sequences_enabled", True)),
+            "combat_reasoning_pool": bool(getattr(args, "combat_reasoning_pool_enabled", False)),
+            "combat_turn_board": bool(getattr(args, "combat_turn_board_enabled", False)),
         },
         "logging": {
             "out": args.out,
@@ -582,6 +593,12 @@ def main(argv: list[str] | None = None) -> int:
         help="Route-plan validation behavior: hard retries/stops; soft logs diagnostics only",
     )
     parser.add_argument(
+        "--route-map-prompt-format",
+        choices=["route_graph", "canonical"],
+        default=env_str("STS2_BENCH_ROUTE_MAP_PROMPT_FORMAT", "canonical"),
+        help="Map graph rendering used in LLM prompts; route_graph preserves the legacy nested JSON, canonical uses row-wise nodes plus an edge map",
+    )
+    parser.add_argument(
         "--reward-posterior-evaluator",
         action=argparse.BooleanOptionalAction,
         default=env_bool("STS2_BENCH_REWARD_POSTERIOR_EVALUATOR", True),
@@ -713,6 +730,20 @@ def main(argv: list[str] | None = None) -> int:
         help="Expose combat_card_sequence and combat_custom_sequence actions",
     )
     parser.add_argument(
+        "--combat-reasoning-pool",
+        action=argparse.BooleanOptionalAction,
+        dest="combat_reasoning_pool_enabled",
+        default=env_bool("STS2_BENCH_COMBAT_REASONING_POOL", False),
+        help="For combat_mdp_state CA prompts, keep compact same-turn reason/combat_notes/turn_check in the structured turn process",
+    )
+    parser.add_argument(
+        "--combat-turn-board",
+        action=argparse.BooleanOptionalAction,
+        dest="combat_turn_board_enabled",
+        default=env_bool("STS2_BENCH_COMBAT_TURN_BOARD", False),
+        help="For combat_mdp_state CA prompts, keep compact engine-fact summaries from previous turns in the same combat",
+    )
+    parser.add_argument(
         "--trace-analysis-dir",
         default=env_str("STS2_BENCH_TRACE_ANALYSIS_DIR"),
         help=(
@@ -768,6 +799,7 @@ def main(argv: list[str] | None = None) -> int:
             turn_check_enabled=args.turn_chat_plan,
             route_plan_enabled=args.route_plan_enabled,
             route_plan_enforcement=args.route_plan_enforcement,
+            route_map_prompt_format=args.route_map_prompt_format,
             reward_posterior_evaluator_enabled=args.reward_posterior_evaluator,
             self_consistency_enabled=args.self_consistency_enabled,
             self_consistency_samples=args.self_consistency_samples,
@@ -780,6 +812,8 @@ def main(argv: list[str] | None = None) -> int:
             action_prompt_order=args.action_prompt_order,
             action_prompt_order_seed=args.action_prompt_order_seed,
             combat_card_sequences_enabled=args.combat_card_sequences_enabled,
+            combat_reasoning_pool_enabled=args.combat_reasoning_pool_enabled,
+            combat_turn_board_enabled=args.combat_turn_board_enabled,
         )
         for seed in seeds:
             result = run_one(

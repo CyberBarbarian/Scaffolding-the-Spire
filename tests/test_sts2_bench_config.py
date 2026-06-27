@@ -7,6 +7,7 @@ from sts2_bench.run_benchmark import (
     _default_trace_analysis_dir,
     _load_simple_yaml_mapping,
     _resolve_trace_analysis_dir,
+    DEFAULT_SEEDS_FILE,
     load_benchmark_config,
     load_env_file,
     load_seeds,
@@ -123,6 +124,16 @@ def test_tracked_benchmark_config_enables_trace_analysis(monkeypatch):
     assert os.environ["STS2_BENCH_TRACE_ANALYSIS"] == "true"
 
 
+def test_tracked_benchmark_config_defaults_to_deepseek_v4_pro(monkeypatch):
+    config = Path(__file__).resolve().parents[1] / "sts2_bench" / "benchmark.yaml"
+    monkeypatch.delenv("STS2_BENCH_MODEL", raising=False)
+
+    load_benchmark_config(config)
+
+    assert os.environ["STS2_BENCH_MODEL"] == "deepseek-v4-pro"
+    assert _load_simple_yaml_mapping(config)["model"] == "deepseek-v4-pro"
+
+
 def test_tracked_benchmark_config_documents_apihy_model_catalog():
     config = Path(__file__).resolve().parents[1] / "sts2_bench" / "benchmark.yaml"
 
@@ -232,3 +243,18 @@ def test_load_seeds_handles_utf8_bom(tmp_path):
     seed_file.write_text('\ufeff["ironclad_a0_3407"]\n', encoding="utf-8")
 
     assert load_seeds(str(seed_file), count=1) == ["ironclad_a0_3407"]
+
+
+def test_load_seeds_defaults_to_preconfigured_fixed_seed_file():
+    assert load_seeds(None, count=2) == ["ironclad_a0_3407", "ironclad_a0_1007"]
+    assert DEFAULT_SEEDS_FILE.name == "seeds_ironclad_a0.json"
+
+
+def test_load_seeds_requires_explicit_file_when_count_exceeds_preset_pool():
+    try:
+        load_seeds(None, count=3)
+    except ValueError as exc:
+        assert "only 2 preconfigured fixed seeds" in str(exc)
+        assert "--seeds" in str(exc)
+    else:
+        raise AssertionError("expected load_seeds to reject generated default seeds")

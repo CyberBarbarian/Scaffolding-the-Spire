@@ -24,7 +24,7 @@ from .context import (
     power_label,
     render_state_text,
 )
-from .route_graph import build_route_graph
+from .route_graph import build_canonical_route_map, build_route_graph
 from .route_plan import winged_boots_remaining_for_state
 from .sequences import MAX_CUSTOM_SEQUENCE_VALIDATION_LENGTH, normalize_card_sequence_payload
 
@@ -37,6 +37,7 @@ TurnChatAssistantHistory = Literal["compact"]
 FallbackMode = Literal["action", "error"]
 SelfConsistencyMode = Literal["diagnostic", "majority_vote"]
 ActionPromptOrderMode = Literal["default", "shuffle_map"]
+RouteMapPromptFormat = Literal["route_graph", "canonical"]
 ReflectionMode = Literal["diagnostic", "verifier_vote"]
 SELF_CONSISTENCY_MAJORITY_ALLOWED_DECISIONS = {"map_select", "card_reward"}
 REFLECTION_CARD_REWARD_CONFIDENCE_THRESHOLD = 0.75
@@ -161,6 +162,7 @@ class TurnChatBuffer:
     max_turns: int
     plan_enabled: bool = False
     route_plan_enabled: bool = True
+    route_map_prompt_format: RouteMapPromptFormat = "canonical"
     context_patch_fields_enabled: bool = True
     combat_card_sequences_enabled: bool = True
     messages: list[dict[str, str]] = field(default_factory=list)
@@ -205,6 +207,7 @@ class TurnChatBuffer:
                 memory_text="",
                 run_summary_text=run_summary_text,
                 route_plan_enabled=self.route_plan_enabled,
+                route_map_prompt_format=self.route_map_prompt_format,
                 context_patch_fields_enabled=self.context_patch_fields_enabled,
                 combat_card_sequences_enabled=self.combat_card_sequences_enabled,
             )
@@ -294,24 +297,46 @@ class TurnChatBuffer:
                 state,
                 legal_actions,
                 run_summary_text,
+                route_map_prompt_format=self.route_map_prompt_format,
             )
         if update_mode != "delta":
             raise ValueError(f"Unsupported turn_chat update mode: {update_mode}")
         if _viewed_labels(state):
-            return build_view_update_user_message(state, legal_actions)
-        return build_turn_update_user_message(state, legal_actions)
+            return build_view_update_user_message(
+                state,
+                legal_actions,
+                route_map_prompt_format=self.route_map_prompt_format,
+            )
+        return build_turn_update_user_message(
+            state,
+            legal_actions,
+            route_map_prompt_format=self.route_map_prompt_format,
+        )
 
 
 @dataclass
 class CombatMdpStateBuffer:
     """Structured current-turn combat facts without chat-history replay."""
 
+    reasoning_pool_enabled: bool = False
+    turn_board_enabled: bool = False
+    route_map_prompt_format: RouteMapPromptFormat = "canonical"
+    turn_board_max_entries: int = 4
+    active_combat_key: tuple[Any, ...] | None = None
     active_turn_key: tuple[Any, ...] | None = None
     actions_this_turn: list[dict[str, Any]] = field(default_factory=list)
+    reasoning_pool: list[dict[str, Any]] = field(default_factory=list)
+    turn_board: list[dict[str, Any]] = field(default_factory=list)
 
     def reset(self) -> None:
+        self.active_combat_key = None
         self.active_turn_key = None
+        self._reset_current_turn()
+        self.turn_board.clear()
+
+    def _reset_current_turn(self) -> None:
         self.actions_this_turn.clear()
+        self.reasoning_pool.clear()
 
     def actions_count(self, state: dict[str, Any]) -> int:
         turn_key = turn_chat_key(state)
@@ -342,16 +367,25 @@ class CombatMdpStateBuffer:
                 memory_text="",
                 run_summary_text=run_summary_text,
                 route_plan_enabled=route_plan_enabled,
+                route_map_prompt_format=self.route_map_prompt_format,
                 context_patch_fields_enabled=context_patch_fields_enabled,
                 combat_card_sequences_enabled=combat_card_sequences_enabled,
             )
+        combat_key = turn_key[:-1]
+        if combat_key != self.active_combat_key:
+            self.active_combat_key = combat_key
+            self.active_turn_key = None
+            self._reset_current_turn()
+            self.turn_board.clear()
         if turn_key != self.active_turn_key:
             self.active_turn_key = turn_key
-            self.actions_this_turn.clear()
+            self._reset_current_turn()
         return build_combat_mdp_user_message(
             state,
             legal_actions,
             actions_this_turn=self.actions_this_turn,
+            reasoning_pool=self.reasoning_pool if self.reasoning_pool_enabled else [],
+            turn_board=self.turn_board if self.turn_board_enabled else [],
             prompt_style=prompt_style,
             run_summary_text=run_summary_text,
             turn_check_enabled=turn_check_enabled,
@@ -371,12 +405,26 @@ class CombatMdpStateBuffer:
         if turn_key is None:
             self.reset()
             return
+        combat_key = turn_key[:-1]
+        if combat_key != self.active_combat_key:
+            self.active_combat_key = combat_key
+            self.active_turn_key = None
+            self._reset_current_turn()
+            self.turn_board.clear()
         if self.active_turn_key != turn_key:
             self.active_turn_key = turn_key
-            self.actions_this_turn.clear()
+            self._reset_current_turn()
 
         if action.kind == "combat_end_turn":
-            self.reset()
+            next_turn_key = turn_chat_key(next_state) if isinstance(next_state, dict) else None
+            if next_turn_key is not None and next_turn_key[:-1] == combat_key:
+                if self.turn_board_enabled:
+                    self.turn_board.append(_combat_turn_board_entry(state, next_state, self.actions_this_turn))
+                    self.turn_board = self.turn_board[-self.turn_board_max_entries :]
+                self.active_turn_key = None
+                self._reset_current_turn()
+            else:
+                self.reset()
             return
 
         if not isinstance(next_state, dict):
@@ -395,6 +443,10 @@ class CombatMdpStateBuffer:
                 action_kind=action.kind,
             )
         self.actions_this_turn.append(_combat_mdp_action_fact(state, action, result))
+        if self.reasoning_pool_enabled:
+            reasoning_fact = _combat_mdp_reasoning_fact(action, meta)
+            if reasoning_fact:
+                self.reasoning_pool.append(reasoning_fact)
 
 
 def build_llm_prompt(
@@ -406,6 +458,7 @@ def build_llm_prompt(
     memory_text: str = "",
     run_summary_text: str = "",
     route_plan_enabled: bool = True,
+    route_map_prompt_format: RouteMapPromptFormat = "canonical",
     context_patch_fields_enabled: bool = True,
     combat_card_sequences_enabled: bool = True,
 ) -> str:
@@ -465,7 +518,7 @@ def build_llm_prompt(
                 ),
             ]
         )
-    parts.extend(_route_graph_prompt_lines(state, legal_actions))
+    parts.extend(_route_graph_prompt_lines(state, legal_actions, route_map_prompt_format=route_map_prompt_format))
     if include_json and state.get("decision") != "map_select":
         parts.extend(
             [
@@ -500,6 +553,8 @@ def build_turn_initial_user_message(
     state: dict[str, Any],
     legal_actions: list[LegalAction],
     run_summary_text: str = "",
+    *,
+    route_map_prompt_format: RouteMapPromptFormat = "canonical",
 ) -> str:
     parts = ["New player turn."]
     if run_summary_text:
@@ -514,11 +569,16 @@ def build_turn_initial_user_message(
             _legal_actions_text(legal_actions),
         ]
     )
-    parts.extend(_route_graph_prompt_lines(state, legal_actions))
+    parts.extend(_route_graph_prompt_lines(state, legal_actions, route_map_prompt_format=route_map_prompt_format))
     return "\n".join(parts)
 
 
-def build_turn_update_user_message(state: dict[str, Any], legal_actions: list[LegalAction]) -> str:
+def build_turn_update_user_message(
+    state: dict[str, Any],
+    legal_actions: list[LegalAction],
+    *,
+    route_map_prompt_format: RouteMapPromptFormat = "canonical",
+) -> str:
     if state.get("decision") == "card_select":
         return "\n".join(
             [
@@ -549,7 +609,7 @@ def build_turn_update_user_message(state: dict[str, Any], legal_actions: list[Le
             _legal_actions_text(legal_actions),
         ]
     )
-    lines.extend(_route_graph_prompt_lines(state, legal_actions))
+    lines.extend(_route_graph_prompt_lines(state, legal_actions, route_map_prompt_format=route_map_prompt_format))
     return "\n".join(lines)
 
 
@@ -558,6 +618,8 @@ def build_combat_mdp_user_message(
     legal_actions: list[LegalAction],
     *,
     actions_this_turn: list[dict[str, Any]],
+    reasoning_pool: list[dict[str, Any]] | None = None,
+    turn_board: list[dict[str, Any]] | None = None,
     prompt_style: PromptStyle = "default",
     run_summary_text: str = "",
     turn_check_enabled: bool = False,
@@ -583,7 +645,7 @@ def build_combat_mdp_user_message(
             "",
             "Combat turn process JSON:",
             json.dumps(
-                _combat_turn_process_for_prompt(state, actions_this_turn),
+                _combat_turn_process_for_prompt(state, actions_this_turn, reasoning_pool or [], turn_board or []),
                 ensure_ascii=False,
                 sort_keys=True,
                 separators=(",", ":"),
@@ -596,7 +658,12 @@ def build_combat_mdp_user_message(
     return "\n".join(parts)
 
 
-def build_view_update_user_message(state: dict[str, Any], legal_actions: list[LegalAction]) -> str:
+def build_view_update_user_message(
+    state: dict[str, Any],
+    legal_actions: list[LegalAction],
+    *,
+    route_map_prompt_format: RouteMapPromptFormat = "canonical",
+) -> str:
     viewed = _viewed_labels(state)
     lines = ["Requested information: " + ", ".join(viewed) + "."]
     append_viewed_information(lines, state, state.get("player") or {})
@@ -610,24 +677,41 @@ def build_view_update_user_message(state: dict[str, Any], legal_actions: list[Le
             _legal_actions_text(legal_actions),
         ]
     )
-    lines.extend(_route_graph_prompt_lines(state, legal_actions))
+    lines.extend(_route_graph_prompt_lines(state, legal_actions, route_map_prompt_format=route_map_prompt_format))
     return "\n".join(lines)
 
 
-def _route_graph_prompt_lines(state: dict[str, Any], legal_actions: list[LegalAction]) -> list[str]:
+def _route_graph_prompt_lines(
+    state: dict[str, Any],
+    legal_actions: list[LegalAction],
+    *,
+    route_map_prompt_format: RouteMapPromptFormat = "canonical",
+) -> list[str]:
     full_map = state.get("full_map")
     if not isinstance(full_map, dict) or full_map.get("type") != "map":
         return []
-    route_graph = build_route_graph(
-        full_map,
-        state.get("choices", []) or [],
-        legal_actions=legal_actions,
-        winged_boots_remaining=winged_boots_remaining_for_state(state),
-    )
+    if route_map_prompt_format not in {"route_graph", "canonical"}:
+        raise ValueError(f"Unsupported route_map_prompt_format: {route_map_prompt_format}")
+    if route_map_prompt_format == "canonical":
+        route_payload = build_canonical_route_map(
+            full_map,
+            state.get("choices", []) or [],
+            legal_actions=legal_actions,
+            winged_boots_remaining=winged_boots_remaining_for_state(state),
+        )
+        route_label = "Canonical route map JSON:"
+    else:
+        route_payload = build_route_graph(
+            full_map,
+            state.get("choices", []) or [],
+            legal_actions=legal_actions,
+            winged_boots_remaining=winged_boots_remaining_for_state(state),
+        )
+        route_label = "Route graph JSON:"
     lines = [
         "",
-        "Route graph JSON:",
-        json.dumps(route_graph, ensure_ascii=False, separators=(",", ":")),
+        route_label,
+        json.dumps(route_payload, ensure_ascii=False, separators=(",", ":")),
     ]
     active_route_plan = state.get("active_route_plan")
     if isinstance(active_route_plan, dict):
@@ -952,11 +1036,16 @@ def _combat_mdp_state_for_prompt(state: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _combat_turn_process_for_prompt(state: dict[str, Any], actions_this_turn: list[dict[str, Any]]) -> dict[str, Any]:
+def _combat_turn_process_for_prompt(
+    state: dict[str, Any],
+    actions_this_turn: list[dict[str, Any]],
+    reasoning_pool: list[dict[str, Any]] | None = None,
+    turn_board: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     combat = state.get("combat") if isinstance(state.get("combat"), dict) else state
     player = state.get("player") if isinstance(state.get("player"), dict) else {}
     actions = [dict(action) for action in actions_this_turn]
-    return {
+    process = {
         "turn_key": list(turn_chat_key(state) or []),
         "actions_this_turn": actions,
         "summary": {
@@ -966,6 +1055,61 @@ def _combat_turn_process_for_prompt(state: dict[str, Any], actions_this_turn: li
             "current_block": player.get("block", 0),
         },
     }
+    if reasoning_pool:
+        process["reasoning_pool"] = [dict(item) for item in reasoning_pool]
+        process["summary"]["reasoning_pool_count"] = len(reasoning_pool)
+    if turn_board:
+        process["cross_turn_board"] = [dict(item) for item in turn_board]
+        process["summary"]["cross_turn_board_count"] = len(turn_board)
+    return process
+
+
+def _combat_turn_board_entry(
+    state: dict[str, Any],
+    next_state: dict[str, Any],
+    actions_this_turn: list[dict[str, Any]],
+) -> dict[str, Any]:
+    player_before = state.get("player") if isinstance(state.get("player"), dict) else {}
+    player_after = next_state.get("player") if isinstance(next_state.get("player"), dict) else {}
+    hp_before = player_before.get("hp")
+    hp_after = player_after.get("hp")
+    hp_delta = None
+    if isinstance(hp_before, (int, float)) and isinstance(hp_after, (int, float)):
+        hp_delta = int(hp_after) - int(hp_before)
+    enemies_before = [enemy for enemy in state.get("enemies") or [] if isinstance(enemy, dict)]
+    enemies_after = [enemy for enemy in next_state.get("enemies") or [] if isinstance(enemy, dict)]
+    result = next_state.get("last_action_result") if isinstance(next_state.get("last_action_result"), dict) else {}
+    entry: dict[str, Any] = {
+        "turn_key": list(turn_chat_key(state) or []),
+        "round": state.get("round"),
+        "hp_before": hp_before,
+        "hp_after": hp_after,
+        "hp_delta": hp_delta,
+        "incoming_damage": _incoming_damage(enemies_before),
+        "block_before_end_turn": player_before.get("block", 0),
+        "energy_before_end_turn": state.get("energy"),
+        "enemy_count_before": sum(1 for enemy in enemies_before if _number_or_zero(enemy.get("hp")) > 0),
+        "enemy_count_after": sum(1 for enemy in enemies_after if _number_or_zero(enemy.get("hp")) > 0),
+        "actions": [_combat_turn_board_action(action) for action in actions_this_turn],
+        "transition_changes": [str(item) for item in result.get("changes") or []][:8],
+        "contract": "engine facts only; ignore stored action order for current legal ids",
+    }
+    return entry
+
+
+def _combat_turn_board_action(action: dict[str, Any]) -> dict[str, Any]:
+    keep: dict[str, Any] = {}
+    for key in ("action_kind", "card_name", "card_type", "card_cost_at_play", "engine_action"):
+        value = action.get(key)
+        if value is not None:
+            keep[key] = value
+    target = action.get("target")
+    if isinstance(target, dict):
+        keep["target"] = {key: target.get(key) for key in ("index", "name") if target.get(key) is not None}
+    changes = action.get("observed_changes")
+    if isinstance(changes, list):
+        keep["observed_changes"] = [str(item) for item in changes[:4]]
+    return keep
 
 
 def _combat_mdp_action_fact(
@@ -1002,6 +1146,54 @@ def _combat_mdp_action_fact(
     else:
         fact["engine_action"] = command_action
     return fact
+
+
+def _combat_mdp_reasoning_fact(action: LegalAction, meta: dict[str, Any]) -> dict[str, Any]:
+    parsed = meta.get("parsed") if isinstance(meta.get("parsed"), dict) else {}
+    fact: dict[str, Any] = {
+        "action_label": action.label,
+        "action_kind": action.kind,
+    }
+    reason = _one_line(parsed.get("reason") or meta.get("reason") or "")
+    if reason:
+        fact["reason"] = reason[:320]
+    notes = parsed.get("combat_notes")
+    if isinstance(notes, list):
+        compact_notes = [_one_line(item)[:220] for item in notes if _one_line(item)]
+        if compact_notes:
+            fact["combat_notes"] = compact_notes[:4]
+    turn_check = parsed.get("turn_check")
+    if isinstance(turn_check, dict):
+        compact_turn_check = _compact_turn_check_for_reasoning_pool(turn_check)
+        if compact_turn_check:
+            fact["turn_check"] = compact_turn_check
+    return fact if len(fact) > 2 else {}
+
+
+def _compact_turn_check_for_reasoning_pool(turn_check: dict[str, Any]) -> dict[str, Any]:
+    compact: dict[str, Any] = {}
+    for key in (
+        "primary_goal",
+        "incoming_damage",
+        "survival_requirement",
+        "lethal_available",
+        "first_action_rule",
+        "must_recompute_after",
+    ):
+        value = turn_check.get(key)
+        if value is None:
+            continue
+        if isinstance(value, bool):
+            compact[key] = value
+        elif isinstance(value, list):
+            items = [_one_line(item)[:120] for item in value if _one_line(item)]
+            if items:
+                compact[key] = items[:5]
+        else:
+            text = _one_line(value)
+            if text:
+                compact[key] = text[:220]
+    return compact
 
 
 def _combat_mdp_card(card: dict[str, Any]) -> dict[str, Any]:
@@ -1586,6 +1778,7 @@ def _has_enemy_attack_intent(state: dict[str, Any]) -> bool:
 def _prompt_header(prompt_style: PromptStyle, *, turn_plan_enabled: bool = False) -> list[str]:
     shared = [
         "Each legal action is one atomic benchmark action, not an open-ended plan. Most legal actions execute one engine command; combat_custom_sequence is a model-proposed deterministic card sequence that is validated with the engine before execution.",
+        "combat_custom_sequence may contain only atomic card plays. Do not include cards that draw, discard, exhaust, choose/select, shuffle, generate/discover, upgrade, or use random effects or random targets; play those cards as single legal actions and wait for the next state.",
         "Before choosing combat_custom_sequence, verify it is a deterministic same-turn sequence; sum each step's current cost against current energy and do not include a card that becomes unaffordable or unplayable after earlier steps.",
         "For combat_custom_sequence, card_index values are bound to the initial visible hand snapshot, and every bound card must remain playable after earlier sequence steps resolve. If you cannot verify the whole sequence from the visible hand snapshot, current energy, and prior step effects, use a single legal action instead.",
         f"combat_custom_sequence may contain at most {MAX_CUSTOM_SEQUENCE_VALIDATION_LENGTH} card steps; if a useful line is longer, submit the first safe prefix and wait for the next state.",
@@ -1607,9 +1800,9 @@ def _prompt_header(prompt_style: PromptStyle, *, turn_plan_enabled: bool = False
         'Use route_plan_event {"type":"route_plan_created","new_plan":[{"col":<int>,"row":<int>,"type":"<room type>"}],"reason_tags":["<tag>"],"reason":"<why this route>"} when no active route exists; the new_plan must be complete from the selected legal node to the visible Boss, or visible terminal node when Boss is not present.',
         'Use route_plan_event {"type":"route_plan_updated","old_plan_remaining":[{"col":<int>,"row":<int>,"type":"<room type>"}],"new_plan":[{"col":<int>,"row":<int>,"type":"<room type>"}],"reason_tags":["low_hp|map_changed|avoid_elite|route_override"],"reason":"<why not follow the old route>"} before selecting a different route; route_plan_updated must include a non-empty reason.',
         "A route_plan_event new_plan must be complete from the selected legal map node through visible connected nodes to the visible Boss, or to the visible terminal node when Boss is not present. Do not submit a prefix, partial route, or omitted new_plan.",
-        "Before outputting a route_plan_event, audit the path against Route graph JSON: each adjacent pair in new_plan must appear in the previous node's children unless Winged Boots is available.",
-        "With Winged Boots, submitted new_plan may contain disconnected forward jumps up to the remaining Winged Boots charges shown in route_graph.constraints; every jump must move forward to a later row.",
-        "Every node you include in new_plan must be copied exactly from Route graph JSON nodes: exact col, row, and type strings such as Unknown or RestSite. Do not infer hidden room types and do not rename RestSite to Rest or Unknown to Event.",
+        "Before outputting a route_plan_event, audit the path against the route map JSON: each adjacent pair in new_plan must follow an edge unless Winged Boots is available.",
+        "With Winged Boots, submitted new_plan may contain disconnected forward jumps up to the remaining Winged Boots charges shown in route map constraints; every jump must move forward to a later row.",
+        "Every node you include in new_plan must be copied exactly from route map nodes: exact col, row, and type strings such as Unknown or RestSite. Do not infer hidden room types and do not rename RestSite to Rest or Unknown to Event.",
         "The first route_plan_event new_plan node, when present, must match the selected legal map action. Current legal_actions are the final execution authority. If a newly exposed map changes the route, include reason_tags containing map_changed.",
     ]
     turn_plan_rules = _turn_plan_header_rules() if turn_plan_enabled else []
@@ -1733,7 +1926,7 @@ def _prompt_header(
     sequence_rules = (
         [
             "Each legal action is one atomic benchmark action, not an open-ended plan. Most legal actions execute one engine command; combat_card_sequence is an engine-side queued card sequence, and combat_custom_sequence is a model-proposed deterministic card sequence validated with the engine before execution.",
-            "Choose combat_card_sequence or combat_custom_sequence only for deterministic same-turn combat actions where every listed card is already in hand, currently playable, and does not rely on draw, random effects, discard/exhaust choices, generated cards, or other modal decisions.",
+            "Choose combat_card_sequence or combat_custom_sequence only for deterministic same-turn combat actions where every listed card is already in hand, currently playable, and every card play is atomic. Do not include cards that draw, discard, exhaust, choose/select, shuffle, generate/discover, upgrade, or use random effects or random targets; play those cards as single legal actions and wait for the next state.",
             "Before choosing combat_custom_sequence, verify it is deterministic; sum each step's current cost against current energy and do not include a card that becomes unaffordable or unplayable after earlier steps.",
             "For combat_custom_sequence, card_index values are bound to the initial visible hand snapshot, and every bound card must remain playable after earlier sequence steps resolve. If you cannot verify the whole sequence from the visible hand snapshot, current energy, and prior step effects, use a single legal action instead.",
             f"combat_custom_sequence may contain at most {MAX_CUSTOM_SEQUENCE_VALIDATION_LENGTH} card steps; if a useful line is longer, submit the first safe prefix and wait for the next state.",
@@ -1769,9 +1962,9 @@ def _prompt_header(
         'Use route_plan_event {"type":"route_plan_created","new_plan":[{"col":<int>,"row":<int>,"type":"<room type>"}],"reason_tags":["<tag>"],"reason":"<why this route>"} when no active route exists; the new_plan must be complete from the selected legal node to the visible Boss, or visible terminal node when Boss is not present.',
         'Use route_plan_event {"type":"route_plan_updated","old_plan_remaining":[{"col":<int>,"row":<int>,"type":"<room type>"}],"new_plan":[{"col":<int>,"row":<int>,"type":"<room type>"}],"reason_tags":["low_hp|map_changed|avoid_elite|route_override"],"reason":"<why not follow the old route>"} before selecting a different route; route_plan_updated must include a non-empty reason.',
         "A route_plan_event new_plan must be complete from the selected legal map node through visible connected nodes to the visible Boss, or to the visible terminal node when Boss is not present. Do not submit a prefix, partial route, or omitted new_plan.",
-        "Before outputting a route_plan_event, audit the path against Route graph JSON: each adjacent pair in new_plan must appear in the previous node's children unless Winged Boots is available.",
-        "With Winged Boots, submitted new_plan may contain disconnected forward jumps up to the remaining Winged Boots charges shown in route_graph.constraints; every jump must move forward to a later row.",
-        "Every node you include in new_plan must be copied exactly from Route graph JSON nodes: exact col, row, and type strings such as Unknown or RestSite. Do not infer hidden room types and do not rename RestSite to Rest or Unknown to Event.",
+        "Before outputting a route_plan_event, audit the path against the route map JSON: each adjacent pair in new_plan must follow an edge unless Winged Boots is available.",
+        "With Winged Boots, submitted new_plan may contain disconnected forward jumps up to the remaining Winged Boots charges shown in route map constraints; every jump must move forward to a later row.",
+        "Every node you include in new_plan must be copied exactly from route map nodes: exact col, row, and type strings such as Unknown or RestSite. Do not infer hidden room types and do not rename RestSite to Rest or Unknown to Event.",
         "The first route_plan_event new_plan node, when present, must match the selected legal map action. Current legal_actions are the final execution authority. If a newly exposed map changes the route, include reason_tags containing map_changed.",
     ]
     context_patch_schema = (
@@ -1979,6 +2172,7 @@ class OpenAICompatAgent:
     turn_chat_plan_enabled: bool = False
     turn_check_enabled: bool | None = None
     route_plan_enabled: bool = True
+    route_map_prompt_format: RouteMapPromptFormat = "canonical"
     context_patch_fields_enabled: bool = True
     fallback_mode: FallbackMode = "error"
     self_consistency_enabled: bool = False
@@ -1992,6 +2186,9 @@ class OpenAICompatAgent:
     action_prompt_order: ActionPromptOrderMode = "default"
     action_prompt_order_seed: int | None = 0
     combat_card_sequences_enabled: bool = True
+    combat_reasoning_pool_enabled: bool = False
+    combat_turn_board_enabled: bool = False
+    json_response_format: bool = False
     turn_chat_buffer: TurnChatBuffer = field(init=False)
     combat_mdp_buffer: CombatMdpStateBuffer = field(init=False)
     action_prompt_rng: random.Random = field(init=False, repr=False)
@@ -2020,6 +2217,8 @@ class OpenAICompatAgent:
             raise ValueError("reflection_max_options must be at least 2")
         if self.action_prompt_order not in {"default", "shuffle_map"}:
             raise ValueError(f"Unsupported action_prompt_order: {self.action_prompt_order}")
+        if self.route_map_prompt_format not in {"route_graph", "canonical"}:
+            raise ValueError(f"Unsupported route_map_prompt_format: {self.route_map_prompt_format}")
         self.self_consistency_decisions = _normalize_self_consistency_decisions(self.self_consistency_decisions)
         self.reflection_decisions = _normalize_self_consistency_decisions(self.reflection_decisions)
         self.action_prompt_rng = random.Random(self.action_prompt_order_seed)
@@ -2034,10 +2233,15 @@ class OpenAICompatAgent:
             max_turns=self.turn_chat_window,
             plan_enabled=self.turn_check_enabled,
             route_plan_enabled=self.route_plan_enabled,
+            route_map_prompt_format=self.route_map_prompt_format,
             context_patch_fields_enabled=self.context_patch_fields_enabled,
             combat_card_sequences_enabled=self.combat_card_sequences_enabled,
         )
-        self.combat_mdp_buffer = CombatMdpStateBuffer()
+        self.combat_mdp_buffer = CombatMdpStateBuffer(
+            reasoning_pool_enabled=self.combat_reasoning_pool_enabled,
+            turn_board_enabled=self.combat_turn_board_enabled,
+            route_map_prompt_format=self.route_map_prompt_format,
+        )
 
     def build_prompt(self, state: dict[str, Any], legal_actions: list[LegalAction]) -> str:
         if self.conversation_mode == "turn_chat":
@@ -2071,6 +2275,7 @@ class OpenAICompatAgent:
             memory_text=self.memory.render() if self.memory else "",
             run_summary_text=build_run_summary(state) if self.run_summary_enabled else "",
             route_plan_enabled=self.route_plan_enabled,
+            route_map_prompt_format=self.route_map_prompt_format,
             context_patch_fields_enabled=self.context_patch_fields_enabled,
             combat_card_sequences_enabled=self.combat_card_sequences_enabled,
         )
@@ -2141,6 +2346,7 @@ class OpenAICompatAgent:
                 text = response["choices"][0]["message"]["content"]
                 parsed = parse_json_object(text)
                 action, action_remap, resolved_from_label = _resolve_model_action(parsed, legal_actions)
+                parsed = _normalized_resolved_parsed(parsed, action)
                 usage = response.get("usage")
                 resolution_meta = _action_resolution_meta(action, action_remap, resolved_from_label)
                 self_consistency = self._sample_self_consistency(
@@ -2182,6 +2388,7 @@ class OpenAICompatAgent:
                     "conversation_prompt_chars": _messages_char_count(messages),
                     "attempt": attempt,
                     "elapsed_sec": elapsed,
+                    "json_response_format": self.json_response_format,
                     "raw_response": text,
                     "parsed": parsed,
                     "usage": usage,
@@ -2227,7 +2434,7 @@ class OpenAICompatAgent:
                 )
 
         if self.fallback_mode == "error":
-            raise ModelActionError(_model_action_error_message(last_error, self.max_retries))
+            raise ModelActionError(_model_action_error_message(last_error, self.max_retries, previous_raw_responses))
 
         # Optional deterministic fallback keeps exploratory benchmark batches
         # moving while still recording the invalid model behavior.
@@ -2238,6 +2445,7 @@ class OpenAICompatAgent:
             "conversation_mode": self.conversation_mode,
             "message_count": len(messages),
             "conversation_prompt_chars": _messages_char_count(messages),
+            "json_response_format": self.json_response_format,
             "fallback": True,
             "error": last_error,
             "fallback_action_id": fallback.action_id,
@@ -2285,6 +2493,7 @@ class OpenAICompatAgent:
                 raw_text = response["choices"][0]["message"]["content"]
                 parsed = parse_json_object(raw_text)
                 action, action_remap, resolved_from_label = _resolve_model_action(parsed, legal_actions)
+                parsed = _normalized_resolved_parsed(parsed, action)
                 samples.append(
                     {
                         "entry": _self_consistency_sample_entry(sample_index, action, parsed, primary=False),
@@ -2568,6 +2777,7 @@ class OpenAICompatAgent:
                 text = response["choices"][0]["message"]["content"]
                 parsed = parse_json_object(text)
                 action, action_remap, resolved_from_label = _resolve_model_action(parsed, legal_actions)
+                parsed = _normalized_resolved_parsed(parsed, action)
                 self.turn_chat_buffer.remember_assistant(action, parsed)
                 meta = {
                     "agent": "openai_compat",
@@ -2679,6 +2889,8 @@ class OpenAICompatAgent:
             "messages": messages,
             "temperature": self.temperature,
         }
+        if self.json_response_format:
+            payload["response_format"] = {"type": "json_object"}
         request = urllib.request.Request(
             url,
             data=json.dumps(payload).encode("utf-8"),
@@ -2774,6 +2986,13 @@ def _action_resolution_meta(
     if resolved_from_label:
         meta["action_id_resolved_from_label"] = True
     return meta
+
+
+def _normalized_resolved_parsed(parsed: dict[str, Any], action: LegalAction) -> dict[str, Any]:
+    normalized = dict(parsed)
+    normalized["action_id"] = action.action_id
+    normalized["selected_action_label"] = action.label
+    return normalized
 
 
 def _action_matching_selected_label(
@@ -2965,10 +3184,18 @@ def first_non_view_action(legal_actions: list[LegalAction]) -> LegalAction:
     )
 
 
-def _model_action_error_message(last_error: str | None, max_retries: int) -> str:
+def _model_action_error_message(
+    last_error: str | None,
+    max_retries: int,
+    raw_responses: list[str] | None = None,
+) -> str:
     attempts = max_retries + 1
     reason = last_error or "unknown model action error"
-    return f"LLM failed after {attempts} attempt(s): {reason}"
+    message = f"LLM failed after {attempts} attempt(s): {reason}"
+    if raw_responses:
+        excerpt = _one_line(raw_responses[-1])[:500]
+        message = f"{message}; last_raw_response_excerpt={excerpt!r}"
+    return message
 
 
 def _is_transport_error(exc: Exception) -> bool:

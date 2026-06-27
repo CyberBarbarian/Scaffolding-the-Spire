@@ -706,6 +706,36 @@ def test_agent_from_args_can_build_coordinator_with_combat_mdp_ca():
     assert agent.occ_agent.inner.conversation_mode == "single_turn"
 
 
+def test_agent_from_args_passes_combat_reasoning_pool_to_coordinator_ca():
+    agent = agent_from_args(
+        "coordinator",
+        base_url="http://127.0.0.1:1",
+        model="test",
+        api_key="local",
+        conversation_mode="combat_mdp_state",
+        combat_reasoning_pool_enabled=True,
+    )
+
+    assert agent.ca_agent.combat_reasoning_pool_enabled is True
+    assert agent.ca_agent.combat_mdp_buffer.reasoning_pool_enabled is True
+    assert agent.occ_agent.inner.combat_reasoning_pool_enabled is False
+
+
+def test_agent_from_args_passes_combat_turn_board_to_coordinator_ca():
+    agent = agent_from_args(
+        "coordinator",
+        base_url="http://127.0.0.1:1",
+        model="test",
+        api_key="local",
+        conversation_mode="combat_mdp_state",
+        combat_turn_board_enabled=True,
+    )
+
+    assert agent.ca_agent.combat_turn_board_enabled is True
+    assert agent.ca_agent.combat_mdp_buffer.turn_board_enabled is True
+    assert agent.occ_agent.inner.combat_turn_board_enabled is False
+
+
 def test_run_config_records_coordinator_context_split():
     class Args:
         agent = "coordinator"
@@ -737,6 +767,8 @@ def test_run_config_records_coordinator_context_split():
         include_full_map = True
         allow_repeat_views = False
         allow_custom_sequences = False
+        combat_reasoning_pool_enabled = False
+        combat_turn_board_enabled = False
         out = ""
         log_level = "metrics"
         print_prompts = False
@@ -788,6 +820,8 @@ def test_run_config_records_coordinator_combat_mdp_ca_mode():
         include_full_map = True
         allow_repeat_views = False
         allow_custom_sequences = False
+        combat_reasoning_pool_enabled = False
+        combat_turn_board_enabled = True
         out = ""
         log_level = "metrics"
         print_prompts = False
@@ -799,3 +833,4 @@ def test_run_config_records_coordinator_combat_mdp_ca_mode():
     assert context["mode"] == "coordinator"
     assert context["ca"]["mode"] == "combat_mdp_state"
     assert context["ca"]["turn_process"] == "structured_current_turn_actions"
+    assert context["ca"]["combat_turn_board"] is True

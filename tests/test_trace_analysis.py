@@ -860,6 +860,82 @@ def test_unopened_combat_card_reward_skip_is_reported_as_unknown_candidates(tmp_
     assert "未展开 / candidates unavailable" in deck_report
 
 
+def test_post_card_reward_skip_cleanup_is_not_reported_as_unopened_pack(tmp_path):
+    trace_path = tmp_path / "card_reward_skip_cleanup.jsonl"
+    out_dir = tmp_path / "analysis"
+    rows = [
+        {"type": "start", "seed": "seed-a", "character": "Ironclad", "ascension": 0},
+        _decision(
+            0,
+            _state(
+                "card_reward",
+                act=1,
+                floor=2,
+                room="Elite",
+                hp=50,
+                cards=[
+                    {"index": 0, "name": "Bloodletting"},
+                    {"index": 1, "name": "Anger"},
+                    {"index": 2, "name": "Expect a Fight"},
+                ],
+            ),
+            [
+                {"action_id": 0, "kind": "card_reward", "label": "pick card 0: Bloodletting"},
+                {"action_id": 1, "kind": "card_reward", "label": "pick card 1: Anger"},
+                {"action_id": 2, "kind": "card_reward", "label": "pick card 2: Expect a Fight"},
+                {"action_id": 3, "kind": "card_reward_skip", "label": "skip card reward"},
+            ],
+        ),
+        _action(0, "card_reward", "skip card reward", "card_reward_skip", action_id=3),
+        _decision(
+            1,
+            _state(
+                "combat_reward",
+                act=1,
+                floor=2,
+                room="Elite",
+                hp=50,
+                rewards=[{"index": 0, "kind": "card_reward", "can_claim": False, "can_skip": True}],
+                last_action_result={
+                    "action_label": "skip card reward",
+                    "action_kind": "card_reward_skip",
+                    "decision_before": "card_reward",
+                    "decision_after": "combat_reward",
+                    "changes": ["no visible state changes"],
+                },
+            ),
+            [{"action_id": 0, "kind": "combat_reward_skip", "label": "skip unopened card reward 0"}],
+        ),
+        _action(1, "combat_reward", "skip unopened card reward 0", "combat_reward_skip"),
+        {
+            "type": "result",
+            "result": {
+                "seed": "seed-a",
+                "character": "Ironclad",
+                "ascension": 0,
+                "victory": False,
+                "decision": "game_over",
+                "act": 1,
+                "floor": 2,
+                "room_type": "Elite",
+                "hp": 50,
+                "max_hp": 80,
+                "deck_size": 10,
+                "error": None,
+                "truncated": False,
+            },
+        },
+    ]
+    _write_jsonl(trace_path, rows)
+
+    report = analyze_trace(trace_path, out_dir)
+
+    assert len(report["card_rewards"]) == 1
+    assert report["card_rewards"][0]["selected"] == "skip card reward"
+    assert report["card_rewards"][0]["unopened"] is False
+    assert report["card_rewards"][0]["offered"] == ["Bloodletting", "Anger", "Expect a Fight"]
+
+
 def test_analyze_trace_reconstructs_final_deck_and_writes_chinese_deck_report(tmp_path):
     trace_path = tmp_path / "deck_reconstruction.jsonl"
     out_dir = tmp_path / "analysis"

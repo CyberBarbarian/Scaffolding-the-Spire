@@ -2970,7 +2970,13 @@ def _is_unopened_combat_card_reward_skip(action: dict[str, Any]) -> bool:
     if str(action.get("kind") or "") != "combat_reward_skip":
         return False
     label = str(action.get("label") or "").lower()
-    return "card_reward" in label or "card reward" in label
+    if label.startswith("confirm skipped card reward"):
+        return False
+    before = action.get("before_state") if isinstance(action.get("before_state"), dict) else {}
+    last_result = before.get("last_action_result") if isinstance(before.get("last_action_result"), dict) else {}
+    if last_result.get("action_kind") == "card_reward_skip":
+        return False
+    return "skip unopened card reward" in label or "skip reward" in label and "card_reward" in label
 
 
 def _localized_card(name: str) -> dict[str, Any]:

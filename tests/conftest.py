@@ -6,6 +6,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import pytest
+from sts2_bench.seeds import DEFAULT_TEST_SEED
 
 STS2_CLI_ROOT = Path(__file__).resolve().parents[1]
 REPO_ROOT = STS2_CLI_ROOT
@@ -91,7 +92,7 @@ class Game:
         self.proc.stdin.flush()
         return self._read()
 
-    def start(self, character="Ironclad", seed="test", ascension=0, lang="en"):
+    def start(self, character="Ironclad", seed=DEFAULT_TEST_SEED, ascension=0, lang="en"):
         return self.send({"cmd": "start_run", "character": character,
                           "seed": seed, "ascension": ascension, "lang": lang})
 

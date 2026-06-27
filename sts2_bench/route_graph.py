@@ -11,6 +11,29 @@ from .actions import LegalAction
 Coord = tuple[int, int]
 
 
+ROOM_TYPE_SYMBOLS = {
+    "Ancient": "A",
+    "Monster": "M",
+    "Elite": "E",
+    "RestSite": "R",
+    "Shop": "S",
+    "Treasure": "T",
+    "Unknown": "?",
+    "Boss": "B",
+}
+
+ROUTE_MAP_LEGEND = {
+    "A": "Ancient",
+    "M": "Monster",
+    "E": "Elite",
+    "R": "RestSite",
+    "S": "Shop",
+    "T": "Treasure",
+    "?": "Unknown",
+    "B": "Boss",
+}
+
+
 def build_route_graph(
     map_data: dict[str, Any],
     choices: list[dict[str, Any]] | None = None,
@@ -68,6 +91,77 @@ def build_route_graph(
     }
 
 
+def build_canonical_route_map(
+    map_data: dict[str, Any],
+    choices: list[dict[str, Any]] | None = None,
+    *,
+    legal_actions: list[LegalAction] | None = None,
+    winged_boots_remaining: int | None = None,
+) -> dict[str, Any]:
+    """Build an LLM-facing row/edge map without route-value features."""
+
+    nodes_by_coord = _snapshot_nodes(map_data)
+    action_ids = _map_action_ids_by_coord(legal_actions or [])
+    current = normalize_map_node(map_data.get("current_coord") or {})
+    rows = []
+    for row, coords in _coords_grouped_by_row(nodes_by_coord).items():
+        row_nodes = []
+        for coord in coords:
+            raw_node = nodes_by_coord[coord]
+            node = _canonical_node(raw_node, coord=coord)
+            action_id = action_ids.get(coord)
+            if action_id is not None:
+                node["action_id"] = action_id
+            row_nodes.append(node)
+        rows.append({"row": row, "nodes": row_nodes})
+
+    legal_starts = []
+    for index, raw_choice in enumerate(_visible_choices(choices or [], nodes_by_coord)):
+        choice = _decorate_node(normalize_map_node(raw_choice), nodes_by_coord)
+        if choice is None:
+            continue
+        coord = node_coord(choice)
+        room_type = str(choice.get("type", "?"))
+        start = {
+            "node": canonical_node_id(coord),
+            "symbol": _room_type_symbol(room_type),
+            "type": room_type,
+            "choice_index": index,
+        }
+        action_id = action_ids.get(coord)
+        if action_id is not None:
+            start = {"action_id": action_id, **start}
+        legal_starts.append(start)
+
+    edges = {}
+    for coord in sorted(nodes_by_coord, key=lambda item: (item[1], item[0])):
+        raw_node = nodes_by_coord[coord]
+        children = []
+        for raw_child in raw_node.get("children") or []:
+            child = normalize_map_node(raw_child)
+            if child is None:
+                continue
+            child_coord = node_coord(child)
+            if child_coord in nodes_by_coord:
+                children.append(canonical_node_id(child_coord))
+        edges[canonical_node_id(coord)] = sorted(children, key=_canonical_node_sort_key)
+
+    return {
+        "schema": "sts2_route_map_v1",
+        "legend": ROUTE_MAP_LEGEND,
+        "current": canonical_node_id(node_coord(current)) if current else None,
+        "legal_starts": legal_starts,
+        "rows": rows,
+        "edges": edges,
+        "constraints": {
+            "only_follow_edges": True,
+            "complete_visible_route_required": True,
+            "winged_boots_left": 0 if winged_boots_remaining is None else max(0, min(3, int(winged_boots_remaining))),
+            "winged_boots_rule": "may jump to a later row only when a normal edge is not used",
+        },
+    }
+
+
 def normalize_map_node(value: Any) -> dict[str, Any] | None:
     if not isinstance(value, dict):
         return None
@@ -86,6 +180,10 @@ def node_coord(node: dict[str, Any]) -> Coord:
 
 def make_node_key(coord: Coord) -> str:
     return f"{coord[0]}:{coord[1]}"
+
+
+def canonical_node_id(coord: Coord) -> str:
+    return f"r{coord[1]:02d}c{coord[0]}"
 
 
 def route_graph_node_map(route_graph: dict[str, Any]) -> dict[Coord, dict[str, Any]]:
@@ -146,6 +244,35 @@ def _public_node(raw_node: dict[str, Any], *, coord: Coord | None = None) -> dic
         "type": str(raw_node.get("type", node.get("type", "?"))),
         "node_key": make_node_key(coord),
     }
+
+
+def _canonical_node(raw_node: dict[str, Any], *, coord: Coord) -> dict[str, Any]:
+    room_type = str(raw_node.get("type", "?"))
+    return {
+        "id": canonical_node_id(coord),
+        "col": coord[0],
+        "row": coord[1],
+        "symbol": _room_type_symbol(room_type),
+        "type": room_type,
+    }
+
+
+def _room_type_symbol(room_type: Any) -> str:
+    return ROOM_TYPE_SYMBOLS.get(str(room_type), "?")
+
+
+def _coords_grouped_by_row(nodes_by_coord: dict[Coord, dict[str, Any]]) -> dict[int, list[Coord]]:
+    rows: dict[int, list[Coord]] = {}
+    for coord in sorted(nodes_by_coord, key=lambda item: (item[1], item[0])):
+        rows.setdefault(coord[1], []).append(coord)
+    return rows
+
+
+def _canonical_node_sort_key(node_id: str) -> tuple[int, int]:
+    match = re.fullmatch(r"r(?P<row>-?\d+)c(?P<col>-?\d+)", node_id)
+    if not match:
+        return (0, 0)
+    return int(match.group("row")), int(match.group("col"))
 
 
 def _decorate_node(node: dict[str, Any] | None, nodes_by_coord: dict[Coord, dict[str, Any]]) -> dict[str, Any] | None:

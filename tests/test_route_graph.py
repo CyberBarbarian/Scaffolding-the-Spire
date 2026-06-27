@@ -1,5 +1,5 @@
 from sts2_bench.actions import LegalAction
-from sts2_bench.route_graph import build_route_graph
+from sts2_bench.route_graph import build_canonical_route_map, build_route_graph
 
 
 def _map_action(action_id: int, room_type: str, col: int, row: int) -> LegalAction:
@@ -97,3 +97,55 @@ def test_build_route_graph_can_expose_winged_boots_remaining_jumps():
 
     assert graph["constraints"]["winged_boots_max_forward_jumps"] == 3
     assert graph["constraints"]["winged_boots_remaining_forward_jumps"] == 2
+
+
+def test_build_canonical_route_map_groups_nodes_by_row_and_edges_by_id():
+    full_map = {
+        "type": "map",
+        "current_coord": {"col": 3, "row": 0},
+        "rows": [
+            [{"col": 3, "row": 0, "type": "Ancient", "children": [{"col": 1, "row": 1}, {"col": 3, "row": 1}]}],
+            [
+                {"col": 1, "row": 1, "type": "Monster", "children": [{"col": 2, "row": 2}]},
+                {"col": 3, "row": 1, "type": "Monster", "children": [{"col": 4, "row": 2}]},
+            ],
+            [
+                {"col": 2, "row": 2, "type": "RestSite", "children": [{"col": 3, "row": 3}]},
+                {"col": 4, "row": 2, "type": "Elite", "children": [{"col": 3, "row": 3}]},
+            ],
+            [{"col": 3, "row": 3, "type": "Boss", "children": []}],
+        ],
+        "boss": {"col": 3, "row": 3, "type": "Boss"},
+    }
+
+    route_map = build_canonical_route_map(
+        full_map,
+        [{"col": 1, "row": 1, "type": "Monster"}, {"col": 3, "row": 1, "type": "Monster"}],
+        legal_actions=[_map_action(5, "Monster", 1, 1), _map_action(6, "Monster", 3, 1)],
+        winged_boots_remaining=1,
+    )
+
+    assert route_map["schema"] == "sts2_route_map_v1"
+    assert route_map["current"] == "r00c3"
+    assert route_map["legal_starts"] == [
+        {"action_id": 5, "node": "r01c1", "symbol": "M", "type": "Monster", "choice_index": 0},
+        {"action_id": 6, "node": "r01c3", "symbol": "M", "type": "Monster", "choice_index": 1},
+    ]
+    assert route_map["constraints"]["only_follow_edges"] is True
+    assert route_map["constraints"]["complete_visible_route_required"] is True
+    assert route_map["constraints"]["winged_boots_left"] == 1
+    assert route_map["rows"][1] == {
+        "row": 1,
+        "nodes": [
+            {"id": "r01c1", "col": 1, "row": 1, "symbol": "M", "type": "Monster", "action_id": 5},
+            {"id": "r01c3", "col": 3, "row": 1, "symbol": "M", "type": "Monster", "action_id": 6},
+        ],
+    }
+    assert route_map["edges"] == {
+        "r00c3": ["r01c1", "r01c3"],
+        "r01c1": ["r02c2"],
+        "r01c3": ["r02c4"],
+        "r02c2": ["r03c3"],
+        "r02c4": ["r03c3"],
+        "r03c3": [],
+    }

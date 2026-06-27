@@ -8,8 +8,8 @@ agent: random
 # OpenAI-compatible API 的基础地址。DeepSeek 可以使用 https://api.deepseek.com 或 https://api.deepseek.com/v1。
 base_url: ""
 
-# 调用的模型名称。需要和对应 API provider 支持的模型名一致。
-model: ""
+# 调用的模型名称。默认使用 DeepSeek V4 Pro；这里必须写 provider 模型名 deepseek-v4-pro。
+model: "deepseek-v4-pro"
 
 # Non-secret relay model catalog for local experiment overrides.
 # Keep API keys in .env. For APiHY, use STS2_BENCH_BASE_URL=https://zgc.apihy.com/v1.
@@ -107,7 +107,7 @@ ascension: 0
 # 状态文本语言。en 使用英文；zh 使用中文。
 lang: en
 
-# 固定 seed 文件路径。空字符串表示自动生成 bench_0000、bench_0001 等 seed。
+# 固定 seed 文件路径。空字符串表示使用 sts2_bench/seeds_ironclad_a0.json 里的预设固定 seed。
 seeds: ""
 
 # 本次运行的局数。

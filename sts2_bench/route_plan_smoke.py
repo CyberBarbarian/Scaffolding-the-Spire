@@ -2,11 +2,24 @@
 
 from __future__ import annotations
 
+import argparse
+import json
 import re
+import subprocess
+import sys
+from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from .actions import LegalAction
+from .process import Sts2Process
 from .route_graph import build_route_graph, node_coord as route_node_coord, normalize_map_node, route_graph_node_map
+from .runner import JsonlLogger, run_one
+from .seeds import DEFAULT_TEST_SEED
+from .trace_analysis import analyze_trace
+
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 class RoutePlanSmokeAgent:
@@ -300,3 +313,63 @@ def _coord(node: dict[str, Any]) -> tuple[int, int]:
 def _room_type_from_label(label: str) -> str | None:
     match = re.search(r"go to (?P<type>\w+) at col=", str(label))
     return match.group("type") if match else None
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Run a short real-game route-plan smoke trace.")
+    parser.add_argument("--seed", default=DEFAULT_TEST_SEED)
+    parser.add_argument("--character", default="Ironclad")
+    parser.add_argument("--ascension", type=int, default=0)
+    parser.add_argument("--lang", default="en")
+    parser.add_argument("--max-steps", type=int, default=80)
+    parser.add_argument("--max-game-actions", type=int, default=5)
+    parser.add_argument("--out-dir", type=Path, default=None)
+    parser.add_argument("--verbose-engine", action="store_true")
+    args = parser.parse_args(argv)
+
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    out_dir = args.out_dir or (ROOT / "artifacts" / f"route_plan_smoke_{stamp}")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    trace_path = out_dir / "trace.jsonl"
+    analysis_dir = out_dir / "analysis"
+
+    logger = JsonlLogger(trace_path)
+    process = Sts2Process(build_if_needed=True, stderr=None if args.verbose_engine else subprocess.DEVNULL)
+    try:
+        result = run_one(
+            agent=RoutePlanSmokeAgent(),
+            seed=args.seed,
+            character=args.character,
+            ascension=args.ascension,
+            lang=args.lang,
+            max_steps=args.max_steps,
+            max_game_actions=args.max_game_actions,
+            process=process,
+            logger=logger,
+            include_full_map=True,
+            log_level="decisions",
+        )
+    finally:
+        logger.close()
+        process.close()
+
+    report = analyze_trace(trace_path, analysis_dir)
+    route_events = report.get("route_plan_events") or []
+    validation_errors = report.get("route_plan_validation_errors") or []
+    payload = {
+        "result": result.to_dict(),
+        "trace": str(trace_path),
+        "analysis_dir": str(analysis_dir),
+        "replay": str(analysis_dir / "replay.md"),
+        "route_plan_event_count": len(route_events),
+        "route_plan_validation_error_count": len(validation_errors),
+        "route_plan_event_types": [event.get("event_type") for event in route_events],
+    }
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    if result.error or not route_events or validation_errors:
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))
