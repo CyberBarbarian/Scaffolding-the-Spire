@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import itertools
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 from .sequence_safety import is_sequence_atomic_card
 
 
 MAX_CARD_SEQUENCE_LENGTH = 3
 MAX_CARD_SEQUENCE_ACTIONS = 24
+CustomSequenceExposure = Literal["safe", "eligible"]
 
 
 @dataclass(frozen=True)
@@ -32,6 +33,11 @@ class LegalAction:
             "action_id": self.action_id,
             "kind": self.kind,
             "label": self.label,
+        }
+
+    def to_log_dict(self) -> dict[str, Any]:
+        return {
+            **self.to_prompt_dict(),
             "cmd": self.command,
         }
 
@@ -140,6 +146,19 @@ def _should_expose_custom_sequence(state: dict[str, Any], playable_cards: list[d
     if _has_cumulative_attack_lethal(state, playable_cards):
         return False
     return True
+
+
+def _should_expose_custom_sequence_for_mode(
+    state: dict[str, Any],
+    playable_cards: list[dict[str, Any]],
+    *,
+    exposure: CustomSequenceExposure,
+) -> bool:
+    if exposure == "safe":
+        return _should_expose_custom_sequence(state, playable_cards)
+    if exposure == "eligible":
+        return _has_custom_sequence_entrypoint(state, playable_cards)
+    raise ValueError(f"Unsupported custom_sequence_exposure: {exposure}")
 
 
 def _has_custom_sequence_entrypoint(state: dict[str, Any], playable_cards: list[dict[str, Any]]) -> bool:
@@ -478,7 +497,9 @@ def build_legal_actions(
     *,
     allow_repeat_views: bool = False,
     allow_card_sequences: bool = True,
+    allow_precomputed_card_sequences: bool = False,
     allow_custom_sequences: bool = True,
+    custom_sequence_exposure: CustomSequenceExposure = "safe",
     blocked_card_reward_claims: set[Any] | None = None,
 ) -> list[LegalAction]:
     """Build legal actions from the current decision point.
@@ -524,7 +545,7 @@ def build_legal_actions(
                 continue
             playable_cards.append(card)
             raw.extend(_targeted_card_actions(state, card))
-        if allow_card_sequences:
+        if allow_precomputed_card_sequences:
             raw.extend(_combat_card_sequence_actions(state, playable_cards))
 
         player = state.get("player") or {}
@@ -563,7 +584,11 @@ def build_legal_actions(
             playable_cards
             and allow_card_sequences
             and allow_custom_sequences
-            and _should_expose_custom_sequence(state, playable_cards)
+            and _should_expose_custom_sequence_for_mode(
+                state,
+                playable_cards,
+                exposure=custom_sequence_exposure,
+            )
         ):
             raw.append(_custom_sequence_action())
 

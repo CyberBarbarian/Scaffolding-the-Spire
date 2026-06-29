@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from .actions import LegalAction, build_legal_actions
+from .actions import CustomSequenceExposure, LegalAction, build_legal_actions
 from .agents import Agent
 from .evidence import build_evidence_bundle
 from .process import Sts2Process
@@ -219,7 +219,9 @@ def replay_snapshot_prefix(
     process_factory: Callable[[], Any] | None = None,
     allow_repeat_views: bool = False,
     allow_card_sequences: bool = True,
+    allow_precomputed_card_sequences: bool = False,
     allow_custom_sequences: bool = True,
+    custom_sequence_exposure: CustomSequenceExposure = "safe",
 ) -> PrefixReplayResult:
     """Start a run and replay saved labels to the snapshot entry."""
 
@@ -265,7 +267,9 @@ def replay_snapshot_prefix(
             state,
             allow_repeat_views=allow_repeat_views,
             allow_card_sequences=allow_card_sequences,
+            allow_precomputed_card_sequences=allow_precomputed_card_sequences,
             allow_custom_sequences=allow_custom_sequences,
+            custom_sequence_exposure=custom_sequence_exposure,
         )
         action = _match_saved_action(item, legal_actions, state)
         state = _execute_action(
@@ -298,7 +302,9 @@ def run_combat_snapshot(
     max_game_actions: int | None = None,
     allow_repeat_views: bool = False,
     allow_custom_sequences: bool | None = None,
+    custom_sequence_exposure: CustomSequenceExposure = "safe",
     combat_card_sequences_enabled: bool = True,
+    precomputed_combat_card_sequences_enabled: bool = False,
     log_level: LogLevel = "decisions",
     print_prompts: bool = False,
     print_model_output: bool = False,
@@ -334,6 +340,12 @@ def run_combat_snapshot(
         _allow_custom_sequences_for_agent(agent) if allow_custom_sequences is None else allow_custom_sequences
     )
     card_sequences_enabled = combat_card_sequences_enabled and _allow_card_sequences_for_agent(agent)
+    precomputed_card_sequences_enabled = (
+        precomputed_combat_card_sequences_enabled and _allow_card_sequences_for_agent(agent)
+    )
+    effective_sequence_probe_factory = sequence_probe_factory
+    if effective_sequence_probe_factory is None and _is_save_backed_snapshot(snapshot):
+        effective_sequence_probe_factory = _save_backed_sequence_probe_factory(snapshot)
     active_decisions = set((snapshot.get("stop_policy") or {}).get("active_decisions") or DEFAULT_ACTIVE_DECISIONS)
     route_plan_tracker = RoutePlanTracker() if route_plan_enabled else None
 
@@ -344,7 +356,9 @@ def run_combat_snapshot(
             process=proc,
             allow_repeat_views=allow_repeat_views,
             allow_card_sequences=card_sequences_enabled,
+            allow_precomputed_card_sequences=precomputed_card_sequences_enabled,
             allow_custom_sequences=custom_sequences_enabled,
+            custom_sequence_exposure=custom_sequence_exposure,
         )
         state = replay.state
         action_tape = replay.action_tape
@@ -374,7 +388,9 @@ def run_combat_snapshot(
                 state,
                 allow_repeat_views=allow_repeat_views,
                 allow_card_sequences=card_sequences_enabled,
+                allow_precomputed_card_sequences=precomputed_card_sequences_enabled,
                 allow_custom_sequences=custom_sequences_enabled,
+                custom_sequence_exposure=custom_sequence_exposure,
             )
             evidence_bundle = build_evidence_bundle(
                 state,
@@ -416,7 +432,7 @@ def run_combat_snapshot(
                 legal_actions=legal_actions,
                 prompt=prompt,
                 result=result,
-                logger=None,
+                logger=logger,
                 log_level=log_level,
                 step=step,
                 decision=decision,
@@ -426,7 +442,7 @@ def run_combat_snapshot(
                 seed=seed,
                 ascension=ascension,
                 lang=lang,
-                sequence_probe_factory=sequence_probe_factory,
+                sequence_probe_factory=effective_sequence_probe_factory,
                 route_plan_tracker=route_plan_tracker,
                 route_plan_enabled=route_plan_enabled,
                 route_plan_enforcement=route_plan_enforcement,
@@ -525,6 +541,35 @@ def _execute_action(
     if agent is not None:
         _record_agent_transition(agent, old_state, action, meta, next_state)
     return next_state
+
+
+def _save_backed_sequence_probe_factory(snapshot: dict[str, Any]) -> Callable[[], Any]:
+    load = snapshot.get("load") if isinstance(snapshot.get("load"), dict) else {}
+    path = str(load.get("path") or "")
+    lang = str((snapshot.get("game") or {}).get("lang") or "en")
+
+    class _SaveBackedSequenceProbe:
+        def __init__(self) -> None:
+            self._process = Sts2Process()
+
+        def start(self) -> Any:
+            return self._process.start()
+
+        def start_run(self, **_kwargs: Any) -> dict[str, Any]:
+            state = self._process.send({"cmd": "load_save", "path": path, "lang": lang})
+            if state.get("type") == "error":
+                return state
+            return state
+
+        def send(self, command: dict[str, Any]) -> dict[str, Any]:
+            return self._process.send(command)
+
+        def close(self) -> None:
+            close = getattr(self._process, "close", None)
+            if callable(close):
+                close()
+
+    return _SaveBackedSequenceProbe
 
 
 def _match_saved_action(item: dict[str, Any], legal_actions: list[LegalAction], state: dict[str, Any]) -> LegalAction:
@@ -766,7 +811,9 @@ def main(argv: list[str] | None = None) -> int:
     verify_parser.add_argument("--snapshot", required=True)
     verify_parser.add_argument("--allow-repeat-views", action=argparse.BooleanOptionalAction, default=False)
     verify_parser.add_argument("--allow-custom-sequences", action=argparse.BooleanOptionalAction, default=True)
+    verify_parser.add_argument("--custom-sequence-exposure", choices=["safe", "eligible"], default="safe")
     verify_parser.add_argument("--combat-card-sequences", action=argparse.BooleanOptionalAction, default=True)
+    verify_parser.add_argument("--precomputed-combat-card-sequences", action=argparse.BooleanOptionalAction, default=False)
 
     run_parser = subparsers.add_parser("run", help="Run one agent from a combat snapshot until the fight ends")
     run_parser.add_argument("--snapshot", required=True)
@@ -785,7 +832,9 @@ def main(argv: list[str] | None = None) -> int:
             snapshot,
             allow_repeat_views=args.allow_repeat_views,
             allow_card_sequences=args.combat_card_sequences,
+            allow_precomputed_card_sequences=args.precomputed_combat_card_sequences,
             allow_custom_sequences=args.allow_custom_sequences,
+            custom_sequence_exposure=args.custom_sequence_exposure,
         )
         close = getattr(replay.process, "close", None)
         if callable(close):
@@ -855,7 +904,9 @@ def main(argv: list[str] | None = None) -> int:
             max_game_actions=args.max_game_actions or None,
             allow_repeat_views=args.allow_repeat_views,
             allow_custom_sequences=args.allow_custom_sequences,
+            custom_sequence_exposure=args.custom_sequence_exposure,
             combat_card_sequences_enabled=args.combat_card_sequences,
+            precomputed_combat_card_sequences_enabled=args.precomputed_combat_card_sequences,
             log_level=args.log_level,
             print_prompts=args.print_prompts,
             print_model_output=args.print_model_output,
@@ -904,7 +955,24 @@ def _add_run_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--action-prompt-order-seed", type=int, default=env_int("STS2_BENCH_ACTION_PROMPT_ORDER_SEED", 0))
     parser.add_argument("--allow-repeat-views", action=argparse.BooleanOptionalAction, default=env_bool("STS2_BENCH_ALLOW_REPEAT_VIEWS", False))
     parser.add_argument("--allow-custom-sequences", action=argparse.BooleanOptionalAction, default=env_bool("STS2_BENCH_ALLOW_CUSTOM_SEQUENCES", True))
-    parser.add_argument("--combat-card-sequences", action=argparse.BooleanOptionalAction, default=env_bool("STS2_BENCH_COMBAT_CARD_SEQUENCES", True))
+    parser.add_argument(
+        "--custom-sequence-exposure",
+        choices=["safe", "eligible"],
+        default=env_str("STS2_BENCH_CUSTOM_SEQUENCE_EXPOSURE", "safe"),
+        help="safe keeps conservative gateway gating; eligible exposes combat_custom_sequence whenever the hand has a possible custom sequence entrypoint",
+    )
+    parser.add_argument(
+        "--combat-card-sequences",
+        action=argparse.BooleanOptionalAction,
+        default=env_bool("STS2_BENCH_COMBAT_CARD_SEQUENCES", True),
+        help="Allow model-generated combat_custom_sequence payloads and prompt rules",
+    )
+    parser.add_argument(
+        "--precomputed-combat-card-sequences",
+        action=argparse.BooleanOptionalAction,
+        default=env_bool("STS2_BENCH_PRECOMPUTED_COMBAT_CARD_SEQUENCES", False),
+        help="Expose harness-precomputed combat_card_sequence legal actions",
+    )
     parser.add_argument("--combat-reasoning-pool", action=argparse.BooleanOptionalAction, default=env_bool("STS2_BENCH_COMBAT_REASONING_POOL", False))
     parser.add_argument("--combat-turn-board", action=argparse.BooleanOptionalAction, default=env_bool("STS2_BENCH_COMBAT_TURN_BOARD", False))
     parser.add_argument("--max-steps", type=int, default=80)
@@ -938,7 +1006,9 @@ def _snapshot_run_config(args: argparse.Namespace, snapshot: dict[str, Any]) -> 
         },
         "runner": {
             "allow_custom_sequences": args.allow_custom_sequences,
+            "custom_sequence_exposure": args.custom_sequence_exposure,
             "combat_card_sequences": args.combat_card_sequences,
+            "precomputed_combat_card_sequences": args.precomputed_combat_card_sequences,
             "allow_repeat_views": args.allow_repeat_views,
             "max_steps": args.max_steps,
             "max_game_actions": args.max_game_actions,

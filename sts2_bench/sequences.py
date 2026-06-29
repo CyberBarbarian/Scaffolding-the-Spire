@@ -104,7 +104,10 @@ def normalize_card_sequence_payload(value: Any) -> list[dict[str, int]]:
             raise ValueError(f"sequence step {index} must be an object")
         card_index = raw_step.get("card_index")
         if type(card_index) is not int:
-            raise ValueError(f"sequence step {index} must include integer card_index")
+            raise ValueError(
+                f"sequence step {index} must include top-level integer card_index. "
+                "Do not wrap sequence steps in cmd, action, or args objects"
+            )
         step = {"card_index": card_index}
         target_index = raw_step.get("target_index")
         if target_index is not None:

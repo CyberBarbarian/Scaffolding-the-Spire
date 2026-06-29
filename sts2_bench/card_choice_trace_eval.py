@@ -358,7 +358,7 @@ def _trace_scenario_row(
     }
     if log_level == "full":
         row["state"] = compact_state(state)
-        row["legal_actions"] = [action.to_prompt_dict() for action in legal_actions]
+        row["legal_actions"] = [action.to_log_dict() for action in legal_actions]
         row["prompt"] = prompt
     return row
 

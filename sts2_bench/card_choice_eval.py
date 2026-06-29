@@ -413,7 +413,7 @@ def _scenario_log_row(
     }
     if log_level == "full":
         row["state"] = compact_state(state)
-        row["legal_actions"] = [action.to_prompt_dict() for action in legal_actions]
+        row["legal_actions"] = [action.to_log_dict() for action in legal_actions]
         row["evidence_bundle"] = evidence_bundle.to_dict()
         row["prompt"] = prompt
     return row

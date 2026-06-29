@@ -8,13 +8,17 @@ from sts2_bench.actions import build_legal_actions
 from sts2_bench.agents import (
     ModelActionError,
     OpenAICompatAgent,
+    PromptContract,
     RandomAgent,
     build_compact_assistant_message,
+    build_prompt_contract,
     parse_json_object,
 )
 from sts2_bench.multi_agent import CoordinatorAgent
+from sts2_bench.rest_fullgame_experiment import COMMON_ROUTE_COT_INJECTION, MapPromptInjectionAgent
 from sts2_bench.run_benchmark import _redact_argv, load_benchmark_config
-from sts2_bench.runner import JsonlLogger, _custom_sequence_feedback, agent_from_args, run_one
+from sts2_bench.runner import JsonlLogger, _custom_sequence_feedback, _decision_log_entry, agent_from_args, run_one
+from sts2_bench.sequences import normalize_card_sequence_payload
 from sts2_bench.sequence_validation import validate_custom_sequence
 
 
@@ -30,6 +34,11 @@ def test_parse_json_object_accepts_intro_and_fenced_object():
     )
 
     assert parsed == {"action_id": 1, "reason": "route"}
+
+
+def _json_after(prompt: str, marker: str):
+    start = prompt.index(marker) + len(marker)
+    return json.JSONDecoder().raw_decode(prompt[start:].lstrip())[0]
 
 
 def test_meta_view_actions_include_combat_piles():
@@ -583,7 +592,218 @@ def test_openai_compat_agent_prompt_requires_selected_action_label_echo():
     assert "copy the selected legal action label exactly" in prompt
 
 
-def test_openai_compat_agent_prompt_can_disable_precomputed_card_sequence_actions():
+def test_prompt_contract_is_derived_from_current_decision_and_legal_capabilities():
+    combat_state = _combat_turn_state()
+    combat_contract = build_prompt_contract(
+        combat_state,
+        build_legal_actions(combat_state),
+        route_plan_enabled=True,
+        combat_card_sequences_enabled=True,
+        turn_check_enabled=True,
+    )
+
+    assert combat_contract == PromptContract(
+        route_plan_enabled=False,
+        combat_custom_sequence_enabled=False,
+        context_patch_fields_enabled=True,
+        turn_check_enabled=True,
+    )
+
+    custom_state = _custom_gateway_combat_state()
+    custom_contract = build_prompt_contract(
+        custom_state,
+        build_legal_actions(custom_state),
+        route_plan_enabled=True,
+        combat_card_sequences_enabled=True,
+        turn_check_enabled=True,
+    )
+
+    assert custom_contract == PromptContract(
+        route_plan_enabled=False,
+        combat_custom_sequence_enabled=True,
+        context_patch_fields_enabled=True,
+        turn_check_enabled=True,
+    )
+
+    map_state = {
+        "decision": "map_select",
+        "context": {"act": 1, "floor": 3, "room_type": "Map"},
+        "player": {"hp": 70, "max_hp": 80, "gold": 120, "deck_size": 12},
+        "choices": [],
+    }
+    map_contract = build_prompt_contract(
+        map_state,
+        build_legal_actions(map_state),
+        route_plan_enabled=True,
+        combat_card_sequences_enabled=True,
+        turn_check_enabled=True,
+    )
+
+    assert map_contract == PromptContract(
+        route_plan_enabled=True,
+        combat_custom_sequence_enabled=False,
+        context_patch_fields_enabled=True,
+        turn_check_enabled=False,
+    )
+
+
+def test_prompt_context_matrix_keeps_contract_fragments_decision_scoped_and_bounded():
+    agent = OpenAICompatAgent(
+        base_url="http://127.0.0.1:1",
+        model="test",
+        route_plan_enabled=True,
+        combat_card_sequences_enabled=True,
+        run_summary_enabled=False,
+    )
+    map_state = {
+        "decision": "map_select",
+        "context": {"act": 1, "floor": 3, "room_type": "Map"},
+        "player": {"hp": 70, "max_hp": 80, "gold": 120, "deck_size": 12},
+        "choices": [],
+    }
+    cases = [
+        (
+            "plain_combat",
+            agent.build_prompt(_combat_turn_state(), build_legal_actions(_combat_turn_state())),
+            (),
+            ('"cmd":', "route_plan_event", "combat_custom_sequence", '"sequence"'),
+            9000,
+        ),
+        (
+            "custom_sequence_combat",
+            agent.build_prompt(_custom_gateway_combat_state(), build_legal_actions(_custom_gateway_combat_state())),
+            ("combat_custom_sequence", "top-level integer card_index"),
+            ('"cmd":', "route_plan_event", "combat_card_sequence"),
+            12000,
+        ),
+        (
+            "map",
+            agent.build_prompt(map_state, build_legal_actions(map_state)),
+            ("route_plan_event", "new_plan"),
+            ('"cmd":', "combat_custom_sequence", '"sequence"'),
+            12000,
+        ),
+    ]
+
+    for name, prompt, required, forbidden, max_chars in cases:
+        assert len(prompt) <= max_chars, name
+        for fragment in required:
+            assert fragment in prompt, name
+        for fragment in forbidden:
+            assert fragment not in prompt, name
+
+
+def test_openai_compat_agent_prompt_legal_actions_hide_engine_commands_but_full_trace_keeps_them():
+    agent = OpenAICompatAgent(
+        base_url="http://127.0.0.1:1",
+        model="test",
+        run_summary_enabled=False,
+    )
+    state = _combat_turn_state()
+    legal_actions = build_legal_actions(state)
+
+    prompt = agent.build_prompt(state, legal_actions)
+    prompt_actions = _json_after(prompt, "Legal actions:\n")
+
+    assert prompt_actions
+    assert all("cmd" not in action for action in prompt_actions)
+    assert {"action_id", "kind", "label"} <= set(prompt_actions[0])
+
+    full_entry = _decision_log_entry(
+        log_level="full",
+        step=0,
+        state=state,
+        legal_actions=legal_actions,
+        prompt=prompt,
+    )
+
+    assert full_entry is not None
+    assert any("cmd" in action for action in full_entry["legal_actions"])
+
+
+def test_non_map_prompt_omits_route_plan_contract_even_when_route_plans_are_enabled():
+    agent = OpenAICompatAgent(
+        base_url="http://127.0.0.1:1",
+        model="test",
+        route_plan_enabled=True,
+        run_summary_enabled=False,
+    )
+    state = _combat_turn_state()
+
+    prompt = agent.build_prompt(state, build_legal_actions(state))
+
+    assert "route_plan_event" not in prompt
+    assert "route_plan_created" not in prompt
+    assert "new_plan" not in prompt
+
+
+def test_combat_prompt_without_custom_gateway_omits_custom_sequence_contract():
+    agent = OpenAICompatAgent(
+        base_url="http://127.0.0.1:1",
+        model="test",
+        combat_card_sequences_enabled=True,
+        run_summary_enabled=False,
+    )
+    state = _combat_turn_state()
+    legal_actions = build_legal_actions(state)
+
+    assert not any(action.kind == "combat_custom_sequence" for action in legal_actions)
+
+    prompt = agent.build_prompt(state, legal_actions)
+
+    assert "combat_custom_sequence" not in prompt
+    assert '"sequence"' not in prompt
+
+
+def test_map_prompt_omits_custom_sequence_contract_even_when_sequence_feature_is_enabled():
+    agent = OpenAICompatAgent(
+        base_url="http://127.0.0.1:1",
+        model="test",
+        combat_card_sequences_enabled=True,
+        route_plan_enabled=True,
+        run_summary_enabled=False,
+    )
+    state = {
+        "decision": "map_select",
+        "context": {"act": 1, "floor": 3, "room_type": "Map"},
+        "player": {"hp": 70, "max_hp": 80, "gold": 120, "deck_size": 12},
+        "choices": [],
+    }
+
+    prompt = agent.build_prompt(state, build_legal_actions(state))
+
+    assert "route_plan_event" in prompt
+    assert "combat_custom_sequence" not in prompt
+    assert '"sequence"' not in prompt
+
+
+def test_rest_fullgame_route_cot_wrapper_uses_analysis_style_only_for_map_prompts():
+    base = OpenAICompatAgent(
+        base_url="http://127.0.0.1:1",
+        model="test",
+        prompt_style="analysis",
+        route_plan_enabled=True,
+        run_summary_enabled=False,
+    )
+    agent = MapPromptInjectionAgent(base, condition="control_cot", injection=COMMON_ROUTE_COT_INJECTION)
+    combat_state = _combat_turn_state()
+    map_state = {
+        "decision": "map_select",
+        "context": {"act": 1, "floor": 3, "room_type": "Map"},
+        "player": {"hp": 70, "max_hp": 80, "gold": 120, "deck_size": 12},
+        "choices": [],
+    }
+
+    combat_prompt = agent.build_prompt(combat_state, build_legal_actions(combat_state))
+    map_prompt = agent.build_prompt(map_state, build_legal_actions(map_state))
+
+    assert '"calculations"' not in combat_prompt
+    assert "route_rest_comparison" not in combat_prompt
+    assert '"calculations"' in map_prompt
+    assert "route_rest_comparison" in map_prompt
+
+
+def test_openai_compat_agent_prompt_can_disable_model_generated_sequence_actions():
     agent = OpenAICompatAgent(
         base_url="http://127.0.0.1:1",
         model="test",
@@ -599,6 +819,13 @@ def test_openai_compat_agent_prompt_can_disable_precomputed_card_sequence_action
     assert "sequence" not in prompt
 
 
+def test_combat_play_omits_precomputed_sequence_actions_by_default_but_keeps_custom_gateway():
+    actions = build_legal_actions(_custom_gateway_combat_state())
+
+    assert not any(action.kind == "combat_card_sequence" for action in actions)
+    assert any(action.kind == "combat_custom_sequence" for action in actions)
+
+
 def test_openai_compat_agent_prompt_requires_custom_sequence_cost_audit_without_listed_sequence_bias():
     agent = OpenAICompatAgent(
         base_url="http://127.0.0.1:1",
@@ -610,6 +837,7 @@ def test_openai_compat_agent_prompt_requires_custom_sequence_cost_audit_without_
 
     assert "Before choosing combat_custom_sequence" in prompt
     assert "sum each step's current cost against current energy" in prompt
+    assert "combat_card_sequence" not in prompt
     assert "prefer a listed combat_card_sequence" not in prompt
     assert "If you cannot verify the whole sequence from the visible hand snapshot" in prompt
     assert "If an earlier step can kill or remove a targeted enemy" in prompt
@@ -619,6 +847,25 @@ def test_openai_compat_agent_prompt_requires_custom_sequence_cost_audit_without_
     assert "calculateddamage_by_target" in prompt
     assert "at most 4 card steps" in prompt
     assert "cost audit" in prompt
+    assert "top-level integer card_index" in prompt
+    assert "optional top-level integer target_index" in prompt
+    assert "Do not wrap sequence steps in cmd, action, or args objects" in prompt
+    assert "combat_custom_sequence is an action kind, not a selected_action_label" in prompt
+
+
+def test_combat_mdp_state_prompt_omits_precomputed_sequence_kind():
+    agent = OpenAICompatAgent(
+        base_url="http://127.0.0.1:1",
+        model="test",
+        conversation_mode="combat_mdp_state",
+    )
+    state = _custom_gateway_combat_state()
+
+    prompt = agent.build_prompt(state, build_legal_actions(state))
+
+    assert "combat_custom_sequence" in prompt
+    assert "combat_card_sequence" not in prompt
+    assert "engine-side queued card sequence" not in prompt
 
 
 def test_custom_sequence_feedback_warns_about_targets_removed_by_earlier_steps():
@@ -631,6 +878,24 @@ def test_custom_sequence_feedback_warns_about_targets_removed_by_earlier_steps()
     assert "calculateddamage_by_target" in feedback
     assert "at most 4 card steps" in feedback
     assert "cost audit" in feedback
+    assert "top-level integer card_index" in feedback
+    assert "Do not wrap sequence steps in cmd, action, or args objects" in feedback
+
+
+def test_normalize_card_sequence_payload_rejects_engine_command_wrapped_steps_with_shape_hint():
+    with pytest.raises(ValueError) as exc_info:
+        normalize_card_sequence_payload(
+            [
+                {
+                    "action": "play_card",
+                    "args": {"card_index": 0, "target_index": 0},
+                }
+            ]
+        )
+
+    message = str(exc_info.value)
+    assert "top-level integer card_index" in message
+    assert "Do not wrap sequence steps in cmd, action, or args objects" in message
 
 
 def test_openai_compat_agent_factual_memory_records_transition_diffs_not_reasons():
@@ -862,8 +1127,12 @@ def test_openai_compat_agent_retries_invalid_action_before_strict_error():
     assert meta["previous_errors"] == ["action_id out of range: 99"]
     assert meta["previous_raw_responses"] == [json.dumps({"action_id": 99, "reason": "bad id"})]
     assert len(sent_messages) == 2
-    assert "previous response was invalid" in sent_messages[1][-1]["content"]
-    assert "between 0 and" in sent_messages[1][-1]["content"]
+    retry_text = sent_messages[1][-1]["content"]
+    assert "previous response was invalid" in retry_text
+    assert "between 0 and" in retry_text
+    assert "no combat_custom_sequence gateway is available" in retry_text
+    assert "sequence included only when choosing combat_custom_sequence" not in retry_text
+    assert "top-level integer card_index" not in retry_text
 
 
 def test_openai_compat_agent_self_consistency_logs_votes_without_changing_by_default():
@@ -1163,6 +1432,61 @@ def test_openai_compat_agent_remaps_when_selected_label_matches_current_action()
     assert len(sent_messages) == 1
 
 
+def test_openai_compat_agent_allows_empty_sequence_for_atomic_action():
+    state = _combat_turn_state()
+    actions = build_legal_actions(state)
+    strike = next(action for action in actions if action.kind == "combat_play_card")
+    agent, _sent_messages = _turn_chat_agent(
+        [
+            {
+                "action_id": strike.action_id,
+                "selected_action_label": strike.label,
+                "sequence": [],
+                "reason": "Play Strike now.",
+            }
+        ],
+        fallback_mode="error",
+    )
+
+    action, meta = agent.choose(state, actions)
+
+    assert action == strike
+    assert meta["parsed"]["sequence"] == []
+
+
+def test_openai_compat_agent_retries_noncustom_action_with_nonempty_sequence():
+    state = _custom_gateway_combat_state()
+    actions = build_legal_actions(state)
+    strike = next(action for action in actions if action.kind == "combat_play_card")
+    end_turn = next(action for action in actions if action.kind == "combat_end_turn")
+    agent, sent_messages = _turn_chat_agent(
+        [
+            {
+                "action_id": strike.action_id,
+                "selected_action_label": strike.label,
+                "sequence": [{"card_index": 0, "target_index": 0}, {"card_index": 1}],
+                "reason": "Play Strike now, then Defend.",
+            },
+            {
+                "action_id": end_turn.action_id,
+                "selected_action_label": end_turn.label,
+                "sequence": [],
+                "reason": "Choose a single legal action after correction.",
+            },
+        ],
+        max_retries=1,
+        fallback_mode="error",
+    )
+
+    action, meta = agent.choose(state, actions)
+
+    assert action == end_turn
+    assert meta["attempt"] == 1
+    assert "sequence may only be non-empty when selecting combat_custom_sequence" in "\n".join(
+        message["content"] for message in sent_messages[1]
+    )
+
+
 def test_openai_compat_agent_retries_custom_sequence_when_action_id_label_mismatch():
     state = _custom_gateway_combat_state()
     actions = build_legal_actions(state)
@@ -1195,6 +1519,37 @@ def test_openai_compat_agent_retries_custom_sequence_when_action_id_label_mismat
     assert "combat_custom_sequence requires action_id and selected_action_label" in "\n".join(
         message["content"] for message in sent_messages[1]
     )
+
+
+def test_openai_compat_agent_retries_custom_sequence_kind_label_with_clear_feedback():
+    state = _custom_gateway_combat_state()
+    actions = build_legal_actions(state)
+    end_turn = next(action for action in actions if action.kind == "combat_end_turn")
+    agent, sent_messages = _turn_chat_agent(
+        [
+            {
+                "action_id": -1,
+                "selected_action_label": "combat_custom_sequence",
+                "sequence": [{"card_index": 0, "target_index": 0}, {"card_index": 1}],
+                "reason": "Use the custom sequence gateway.",
+            },
+            {
+                "action_id": end_turn.action_id,
+                "selected_action_label": end_turn.label,
+                "reason": "Use a legal action after correction.",
+            },
+        ],
+        max_retries=1,
+        fallback_mode="error",
+    )
+
+    action, meta = agent.choose(state, actions)
+
+    assert action == end_turn
+    assert meta["attempt"] == 1
+    retry_text = "\n".join(message["content"] for message in sent_messages[1])
+    assert "combat_custom_sequence is an action kind, not a selected_action_label" in retry_text
+    assert "Use the current legal action_id for the custom sequence gateway" in retry_text
 
 
 def test_openai_compat_agent_resolves_missing_action_id_from_exact_selected_label():
@@ -1279,7 +1634,11 @@ def test_openai_compat_agent_retries_unopened_card_reward_skip():
     assert action == claim
     assert meta["attempt"] == 1
     assert "open the card reward first" in meta["previous_errors"][0]
-    assert "previous response was invalid" in sent_messages[1][-1]["content"]
+    retry_text = sent_messages[1][-1]["content"]
+    assert "previous response was invalid" in retry_text
+    assert "no combat_custom_sequence gateway is available" in retry_text
+    assert "sequence included only when choosing combat_custom_sequence" not in retry_text
+    assert "top-level integer card_index" not in retry_text
 
 
 def test_openai_compat_agent_retries_when_selected_label_matches_no_current_action():
@@ -1415,7 +1774,7 @@ def test_combat_play_exposes_atomic_card_sequence_actions():
             },
         ],
     )
-    actions = build_legal_actions(state)
+    actions = build_legal_actions(state, allow_precomputed_card_sequences=True)
 
     sequence = next(action for action in actions if action.kind == "combat_card_sequence")
 
@@ -1455,7 +1814,7 @@ def test_combat_card_sequence_omits_upgrade_or_choice_cards():
         ],
     )
 
-    actions = build_legal_actions(state)
+    actions = build_legal_actions(state, allow_precomputed_card_sequences=True)
 
     assert any(action.label == "play card 0: Armaments" for action in actions)
     assert not any(action.kind == "combat_card_sequence" and "Armaments" in action.label for action in actions)
@@ -1732,6 +2091,54 @@ def test_combat_play_hides_custom_sequence_gateway_when_enemy_has_powers():
 
     assert any(action.label == "play card 0: Strike on enemy 0: Phantasmal Gardener" for action in actions)
     assert not any(action.kind == "combat_custom_sequence" for action in actions)
+
+
+def test_combat_play_can_expose_custom_sequence_gateway_in_eligible_experiment_mode():
+    state = _combat_turn_state(
+        energy=3,
+        hand=[
+            {
+                "index": 0,
+                "name": "Strike",
+                "cost": 1,
+                "type": "Attack",
+                "target_type": "AnyEnemy",
+                "can_play": True,
+                "stats": {
+                    "damage": 7,
+                    "damage_by_target": [{"target_index": 0, "damage": 7, "unblocked_damage": 7}],
+                },
+            },
+            {
+                "index": 1,
+                "name": "Strike",
+                "cost": 1,
+                "type": "Attack",
+                "target_type": "AnyEnemy",
+                "can_play": True,
+                "stats": {
+                    "damage": 7,
+                    "damage_by_target": [{"target_index": 0, "damage": 7, "unblocked_damage": 7}],
+                },
+            },
+        ],
+        enemies=[
+            {
+                "index": 0,
+                "name": "Phantasmal Gardener",
+                "hp": 31,
+                "max_hp": 31,
+                "block": 0,
+                "powers": [{"name": "Skittish", "amount": 6}],
+            }
+        ],
+    )
+
+    actions = build_legal_actions(state, custom_sequence_exposure="eligible")
+
+    assert any(action.label == "play card 0: Strike on enemy 0: Phantasmal Gardener" for action in actions)
+    assert any(action.kind == "combat_custom_sequence" for action in actions)
+    assert not any(action.kind == "combat_card_sequence" for action in actions)
 
 
 def test_combat_play_hides_custom_sequence_gateway_when_player_has_one_shot_free_attack_power():
@@ -2013,10 +2420,26 @@ def test_runner_can_disable_custom_sequence_gateway_for_llm_agents():
     assert not any(action.kind == "combat_custom_sequence" for action in agent.seen_legal_actions)
 
 
-def test_runner_exposes_precomputed_card_sequences_to_llm_agents_by_default():
+def test_runner_hides_precomputed_card_sequences_but_keeps_custom_gateway_by_default():
     agent = _CapturingOpenAIEndTurnAgent()
 
     run_one(agent=agent, seed="test", process=_OneCombatSequenceTurnProcess(), max_steps=1)
+
+    assert agent.seen_legal_actions
+    assert not any(action.kind == "combat_card_sequence" for action in agent.seen_legal_actions)
+    assert any(action.kind == "combat_custom_sequence" for action in agent.seen_legal_actions)
+
+
+def test_runner_can_expose_precomputed_card_sequences_for_diagnostics():
+    agent = _CapturingOpenAIEndTurnAgent()
+
+    run_one(
+        agent=agent,
+        seed="test",
+        process=_OneCombatSequenceTurnProcess(),
+        max_steps=1,
+        precomputed_combat_card_sequences_enabled=True,
+    )
 
     assert agent.seen_legal_actions
     assert any(action.kind == "combat_card_sequence" for action in agent.seen_legal_actions)
@@ -2039,14 +2462,14 @@ def test_runner_can_disable_combat_sequence_actions_for_llm_agents():
     assert not any(action.kind == "combat_custom_sequence" for action in agent.seen_legal_actions)
 
 
-def test_runner_exposes_precomputed_card_sequences_to_coordinator_ca_by_default():
+def test_runner_hides_precomputed_card_sequences_from_coordinator_ca_by_default():
     ca_agent = _CapturingOpenAIEndTurnAgent()
     coordinator = CoordinatorAgent(ca_agent=ca_agent, occ_agent=_CapturingEndTurnAgent())
 
     run_one(agent=coordinator, seed="test", process=_OneCombatSequenceTurnProcess(), max_steps=1)
 
     assert ca_agent.seen_legal_actions
-    assert any(action.kind == "combat_card_sequence" for action in ca_agent.seen_legal_actions)
+    assert not any(action.kind == "combat_card_sequence" for action in ca_agent.seen_legal_actions)
     assert any(action.kind == "combat_custom_sequence" for action in ca_agent.seen_legal_actions)
 
 
@@ -2226,6 +2649,7 @@ def test_runner_executes_card_sequence_as_one_benchmark_action():
         process=process,
         max_steps=1,
         max_game_actions=1,
+        precomputed_combat_card_sequences_enabled=True,
     )
 
     assert [command["args"] for command in process.sent] == [
@@ -3150,7 +3574,7 @@ def test_combat_card_sequence_omits_draw_or_random_cards():
             },
         ],
     )
-    actions = build_legal_actions(state)
+    actions = build_legal_actions(state, allow_precomputed_card_sequences=True)
 
     assert not any(action.kind == "combat_card_sequence" for action in actions)
 

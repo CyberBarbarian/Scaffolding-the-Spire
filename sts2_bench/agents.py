@@ -151,6 +151,55 @@ class ShortTermMemory:
         return "\n".join(f"- {entry}" for entry in self.entries)
 
 
+def _route_plan_contract_enabled(state: dict[str, Any], route_plan_enabled: bool) -> bool:
+    return bool(route_plan_enabled and state.get("decision") == "map_select")
+
+
+def _combat_sequence_contract_enabled(
+    state: dict[str, Any],
+    legal_actions: list[LegalAction],
+    combat_card_sequences_enabled: bool,
+) -> bool:
+    return bool(
+        combat_card_sequences_enabled
+        and state.get("decision") == "combat_play"
+        and any(action.kind == "combat_custom_sequence" for action in legal_actions)
+    )
+
+
+@dataclass(frozen=True)
+class PromptContract:
+    """Decision-scoped response contract exposed to the acting model."""
+
+    route_plan_enabled: bool = False
+    combat_custom_sequence_enabled: bool = False
+    context_patch_fields_enabled: bool = True
+    turn_check_enabled: bool = False
+
+
+def build_prompt_contract(
+    state: dict[str, Any],
+    legal_actions: list[LegalAction],
+    *,
+    route_plan_enabled: bool = True,
+    context_patch_fields_enabled: bool = True,
+    combat_card_sequences_enabled: bool = True,
+    turn_check_enabled: bool = False,
+) -> PromptContract:
+    """Resolve global feature switches to the contract valid for this state."""
+
+    return PromptContract(
+        route_plan_enabled=_route_plan_contract_enabled(state, route_plan_enabled),
+        combat_custom_sequence_enabled=_combat_sequence_contract_enabled(
+            state,
+            legal_actions,
+            combat_card_sequences_enabled,
+        ),
+        context_patch_fields_enabled=bool(context_patch_fields_enabled),
+        turn_check_enabled=bool(turn_check_enabled and state.get("decision") == "combat_play"),
+    )
+
+
 @dataclass
 class TurnChatBuffer:
     """Current-player-turn chat history for an LLM agent.
@@ -189,10 +238,14 @@ class TurnChatBuffer:
             "role": "system",
             "content": build_turn_chat_system_message(
                 prompt_style,
-                turn_check_enabled=self.plan_enabled,
-                route_plan_enabled=self.route_plan_enabled,
-                context_patch_fields_enabled=self.context_patch_fields_enabled,
-                combat_card_sequences_enabled=self.combat_card_sequences_enabled,
+                contract=build_prompt_contract(
+                    state,
+                    legal_actions,
+                    route_plan_enabled=False,
+                    context_patch_fields_enabled=self.context_patch_fields_enabled,
+                    combat_card_sequences_enabled=self.combat_card_sequences_enabled,
+                    turn_check_enabled=self.plan_enabled,
+                ),
             ),
         }
         turn_key = turn_chat_key(state)
@@ -473,11 +526,16 @@ def build_llm_prompt(
     if prompt_style not in {"default", "analysis"}:
         raise ValueError(f"Unknown prompt style: {prompt_style}")
 
-    parts = _prompt_header(
-        prompt_style,
+    contract = build_prompt_contract(
+        state,
+        legal_actions,
         route_plan_enabled=route_plan_enabled,
         context_patch_fields_enabled=context_patch_fields_enabled,
         combat_card_sequences_enabled=combat_card_sequences_enabled,
+    )
+    parts = _prompt_header(
+        prompt_style,
+        contract=contract,
     )
     if run_summary_text:
         parts.extend(["", "Run summary:", run_summary_text])
@@ -533,18 +591,12 @@ def build_llm_prompt(
 def build_turn_chat_system_message(
     prompt_style: PromptStyle,
     *,
-    turn_check_enabled: bool = False,
-    route_plan_enabled: bool = True,
-    context_patch_fields_enabled: bool = True,
-    combat_card_sequences_enabled: bool = True,
+    contract: PromptContract,
 ) -> str:
     return "\n".join(
         _prompt_header(
             prompt_style,
-            turn_check_enabled=turn_check_enabled,
-            route_plan_enabled=route_plan_enabled,
-            context_patch_fields_enabled=context_patch_fields_enabled,
-            combat_card_sequences_enabled=combat_card_sequences_enabled,
+            contract=contract,
         )
     )
 
@@ -627,12 +679,17 @@ def build_combat_mdp_user_message(
     context_patch_fields_enabled: bool = True,
     combat_card_sequences_enabled: bool = True,
 ) -> str:
-    parts = _prompt_header(
-        prompt_style,
-        turn_check_enabled=turn_check_enabled,
+    contract = build_prompt_contract(
+        state,
+        legal_actions,
         route_plan_enabled=route_plan_enabled,
         context_patch_fields_enabled=context_patch_fields_enabled,
         combat_card_sequences_enabled=combat_card_sequences_enabled,
+        turn_check_enabled=turn_check_enabled,
+    )
+    parts = _prompt_header(
+        prompt_style,
+        contract=contract,
     )
     parts.extend(["", "Combat MDP decision."])
     if run_summary_text:
@@ -1775,159 +1832,35 @@ def _has_enemy_attack_intent(state: dict[str, Any]) -> bool:
     return False
 
 
-def _prompt_header(prompt_style: PromptStyle, *, turn_plan_enabled: bool = False) -> list[str]:
-    shared = [
-        "Each legal action is one atomic benchmark action, not an open-ended plan. Most legal actions execute one engine command; combat_custom_sequence is a model-proposed deterministic card sequence that is validated with the engine before execution.",
-        "combat_custom_sequence may contain only atomic card plays. Do not include cards that draw, discard, exhaust, choose/select, shuffle, generate/discover, upgrade, or use random effects or random targets; play those cards as single legal actions and wait for the next state.",
-        "Before choosing combat_custom_sequence, verify it is a deterministic same-turn sequence; sum each step's current cost against current energy and do not include a card that becomes unaffordable or unplayable after earlier steps.",
-        "For combat_custom_sequence, card_index values are bound to the initial visible hand snapshot, and every bound card must remain playable after earlier sequence steps resolve. If you cannot verify the whole sequence from the visible hand snapshot, current energy, and prior step effects, use a single legal action instead.",
-        f"combat_custom_sequence may contain at most {MAX_CUSTOM_SEQUENCE_VALIDATION_LENGTH} card steps; if a useful line is longer, submit the first safe prefix and wait for the next state.",
-        "If an earlier step can kill or remove a targeted enemy, do not point later steps at that enemy; stop the sequence before the removal and wait for the next state.",
-        "When choosing combat_custom_sequence, include a combat_notes cost audit and lethal-target audit; for attacks, use the target-specific damage_by_target or calculateddamage_by_target entry for that target, preferring unblocked_damage when present, not the base stats.damage value.",
-        "If any step applies Vulnerable, Weak, Strength, Dexterity, or another modifier that can change later damage or block previews, stop the sequence at that modifier-changing step and wait for the next state.",
-        "If shown damage is lethal against that enemy's current hp before later targeted steps, stop the sequence at the lethal/removal step and wait for the next state.",
-        "Track cumulative target-specific shown damage per target; once cumulative damage reaches that enemy's current hp, no later sequence step may target it.",
-        "If the sequence depends on draw, random effects, discard/exhaust choices, generated cards, or other modal decisions, use single legal actions instead.",
-        "After playing a card, using a potion, choosing a reward, viewing information, or executing a custom card sequence, you will receive a fresh state and may act again if the game still allows actions.",
-        "In combat_reward, a card_reward entry is an unopened card reward pack. The legal action labeled open card reward only reveals the offered cards; it does not add a card. If both open and skip are legal for that unopened card_reward, open it first so the offered cards become visible; only pick or skip after the next state is card_reward.",
-        "In combat, end turn is the action that intentionally finishes the current turn; do not choose it while useful playable cards or potions remain unless passing is strategically better.",
-        "Enemy intent damage shown in the state is the engine-displayed damage after currently visible modifiers; do not add enemy Strength or other visible modifiers to that intent damage a second time.",
-        "Card damage and block values shown in the state are engine preview values after currently visible player modifiers such as Strength, Dexterity, Frail, Weak, and card-specific temporary effects; do not apply those visible modifiers to shown card damage or block a second time.",
-        "If all visible enemy intents are non-attack intents, enemies are not making attack damage this turn; block usually expires at end of turn, so avoid spending energy only for block unless another effect justifies it.",
-        "View deck/map/pile actions do not advance the game state. They are information requests logged separately; use them when deck composition, pile contents, path context, or current position could affect the decision.",
-        "Evidence context, when present, is advisory only. Evidence modules do not score, rank, recommend, or choose actions; current game state and legal_actions are always authoritative.",
-        'For map_select decisions with a selected map action, include a top-level "route_plan_event" object only when creating or changing a route plan. When executing active_route_plan.expected_next, select that node, omit route_plan_event, and still include a top-level reason for the action.',
-        'Use route_plan_event {"type":"route_plan_created","new_plan":[{"col":<int>,"row":<int>,"type":"<room type>"}],"reason_tags":["<tag>"],"reason":"<why this route>"} when no active route exists; the new_plan must be complete from the selected legal node to the visible Boss, or visible terminal node when Boss is not present.',
-        'Use route_plan_event {"type":"route_plan_updated","old_plan_remaining":[{"col":<int>,"row":<int>,"type":"<room type>"}],"new_plan":[{"col":<int>,"row":<int>,"type":"<room type>"}],"reason_tags":["low_hp|map_changed|avoid_elite|route_override"],"reason":"<why not follow the old route>"} before selecting a different route; route_plan_updated must include a non-empty reason.',
-        "A route_plan_event new_plan must be complete from the selected legal map node through visible connected nodes to the visible Boss, or to the visible terminal node when Boss is not present. Do not submit a prefix, partial route, or omitted new_plan.",
-        "Before outputting a route_plan_event, audit the path against the route map JSON: each adjacent pair in new_plan must follow an edge unless Winged Boots is available.",
-        "With Winged Boots, submitted new_plan may contain disconnected forward jumps up to the remaining Winged Boots charges shown in route map constraints; every jump must move forward to a later row.",
-        "Every node you include in new_plan must be copied exactly from route map nodes: exact col, row, and type strings such as Unknown or RestSite. Do not infer hidden room types and do not rename RestSite to Rest or Unknown to Event.",
-        "The first route_plan_event new_plan node, when present, must match the selected legal map action. Current legal_actions are the final execution authority. If a newly exposed map changes the route, include reason_tags containing map_changed.",
-    ]
-    turn_plan_rules = _turn_plan_header_rules() if turn_plan_enabled else []
+CUSTOM_SEQUENCE_KIND_LABEL_ERROR = (
+    "combat_custom_sequence is an action kind, not a selected_action_label. "
+    "Use the current legal action_id for the custom sequence gateway and copy that legal action label exactly"
+)
 
-    if prompt_style == "analysis":
-        route_plan_schema = (
-            '"route_plan_event":{"type":"<for route plan changes: '
-            'route_plan_created|route_plan_updated; omit when executing active plan>",'
-            '"new_plan":[{"col":<integer>,"row":<integer>,"type":"<exact current map type>"}],'
-            '"reason_tags":["<tag>"],"reason":"<route reason>"}'
-        )
-        schema = (
-            '{"situation":"<current objective and main risk>",'
-            '"calculations":["<damage/block/energy/path/reward calculation if relevant>"],'
-            '"candidates":[{"action_id":<integer>,"label":"<legal action label>",'
-            '"pros":"<why it helps>","cons":"<main risk or cost>"}],'
-            '"action_id":<integer>,"selected_action_label":"<copy exact chosen legal action label>",'
-            '"sequence":[{"card_index":<integer>,"target_index":<integer if needed>}],'
-            '"combat_notes":["<optional factual combat observation, no advice>"],'
-            f"{route_plan_schema},"
-            '"evidence_refs":[<candidate action_id integers from Evidence context if used>],'
-            '"run_plan_patch":{},"run_memory_facts":[],'
-            '"reason":"<final concise reason>"}'
-        )
-        if turn_plan_enabled:
-            schema = (
-                '{"turn_plan":{"objective":"<goal for this visible hand>",'
-                '"survival_check":"<incoming damage and block/kill requirement>",'
-                '"tentative_sequence":["<advisory card/order idea, not commands>"],'
-                '"replan_if":["<state change that invalidates the plan>"]},'
-                '"situation":"<current objective and main risk>",'
-                '"calculations":["<damage/block/energy/path/reward calculation if relevant>"],'
-                '"candidates":[{"action_id":<integer>,"label":"<legal action label>",'
-                '"pros":"<why it helps>","cons":"<main risk or cost>"}],'
-                '"action_id":<integer>,"selected_action_label":"<copy exact chosen legal action label>",'
-                '"sequence":[{"card_index":<integer>,"target_index":<integer if needed>}],'
-                '"combat_notes":["<optional factual combat observation, no advice>"],'
-                f"{route_plan_schema},"
-                '"evidence_refs":[<candidate action_id integers from Evidence context if used>],'
-                '"run_plan_patch":{},"run_memory_facts":[],'
-                '"reason":"<final concise reason>"}'
-            )
-        return [
-            "You are playing Slay the Spire 2 through a headless benchmark environment.",
-            "Choose exactly one legal action. Use only an action_id from the legal action list.",
-            "Also copy the selected legal action label exactly into selected_action_label; action ids are state-local, so never reuse an action_id from earlier messages without checking the current legal actions.",
-            *shared,
-            *turn_plan_rules,
-            "Before choosing, write a compact public analysis in JSON. Analyze the current situation, do any needed arithmetic, compare a few plausible legal actions, then choose.",
-            "Return only valid JSON with this schema:",
-            schema,
-            "For combat, compute enemy attacks from intents yourself and compare playable damage, block, energy, and lethal lines.",
-            "For map choices, compare path rewards and risks. For rewards, compare deck impact.",
-        ]
-
-    route_plan_schema = (
-        '"route_plan_event": {"type": "<for route plan changes: '
-        'route_plan_created|route_plan_updated; omit when executing active plan>", '
-        '"new_plan": [{"col": <integer>, "row": <integer>, "type": "<exact current map type>"}], '
-        '"reason_tags": ["<tag>"], "reason": "<route reason>"}'
-    )
-    schema = (
-        '{"action_id": <integer>, "selected_action_label": "<copy exact chosen legal action label>", '
-        '"sequence": [{"card_index": <integer>, "target_index": <integer if needed>}], '
-        '"combat_notes": ["<optional factual combat observation, no advice>"], '
-        f"{route_plan_schema}, "
-        '"evidence_refs": [<candidate action_id integers from Evidence context if used>], '
-        '"run_plan_patch": {}, "run_memory_facts": [], '
-        '"reason": "<short reason>"}'
-    )
-    if turn_plan_enabled:
-        schema = (
-            '{"turn_plan": {"objective": "<goal for this visible hand>", '
-            '"survival_check": "<incoming damage and block/kill requirement>", '
-            '"tentative_sequence": ["<advisory card/order idea, not commands>"], '
-            '"replan_if": ["<state change that invalidates the plan>"]}, '
-            '"action_id": <integer>, "selected_action_label": "<copy exact chosen legal action label>", '
-            '"sequence": [{"card_index": <integer>, "target_index": <integer if needed>}], '
-            '"combat_notes": ["<optional factual combat observation, no advice>"], '
-            f"{route_plan_schema}, "
-            '"evidence_refs": [<candidate action_id integers from Evidence context if used>], '
-            '"run_plan_patch": {}, "run_memory_facts": [], '
-            '"reason": "<short reason>"}'
-        )
-    return [
-        "You are playing Slay the Spire 2 through a headless benchmark environment.",
-        "Choose exactly one legal action. Return only JSON with this schema:",
-        *shared,
-        "Also copy the selected legal action label exactly into selected_action_label; action ids are state-local, so never reuse an action_id from earlier messages without checking the current legal actions.",
-        *turn_plan_rules,
-        schema,
-    ]
-
-
-def _turn_plan_header_rules() -> list[str]:
-    return [
-        (
-            'When the current user message starts with "New player turn." and the game state '
-            'decision is combat_play, include a top-level "turn_plan" object.'
-        ),
-        (
-            "The turn_plan should plan the visible hand in detail: incoming damage, lethal possibilities, "
-            "block needs, energy, card order, draw/random effects, modal risks, and conditions that require replanning."
-        ),
-        (
-            'For later messages in the same player turn, follow the prior turn_plan when it is still valid; '
-            'if the latest state invalidates it, you may include a top-level "plan_update" string or object.'
-        ),
-        "The turn_plan is advisory history only. Still choose exactly one current legal action_id.",
-    ]
+CUSTOM_SEQUENCE_PAYLOAD_RULE = (
+    "For combat_custom_sequence payloads, sequence must be a list of step objects with top-level integer card_index "
+    "and optional top-level integer target_index. Do not wrap sequence steps in cmd, action, or args objects."
+)
 
 
 def _prompt_header(
     prompt_style: PromptStyle,
     *,
-    turn_check_enabled: bool = False,
-    route_plan_enabled: bool = True,
-    context_patch_fields_enabled: bool = True,
-    combat_card_sequences_enabled: bool = True,
+    contract: PromptContract,
 ) -> list[str]:
+    turn_check_enabled = contract.turn_check_enabled
+    route_plan_enabled = contract.route_plan_enabled
+    context_patch_fields_enabled = contract.context_patch_fields_enabled
+    combat_card_sequences_enabled = contract.combat_custom_sequence_enabled
+
     sequence_rules = (
         [
-            "Each legal action is one atomic benchmark action, not an open-ended plan. Most legal actions execute one engine command; combat_card_sequence is an engine-side queued card sequence, and combat_custom_sequence is a model-proposed deterministic card sequence validated with the engine before execution.",
-            "Choose combat_card_sequence or combat_custom_sequence only for deterministic same-turn combat actions where every listed card is already in hand, currently playable, and every card play is atomic. Do not include cards that draw, discard, exhaust, choose/select, shuffle, generate/discover, upgrade, or use random effects or random targets; play those cards as single legal actions and wait for the next state.",
+            "Each legal action is one atomic benchmark action, not an open-ended plan. Most legal actions execute one engine command; combat_custom_sequence is a model-proposed deterministic card sequence validated with the engine before execution.",
+            "Choose combat_custom_sequence only for deterministic same-turn combat actions where every listed card is already in hand, currently playable, and every card play is atomic. Do not include cards that draw, discard, exhaust, choose/select, shuffle, generate/discover, upgrade, or use random effects or random targets; play those cards as single legal actions and wait for the next state.",
+            "combat_custom_sequence is an action kind, not a selected_action_label; when selecting it, use the current legal action_id for the custom sequence gateway and copy that gateway's exact legal label.",
+            CUSTOM_SEQUENCE_PAYLOAD_RULE,
             "Before choosing combat_custom_sequence, verify it is deterministic; sum each step's current cost against current energy and do not include a card that becomes unaffordable or unplayable after earlier steps.",
+            "Include a non-empty top-level sequence only when the selected legal action is combat_custom_sequence; for any other action, use an empty sequence or omit the field.",
             "For combat_custom_sequence, card_index values are bound to the initial visible hand snapshot, and every bound card must remain playable after earlier sequence steps resolve. If you cannot verify the whole sequence from the visible hand snapshot, current energy, and prior step effects, use a single legal action instead.",
             f"combat_custom_sequence may contain at most {MAX_CUSTOM_SEQUENCE_VALIDATION_LENGTH} card steps; if a useful line is longer, submit the first safe prefix and wait for the next state.",
             "If an earlier step can kill or remove a targeted enemy, do not point later steps at that enemy; stop the sequence before the removal and wait for the next state.",
@@ -1942,7 +1875,7 @@ def _prompt_header(
         ]
     )
     state_update_rule = (
-        "After playing a card, using a potion, choosing a reward, viewing information, or executing a card sequence, you will receive a fresh state and may act again if the game still allows actions."
+        "After playing a card, using a potion, choosing a reward, viewing information, or executing a custom card sequence, you will receive a fresh state and may act again if the game still allows actions."
         if combat_card_sequences_enabled
         else "After playing a card, using a potion, choosing a reward, or viewing information, you will receive a fresh state and may act again if the game still allows actions."
     )
@@ -2015,7 +1948,7 @@ def _prompt_header(
 
     if prompt_style == "analysis":
         sequence_schema_fragment = (
-            '"sequence":[{"card_index":<integer>,"target_index":<integer if needed>}],'
+            '"sequence":[<only when selected action is combat_custom_sequence; otherwise empty>],'
             if combat_card_sequences_enabled
             else ""
         )
@@ -2049,7 +1982,7 @@ def _prompt_header(
         ]
 
     sequence_schema_fragment = (
-        '"sequence": [{"card_index": <integer>, "target_index": <integer if needed>}], '
+        '"sequence": [<only when selected action is combat_custom_sequence; otherwise empty>], '
         if combat_card_sequences_enabled
         else ""
     )
@@ -2077,7 +2010,7 @@ def _prompt_header(
 
 def _turn_check_header_rules(*, combat_card_sequences_enabled: bool = True) -> list[str]:
     sequence_rule = (
-        "Do not write a tentative multi-card script in turn_check. If selecting a listed combat_card_sequence or combat_custom_sequence, justify only that currently legal sequence; otherwise justify only the single selected action."
+        "Do not write a tentative multi-card script in turn_check. If selecting combat_custom_sequence, justify only that currently legal sequence; otherwise justify only the single selected action."
         if combat_card_sequences_enabled
         else "Do not write a tentative multi-card script in turn_check. Justify only the single selected action."
     )
@@ -2416,6 +2349,13 @@ class OpenAICompatAgent:
                     if attempt < self.max_retries:
                         time.sleep(_transport_retry_delay(attempt, exc))
                     continue
+                contract = build_prompt_contract(
+                    state,
+                    legal_actions,
+                    route_plan_enabled=self.route_plan_enabled,
+                    context_patch_fields_enabled=self.context_patch_fields_enabled,
+                    combat_card_sequences_enabled=self.combat_card_sequences_enabled,
+                )
                 messages.append(
                     {
                         "role": "user",
@@ -2424,9 +2364,10 @@ class OpenAICompatAgent:
                             f"Return only JSON with action_id between 0 and {len(legal_actions) - 1}, "
                             "selected_action_label copied exactly from that current legal action label, " +
                             (
-                                "sequence included only when choosing combat_custom_sequence, "
-                                if self.combat_card_sequences_enabled
-                                else "do not include a sequence field because multi-card combat sequences are disabled, "
+                                "sequence included only when choosing combat_custom_sequence. "
+                                f"{CUSTOM_SEQUENCE_KIND_LABEL_ERROR}. {CUSTOM_SEQUENCE_PAYLOAD_RULE} "
+                                if contract.combat_custom_sequence_enabled
+                                else "do not include a sequence field because no combat_custom_sequence gateway is available in this current state, "
                             ) +
                             "and a reason describing the same selected action."
                         ),
@@ -2809,6 +2750,14 @@ class OpenAICompatAgent:
                     if attempt < self.max_retries:
                         time.sleep(_transport_retry_delay(attempt, exc))
                     continue
+                contract = build_prompt_contract(
+                    state,
+                    legal_actions,
+                    route_plan_enabled=False,
+                    context_patch_fields_enabled=self.context_patch_fields_enabled,
+                    combat_card_sequences_enabled=self.combat_card_sequences_enabled,
+                    turn_check_enabled=self.turn_check_enabled,
+                )
                 messages.append(
                     {
                         "role": "user",
@@ -2816,8 +2765,13 @@ class OpenAICompatAgent:
                             f"Your previous response was invalid: {last_error}. "
                             f"Return only JSON with action_id between 0 and {len(legal_actions) - 1}, "
                             "selected_action_label copied exactly from that current legal action label, "
-                            "sequence included only when choosing combat_custom_sequence, "
-                            "and a reason describing the same selected action."
+                            + (
+                                "sequence included only when choosing combat_custom_sequence. "
+                                f"{CUSTOM_SEQUENCE_KIND_LABEL_ERROR}. {CUSTOM_SEQUENCE_PAYLOAD_RULE} "
+                                if contract.combat_custom_sequence_enabled
+                                else "do not include a sequence field because no combat_custom_sequence gateway is available in this current state. "
+                            )
+                            + "and a reason describing the same selected action."
                         ),
                     }
                 )
@@ -2939,6 +2893,8 @@ def _resolve_model_action(
     legal_actions: list[LegalAction],
 ) -> tuple[LegalAction, int | None, bool]:
     selected_label = _selected_action_label(parsed)
+    if _is_custom_sequence_kind_label(selected_label):
+        raise ValueError(CUSTOM_SEQUENCE_KIND_LABEL_ERROR)
     label_action = _action_matching_selected_label(selected_label, legal_actions)
     raw_action_id = parsed.get("action_id")
     custom_label_error = "combat_custom_sequence requires action_id and selected_action_label to identify the same current legal action"
@@ -3012,6 +2968,10 @@ def _action_matching_selected_label(
     return None
 
 
+def _is_custom_sequence_kind_label(selected_label: str) -> bool:
+    return _normalize_for_action_match(selected_label) == "combat custom sequence"
+
+
 def _validate_model_action(parsed: dict[str, Any], action: LegalAction, legal_actions: list[LegalAction]) -> None:
     selected_label = _selected_action_label(parsed)
     if selected_label:
@@ -3020,9 +2980,13 @@ def _validate_model_action(parsed: dict[str, Any], action: LegalAction, legal_ac
                 "selected_action_label does not match selected action: "
                 f"action_id {action.action_id} is {action.label!r}, got {selected_label!r}"
             )
-        if action.kind != "combat_custom_sequence":
-            _validate_unopened_card_reward_skip(action, legal_actions)
-            return
+
+    if action.kind != "combat_custom_sequence" and _has_nonempty_sequence_payload(parsed):
+        raise ValueError("sequence may only be non-empty when selecting combat_custom_sequence")
+
+    if selected_label and action.kind != "combat_custom_sequence":
+        _validate_unopened_card_reward_skip(action, legal_actions)
+        return
 
     if action.kind == "combat_custom_sequence":
         normalize_card_sequence_payload(parsed.get("sequence"))
@@ -3038,6 +3002,17 @@ def _validate_model_action(parsed: dict[str, Any], action: LegalAction, legal_ac
             f"action_id {action.action_id} is {action.label!r}, "
             f"but reason appears to describe {mismatched_action.label!r}"
         )
+
+
+def _has_nonempty_sequence_payload(parsed: dict[str, Any]) -> bool:
+    if "sequence" not in parsed:
+        return False
+    sequence = parsed.get("sequence")
+    if sequence is None or sequence == "":
+        return False
+    if isinstance(sequence, list):
+        return bool(sequence)
+    return True
 
 
 def _validate_unopened_card_reward_skip(action: LegalAction, legal_actions: list[LegalAction]) -> None:

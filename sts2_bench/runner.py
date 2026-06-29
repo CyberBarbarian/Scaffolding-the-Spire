@@ -9,10 +9,12 @@ from pathlib import Path
 from statistics import median
 from typing import Any, Callable, Iterable, Literal
 
-from .actions import LegalAction, build_legal_actions
+from .actions import CustomSequenceExposure, LegalAction, build_legal_actions
 from .agents import (
     ActionPromptOrderMode,
     Agent,
+    CUSTOM_SEQUENCE_KIND_LABEL_ERROR,
+    CUSTOM_SEQUENCE_PAYLOAD_RULE,
     ConversationMode,
     FallbackMode,
     MemoryMode,
@@ -121,7 +123,9 @@ def run_one(
     include_full_map: bool = False,
     allow_repeat_views: bool = False,
     allow_custom_sequences: bool | None = None,
+    custom_sequence_exposure: CustomSequenceExposure = "safe",
     combat_card_sequences_enabled: bool = True,
+    precomputed_combat_card_sequences_enabled: bool = False,
     log_level: LogLevel = "decisions",
     sequence_probe_factory: Callable[[], Sts2Process] | None = None,
     route_plan_enabled: bool = True,
@@ -146,6 +150,9 @@ def run_one(
         _allow_custom_sequences_for_agent(agent) if allow_custom_sequences is None else allow_custom_sequences
     )
     card_sequences_enabled = combat_card_sequences_enabled and _allow_card_sequences_for_agent(agent)
+    precomputed_card_sequences_enabled = (
+        precomputed_combat_card_sequences_enabled and _allow_card_sequences_for_agent(agent)
+    )
 
     state: dict[str, Any] | None = None
     try:
@@ -161,6 +168,7 @@ def run_one(
                 "log_level": log_level,
                 "allow_repeat_views": allow_repeat_views,
                 "allow_card_sequences": card_sequences_enabled,
+                "allow_precomputed_card_sequences": precomputed_card_sequences_enabled,
                 "allow_custom_sequences": custom_sequences_enabled,
                 "route_plan_enabled": route_plan_enabled,
                 "route_plan_enforcement": route_plan_enforcement,
@@ -192,7 +200,9 @@ def run_one(
                 state,
                 allow_repeat_views=allow_repeat_views,
                 allow_card_sequences=card_sequences_enabled,
+                allow_precomputed_card_sequences=precomputed_card_sequences_enabled,
                 allow_custom_sequences=custom_sequences_enabled,
+                custom_sequence_exposure=custom_sequence_exposure,
                 blocked_card_reward_claims=blocked_card_reward_claims,
             )
             evidence_bundle = build_evidence_bundle(
@@ -650,6 +660,7 @@ def _custom_sequence_feedback(validation_error: str) -> str:
     return (
         f"Your previous response was invalid: custom sequence validation failed: {validation_error}. "
         "Choose again from the current legal actions. combat_custom_sequence may contain only atomic card plays. "
+        f"{CUSTOM_SEQUENCE_KIND_LABEL_ERROR}. {CUSTOM_SEQUENCE_PAYLOAD_RULE} "
         "Do not use it for cards that draw, discard, exhaust, choose/select, shuffle, generate/discover, upgrade, "
         "or use random effects or random targets; play those cards as single legal actions instead and wait for "
         "the next state. For custom sequence payloads, sum step costs against current energy, bind card_index values "
@@ -905,7 +916,7 @@ def _print_model_output(*, step: int, decision: Any, action: LegalAction, meta: 
         print("usage:")
         print(json.dumps(usage, ensure_ascii=False, separators=(",", ":")))
     print("selected_action:")
-    print(json.dumps(action.to_prompt_dict(), ensure_ascii=False, separators=(",", ":")))
+    print(json.dumps(action.to_log_dict(), ensure_ascii=False, separators=(",", ":")))
     print(f"===== END MODEL OUTPUT step={step} =====\n", flush=True)
 
 
@@ -964,7 +975,7 @@ def _decision_log_entry(
         entry["skip_action_visible"] = evidence_bundle.skip_action_visible
     if log_level == "full":
         entry["state"] = compact_state(state)
-        entry["legal_actions"] = [action.to_prompt_dict() for action in legal_actions]
+        entry["legal_actions"] = [action.to_log_dict() for action in legal_actions]
         if evidence_bundle is not None:
             entry["evidence_bundle"] = evidence_bundle.to_dict()
         if prompt is not None:
@@ -1030,7 +1041,7 @@ def _action_log_entry(
         "command": _copy_command(action.command),
     }
     if log_level == "full":
-        entry["action"] = action.to_prompt_dict()
+        entry["action"] = action.to_log_dict()
         entry["agent_meta"] = meta
         return entry
 

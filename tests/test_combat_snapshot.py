@@ -7,6 +7,7 @@ from sts2_bench.combat_snapshot import (
     replay_snapshot_prefix,
     run_combat_snapshot,
 )
+from sts2_bench.runner import JsonlLogger
 
 
 def test_extract_combat_snapshot_records_prefix_and_entry(tmp_path):
@@ -176,6 +177,62 @@ def test_run_combat_snapshot_stops_after_the_fight():
     assert result.extra["snapshot_entry_step"] == 3
 
 
+def test_run_combat_snapshot_hides_precomputed_sequences_by_default_but_keeps_custom_gateway():
+    process = _SequenceCombatCompletesProcess()
+    agent = _CaptureKindsAgent()
+
+    result = run_combat_snapshot(
+        snapshot=_sequence_snapshot(),
+        agent=agent,
+        process=process,
+        max_steps=5,
+    )
+
+    assert result.error is None
+    assert "combat_card_sequence" not in agent.kinds
+    assert "combat_custom_sequence" in agent.kinds
+
+
+def test_run_combat_snapshot_can_expose_precomputed_sequences_for_diagnostics():
+    process = _SequenceCombatCompletesProcess()
+    agent = _CaptureKindsAgent()
+
+    result = run_combat_snapshot(
+        snapshot=_sequence_snapshot(),
+        agent=agent,
+        process=process,
+        max_steps=5,
+        precomputed_combat_card_sequences_enabled=True,
+    )
+
+    assert result.error is None
+    assert "combat_card_sequence" in agent.kinds
+    assert "combat_custom_sequence" in agent.kinds
+
+
+def test_run_combat_snapshot_logs_custom_sequence_validation_feedback(tmp_path):
+    process = _SequenceCombatCompletesProcess()
+    agent = _InvalidCustomSequenceThenEndTurnAgent()
+    out = tmp_path / "snapshot.jsonl"
+    logger = JsonlLogger(out)
+
+    try:
+        result = run_combat_snapshot(
+            snapshot=_sequence_snapshot(),
+            agent=agent,
+            process=process,
+            logger=logger,
+            max_steps=5,
+        )
+    finally:
+        logger.close()
+    rows = [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+    assert result.error is None
+    assert result.extra["custom_sequence_validation_retry_count"] == 1
+    assert any(row.get("type") == "custom_sequence_validation_feedback" for row in rows)
+
+
 def test_save_backed_snapshot_loads_save_and_replays_entry_commands(tmp_path):
     process = _SaveBackedProcess()
     save_path = tmp_path / "entry.save"
@@ -233,6 +290,16 @@ def _snapshot() -> dict:
     }
 
 
+def _sequence_snapshot() -> dict:
+    snapshot = _snapshot()
+    snapshot["snapshot_id"] = "sequence_unit_snapshot"
+    snapshot["target"]["state_summary"] = {
+        **_combat_summary(),
+        "hand_count": 2,
+    }
+    return snapshot
+
+
 def _event_state() -> dict:
     return {
         "decision": "event_choice",
@@ -268,6 +335,36 @@ def _combat_state() -> dict:
         "player": {"hp": 51, "max_hp": 82, "gold": 129, "deck_size": 17},
         "energy": 0,
         "hand": [],
+        "enemies": [{"index": 0, "name": "Punch Construct", "hp": 33, "max_hp": 55}],
+    }
+
+
+def _sequence_combat_state() -> dict:
+    return {
+        "decision": "combat_play",
+        "context": {"act": 1, "floor": 12, "room_type": "Event"},
+        "player": {"hp": 51, "max_hp": 82, "gold": 129, "deck_size": 17},
+        "energy": 2,
+        "hand": [
+            {
+                "index": 0,
+                "name": "Strike",
+                "cost": 1,
+                "type": "Attack",
+                "target_type": "AnyEnemy",
+                "can_play": True,
+                "stats": {"damage": 6},
+            },
+            {
+                "index": 1,
+                "name": "Defend",
+                "cost": 1,
+                "type": "Skill",
+                "target_type": "None",
+                "can_play": True,
+                "stats": {"block": 5},
+            },
+        ],
         "enemies": [{"index": 0, "name": "Punch Construct", "hp": 33, "max_hp": 55}],
     }
 
@@ -332,6 +429,16 @@ class _CombatCompletesProcess(_PrefixProcess):
         self.commands.append(command)
         if command == {"cmd": "action", "action": "choose_option", "args": {"option_index": 0}}:
             return _combat_state()
+        if command == {"cmd": "action", "action": "end_turn"}:
+            return _reward_state()
+        raise AssertionError(f"unexpected command: {command!r}")
+
+
+class _SequenceCombatCompletesProcess(_PrefixProcess):
+    def send(self, command):
+        self.commands.append(command)
+        if command == {"cmd": "action", "action": "choose_option", "args": {"option_index": 0}}:
+            return _sequence_combat_state()
         if command == {"cmd": "action", "action": "end_turn"}:
             return _reward_state()
         raise AssertionError(f"unexpected command: {command!r}")
@@ -418,6 +525,41 @@ class _EndTurnAgent:
         del state, prompt
         action = next(action for action in legal_actions if action.kind == "combat_end_turn")
         return action, {"agent": "test", "parsed": {"reason": "End the turn."}}
+
+
+class _CaptureKindsAgent(_EndTurnAgent):
+    def __init__(self):
+        self.kinds = []
+
+    def choose(self, state, legal_actions, *, prompt=None):
+        self.kinds = [action.kind for action in legal_actions]
+        return super().choose(state, legal_actions, prompt=prompt)
+
+
+class _InvalidCustomSequenceThenEndTurnAgent(_EndTurnAgent):
+    def __init__(self):
+        self.calls = 0
+
+    def choose(self, state, legal_actions, *, prompt=None):
+        self.calls += 1
+        if self.calls == 1:
+            action = next(action for action in legal_actions if action.kind == "combat_custom_sequence")
+            return action, {
+                "agent": "test",
+                "parsed": {
+                    "action_id": action.action_id,
+                    "selected_action_label": action.label,
+                    "sequence": [
+                        {"card_index": 0, "target_index": 0},
+                        {"card_index": 1},
+                        {"card_index": 0, "target_index": 0},
+                        {"card_index": 1},
+                        {"card_index": 0, "target_index": 0},
+                    ],
+                    "reason": "Invalid overlong custom sequence.",
+                },
+            }
+        return super().choose(state, legal_actions, prompt=prompt)
 
 
 class _SaveBackedProcess:

@@ -44,7 +44,9 @@ CONFIG_ENV_KEYS = {
     "include_full_map": "STS2_BENCH_INCLUDE_FULL_MAP",
     "allow_repeat_views": "STS2_BENCH_ALLOW_REPEAT_VIEWS",
     "allow_custom_sequences": "STS2_BENCH_ALLOW_CUSTOM_SEQUENCES",
+    "custom_sequence_exposure": "STS2_BENCH_CUSTOM_SEQUENCE_EXPOSURE",
     "combat_card_sequences_enabled": "STS2_BENCH_COMBAT_CARD_SEQUENCES",
+    "precomputed_combat_card_sequences_enabled": "STS2_BENCH_PRECOMPUTED_COMBAT_CARD_SEQUENCES",
     "combat_reasoning_pool_enabled": "STS2_BENCH_COMBAT_REASONING_POOL",
     "combat_turn_board_enabled": "STS2_BENCH_COMBAT_TURN_BOARD",
     "route_plan_enabled": "STS2_BENCH_ROUTE_PLAN_ENABLED",
@@ -451,7 +453,11 @@ def build_run_config(args: argparse.Namespace, seeds: list[str], argv: list[str]
             "include_full_map": args.include_full_map,
             "allow_repeat_views": args.allow_repeat_views,
             "allow_custom_sequences": bool(getattr(args, "allow_custom_sequences", True)),
+            "custom_sequence_exposure": getattr(args, "custom_sequence_exposure", "safe"),
             "combat_card_sequences": bool(getattr(args, "combat_card_sequences_enabled", True)),
+            "precomputed_combat_card_sequences": bool(
+                getattr(args, "precomputed_combat_card_sequences_enabled", False)
+            ),
             "combat_reasoning_pool": bool(getattr(args, "combat_reasoning_pool_enabled", False)),
             "combat_turn_board": bool(getattr(args, "combat_turn_board_enabled", False)),
         },
@@ -723,11 +729,24 @@ def main(argv: list[str] | None = None) -> int:
         help="Expose the model-proposed combat_custom_sequence gateway for LLM agents",
     )
     parser.add_argument(
+        "--custom-sequence-exposure",
+        choices=["safe", "eligible"],
+        default=env_str("STS2_BENCH_CUSTOM_SEQUENCE_EXPOSURE", "safe"),
+        help="safe keeps conservative gateway gating; eligible exposes combat_custom_sequence whenever the hand has a possible custom sequence entrypoint",
+    )
+    parser.add_argument(
         "--combat-card-sequences",
         action=argparse.BooleanOptionalAction,
         dest="combat_card_sequences_enabled",
         default=env_bool("STS2_BENCH_COMBAT_CARD_SEQUENCES", True),
-        help="Expose combat_card_sequence and combat_custom_sequence actions",
+        help="Allow model-generated combat_custom_sequence payloads and prompt rules",
+    )
+    parser.add_argument(
+        "--precomputed-combat-card-sequences",
+        action=argparse.BooleanOptionalAction,
+        dest="precomputed_combat_card_sequences_enabled",
+        default=env_bool("STS2_BENCH_PRECOMPUTED_COMBAT_CARD_SEQUENCES", False),
+        help="Expose harness-precomputed combat_card_sequence legal actions",
     )
     parser.add_argument(
         "--combat-reasoning-pool",
@@ -830,7 +849,9 @@ def main(argv: list[str] | None = None) -> int:
                 include_full_map=args.include_full_map,
                 allow_repeat_views=args.allow_repeat_views,
                 allow_custom_sequences=args.allow_custom_sequences,
+                custom_sequence_exposure=args.custom_sequence_exposure,
                 combat_card_sequences_enabled=args.combat_card_sequences_enabled,
+                precomputed_combat_card_sequences_enabled=args.precomputed_combat_card_sequences_enabled,
                 log_level=args.log_level,
                 route_plan_enabled=args.route_plan_enabled,
                 route_plan_enforcement=args.route_plan_enforcement,

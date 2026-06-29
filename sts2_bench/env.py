@@ -150,7 +150,7 @@ class Sts2Env:
 
     def info(self) -> dict[str, Any]:
         return {
-            "legal_actions": [action.to_prompt_dict() for action in self.legal_actions],
+            "legal_actions": [action.to_log_dict() for action in self.legal_actions],
             "action_mask": self.action_mask(),
         }
 

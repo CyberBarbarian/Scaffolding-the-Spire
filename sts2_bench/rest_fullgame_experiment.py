@@ -85,10 +85,19 @@ class MapPromptInjectionAgent:
         self.injection = injection
 
     def build_prompt(self, state: dict[str, Any], legal_actions: list[LegalAction]) -> str:
-        prompt = self.base.build_prompt(state, legal_actions)
         if state.get("decision") == "map_select":
+            prompt = self.base.build_prompt(state, legal_actions)
             return prompt + self.injection
-        return prompt
+
+        prompt_style = self.base.prompt_style
+        if prompt_style != "analysis":
+            return self.base.build_prompt(state, legal_actions)
+
+        self.base.prompt_style = "default"
+        try:
+            return self.base.build_prompt(state, legal_actions)
+        finally:
+            self.base.prompt_style = prompt_style
 
     def choose(
         self,

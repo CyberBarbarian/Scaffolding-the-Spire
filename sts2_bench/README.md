@@ -2,9 +2,10 @@
 
 Python benchmark and LLM-policy harness for the STS2 headless JSON protocol.
 
-This package is the benchmark/research layer.  It deliberately avoids the HTTP
-bridge under `agent/`: benchmark runs start `src/Sts2Headless` as a subprocess
-and communicate through stdin/stdout JSON.  The runtime adapter remains in
+This package is the benchmark/research layer.  It deliberately avoids the
+legacy HTTP bridge under `legacy/agent-http-bridge/`: benchmark runs start
+`src/Sts2Headless` as a subprocess and communicate through stdin/stdout JSON.
+The runtime adapter remains in
 `sts2-cli`; this package owns policy prompting, legal-action presentation,
 validation, trace logging, and offline analysis.
 
@@ -33,8 +34,8 @@ selects exactly one current legal `action_id`.
 - `sequence_validation.py` - engine-backed custom sequence probe.
 - `runner.py` - benchmark loop, action validation/retry bus, execution, metrics,
   and JSONL trace logging.
-- `run_benchmark.py` - command-line benchmark runner.
-- `trace_analysis.py` - offline replay and failure-analysis artifacts.
+- `run_benchmark.py` - implementation behind the `python -m sts2_bench run` command.
+- `trace_analysis.py` - implementation behind the `python -m sts2_bench trace-analysis` command.
 - `env.py` - dependency-free RL-style environment with action masks.
 
 ## Runtime Flow
@@ -431,19 +432,19 @@ python -m pip install -r sts2_bench/requirements.txt
 Show CLI options without starting the game:
 
 ```bash
-python -m sts2_bench.run_benchmark --help
+python -m sts2_bench run --help
 ```
 
 Start the headless process and read the ready message:
 
 ```bash
-python -m sts2_bench.process
+python -m sts2_bench process-smoke
 ```
 
 Run one random-policy game:
 
 ```bash
-python -m sts2_bench.run_benchmark \
+python -m sts2_bench run \
   --agent random \
   --character Ironclad \
   --ascension 0 \
@@ -457,8 +458,11 @@ The LLM agent expects an OpenAI-compatible chat completions endpoint.  Examples
 include Ollama, LM Studio, vLLM, and llama.cpp server.
 
 Non-secret defaults live in `sts2_bench/benchmark.yaml`.  The tracked defaults
-run the random baseline with generated seeds so a fresh checkout is safe before
-LLM credentials are configured.  Local secrets still come from `.env`.
+run the random baseline with the preconfigured fixed seeds in
+`sts2_bench/seeds_ironclad_a0.json` so a fresh checkout is reproducible before
+LLM credentials are configured.  The default model is DeepSeek V4 Pro, written
+as the provider model name `deepseek-v4-pro`; local provider URLs and secrets
+still come from `.env`.
 
 Supported `.env` keys:
 
@@ -481,6 +485,10 @@ Supported `benchmark.yaml` keys include:
 Precedence is: CLI arguments, shell environment variables, `.env`,
 `sts2_bench/benchmark.yaml`, then code defaults.
 
+When `--seeds` is omitted, runs use the preconfigured fixed seed pool and take
+the first `--count` seeds.  If `--count` exceeds that pool, pass an explicit
+`--seeds` file.
+
 Ollama example:
 
 ```bash
@@ -491,7 +499,7 @@ ollama pull qwen2.5:14b
 Run a coordinator benchmark:
 
 ```bash
-python -m sts2_bench.run_benchmark \
+python -m sts2_bench run \
   --agent coordinator \
   --base-url http://127.0.0.1:11434/v1 \
   --model qwen2.5:14b \
@@ -505,7 +513,7 @@ For strict floor benchmarks, keep `max_steps` high enough that it acts as a
 safety cap rather than the main stopping condition:
 
 ```bash
-python -m sts2_bench.run_benchmark \
+python -m sts2_bench run \
   --agent coordinator \
   --count 10 \
   --max-steps 10000 \
@@ -528,7 +536,7 @@ Each scenario is a controlled `card_reward` state with three pick actions and a
 first-class `skip card reward` action.
 
 For a Chinese design and usage walkthrough, see
-`docs/card-choice-eval-zh.md`.
+`docs/evaluations/card-choice/card-choice-eval-zh.md`.
 
 The evaluation still uses the real harness path:
 
@@ -542,7 +550,7 @@ included in the prompt, evidence bundle, or agent metadata.
 Run a local coordinator model:
 
 ```bash
-python -m sts2_bench.card_choice_eval \
+python -m sts2_bench card-choice \
   --agent coordinator \
   --base-url http://127.0.0.1:11434/v1 \
   --model qwen2.5:14b \
@@ -552,7 +560,7 @@ python -m sts2_bench.card_choice_eval \
 Useful filters:
 
 ```bash
-python -m sts2_bench.card_choice_eval \
+python -m sts2_bench card-choice \
   --agent coordinator \
   --base-url http://127.0.0.1:11434/v1 \
   --model qwen2.5:14b \
@@ -584,7 +592,7 @@ logs evidence summaries; `full` logs full evidence and the prompt.
 After a run, generate a compact replay and failure-analysis bundle:
 
 ```bash
-python -m sts2_bench.trace_analysis \
+python -m sts2_bench trace-analysis \
   results/coordinator_floor_benchmark.jsonl \
   --out-dir artifacts/trace_analysis/coordinator_floor_benchmark
 ```
@@ -639,6 +647,22 @@ For Gymnasium/SB3 integration, wrap `Sts2Env` and use:
 The RL environment is separate from the pure-LLM coordinator harness.  It should
 not inherit evidence modules or LLM prompt assumptions unless a later experiment
 explicitly chooses to expose those features.
+
+## Prompt Contract Boundaries
+
+Model-facing prompts, trace logs, and engine commands are separate interfaces.
+`LegalAction.to_prompt_dict()` is the model surface and exposes only
+`action_id`, `kind`, and `label`.  Full traces, eval artifacts, and RL `info`
+use the log surface with the raw `cmd` mapping so command tapes remain
+replayable without leaking engine protocol details into prompts.
+
+`agents.py` derives a `PromptContract` for every decision from the current
+state and legal action list.  Global feature switches are only capabilities:
+route-plan schema is exposed only on `map_select`, custom sequence schema is
+exposed only when the current `combat_play` legal actions include the
+`combat_custom_sequence` gateway, and `turn_check` is combat-only.  Experiment
+wrappers should add instructions by decision type instead of changing an
+agent-wide prompt style when only one decision surface needs the behavior.
 
 ## Design Boundaries
 
