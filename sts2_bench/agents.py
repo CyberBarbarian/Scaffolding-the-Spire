@@ -27,6 +27,7 @@ from .context import (
 from .route_graph import build_canonical_route_map, build_route_graph
 from .route_plan import winged_boots_remaining_for_state
 from .sequences import MAX_CUSTOM_SEQUENCE_VALIDATION_LENGTH, normalize_card_sequence_payload
+from .sequence_safety import sequence_card_block_reason
 
 
 PromptStyle = Literal["default", "analysis"]
@@ -1254,7 +1255,8 @@ def _compact_turn_check_for_reasoning_pool(turn_check: dict[str, Any]) -> dict[s
 
 
 def _combat_mdp_card(card: dict[str, Any]) -> dict[str, Any]:
-    return {
+    block_reasons = _combat_mdp_sequence_block_reasons(card)
+    compact = {
         "index": card.get("index"),
         "name": name(card.get("name")),
         "type": card.get("type"),
@@ -1262,7 +1264,21 @@ def _combat_mdp_card(card: dict[str, Any]) -> dict[str, Any]:
         "can_play": card.get("can_play"),
         "target_type": card.get("target_type"),
         "stats": _combat_mdp_stats(card.get("stats")),
+        "sequence_eligible": not block_reasons,
     }
+    for source_key in ("id", "description", "raw_description", "text"):
+        value = _combat_mdp_text(card.get(source_key))
+        if value:
+            compact[source_key] = value
+    keywords = card.get("keywords")
+    if isinstance(keywords, list) and keywords:
+        compact["keywords"] = [str(keyword) for keyword in keywords[:12]]
+    if block_reasons:
+        compact["sequence_block_reasons"] = block_reasons
+    recompute = _combat_mdp_recompute_reasons(card)
+    if recompute:
+        compact["must_recompute_after_play"] = recompute
+    return compact
 
 
 def _combat_mdp_enemy(enemy: dict[str, Any]) -> dict[str, Any]:
@@ -1296,19 +1312,95 @@ def _combat_mdp_power(power: dict[str, Any]) -> dict[str, Any]:
 def _combat_mdp_stats(stats: Any) -> dict[str, Any]:
     if not isinstance(stats, dict):
         return {}
-    keep = (
-        "damage",
-        "calculateddamage",
-        "block",
-        "calculatedblock",
-        "damage_by_target",
-        "calculateddamage_by_target",
-        "vulnerablepower",
-        "weakpower",
-        "strengthpower",
-        "dexteritypower",
-    )
-    return {key: stats.get(key) for key in keep if key in stats}
+    compact: dict[str, Any] = {}
+    for key, value in stats.items():
+        stat = _combat_mdp_stat_value(value)
+        if stat is not None:
+            compact[str(key)] = stat
+    return compact
+
+
+def _combat_mdp_stat_value(value: Any, *, depth: int = 0) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, (str, int, float, bool)):
+        return value
+    if depth >= 3:
+        return _one_line(value)[:120]
+    if isinstance(value, list):
+        return [_combat_mdp_stat_value(item, depth=depth + 1) for item in value[:12]]
+    if isinstance(value, dict):
+        compact: dict[str, Any] = {}
+        for key, item in value.items():
+            stat = _combat_mdp_stat_value(item, depth=depth + 1)
+            if stat is not None:
+                compact[str(key)] = stat
+        return compact
+    return _one_line(value)[:120]
+
+
+def _combat_mdp_text(value: Any) -> str:
+    if isinstance(value, dict):
+        text = name(value)
+    else:
+        text = _one_line(value)
+    return text[:300]
+
+
+def _combat_mdp_sequence_block_reasons(card: dict[str, Any]) -> list[str]:
+    reasons: list[str] = []
+    if card.get("can_play") is False:
+        reasons.append("card is not currently playable")
+    block_reason = sequence_card_block_reason(card, allowed_target_types={"None", "Self", "AnyEnemy", "AllEnemies"})
+    if block_reason:
+        reasons.append(block_reason)
+    return reasons
+
+
+def _combat_mdp_recompute_reasons(card: dict[str, Any]) -> list[str]:
+    text = _combat_mdp_card_search_text(card)
+    stats = card.get("stats") if isinstance(card.get("stats"), dict) else {}
+    stat_keys = {str(key).lower() for key in stats}
+    reasons: list[str] = []
+
+    def add(reason: str) -> None:
+        if reason not in reasons:
+            reasons.append(reason)
+
+    if "draw" in text or "draw" in stat_keys or "cards" in stat_keys:
+        add("draw")
+    if "discard" in text or "discard" in stat_keys:
+        add("hand_change")
+    if "exhaust" in text or "exhaust" in stat_keys:
+        add("hand_change")
+    if "random" in text or "random" in stat_keys or "random" in str(card.get("target_type") or "").lower():
+        add("random_effect")
+    if any(marker in text or marker in stat_keys for marker in ("choose", "select", "discover", "generate")):
+        add("modal_or_generated_effect")
+    if "shuffle" in text or "shuffle" in stat_keys:
+        add("deck_order_change")
+    if "upgrade" in text or "upgrade" in stat_keys:
+        add("card_state_change")
+    if any(key in stat_keys for key in ("vulnerablepower", "weakpower", "strengthpower", "dexteritypower")):
+        add("modifier_change")
+    return reasons
+
+
+def _combat_mdp_card_search_text(card: dict[str, Any]) -> str:
+    parts = [
+        name(card.get("name")),
+        str(card.get("id") or ""),
+        _combat_mdp_text(card.get("description")),
+        _combat_mdp_text(card.get("raw_description")),
+        _combat_mdp_text(card.get("text")),
+        str(card.get("target_type") or ""),
+    ]
+    keywords = card.get("keywords")
+    if isinstance(keywords, list):
+        parts.extend(str(keyword) for keyword in keywords)
+    stats = card.get("stats") if isinstance(card.get("stats"), dict) else {}
+    parts.extend(str(key) for key in stats)
+    return " ".join(part for part in parts if part).lower()
 
 
 def _incoming_damage(enemies: list[dict[str, Any]]) -> int:

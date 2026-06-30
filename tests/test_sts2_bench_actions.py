@@ -2522,6 +2522,59 @@ def test_openai_compat_agent_combat_mdp_state_accepts_custom_sequence_payload():
     assert "combat_custom_sequence" in sent_messages[0][1]["content"]
 
 
+def test_openai_compat_agent_combat_mdp_state_preserves_card_effect_text_and_sequence_safety():
+    state = _combat_turn_state(
+        hand=[
+            {
+                "index": 0,
+                "id": "CARD.POMMEL_STRIKE",
+                "name": "Pommel Strike",
+                "cost": 1,
+                "type": "Attack",
+                "target_type": "AnyEnemy",
+                "can_play": True,
+                "description": "Deal 9 damage. Draw 1 card.",
+                "stats": {"damage": 9, "cards": 1},
+            },
+            {
+                "index": 1,
+                "id": "CARD.TRUE_GRIT",
+                "name": "True Grit",
+                "cost": 1,
+                "type": "Skill",
+                "target_type": "Self",
+                "can_play": True,
+                "description": "Gain 7 Block. Exhaust 1 card at random.",
+                "stats": {"block": 7, "exhaust": 1},
+            },
+        ]
+    )
+    actions = build_legal_actions(state, custom_sequence_exposure="eligible")
+    end_turn = next(action for action in actions if action.kind == "combat_end_turn")
+    agent, sent_messages = _combat_mdp_agent([{"action_id": end_turn.action_id, "reason": "No safe sequence."}])
+
+    agent.choose(state, actions)
+
+    prompt = sent_messages[0][1]["content"]
+    mdp_state = _json_after(prompt, "Combat MDP state JSON:\n")
+    by_name = {card["name"]: card for card in mdp_state["hand_snapshot"]}
+
+    pommel = by_name["Pommel Strike"]
+    assert pommel["description"] == "Deal 9 damage. Draw 1 card."
+    assert pommel["stats"]["cards"] == 1
+    assert pommel["sequence_eligible"] is False
+    assert any("draw" in reason for reason in pommel["sequence_block_reasons"])
+    assert "draw" in pommel["must_recompute_after_play"]
+
+    true_grit = by_name["True Grit"]
+    assert true_grit["description"] == "Gain 7 Block. Exhaust 1 card at random."
+    assert true_grit["stats"]["exhaust"] == 1
+    assert true_grit["sequence_eligible"] is False
+    assert any("exhaust" in reason or "random" in reason for reason in true_grit["sequence_block_reasons"])
+    assert "random_effect" in true_grit["must_recompute_after_play"]
+    assert "hand_change" in true_grit["must_recompute_after_play"]
+
+
 class _ChooseSequenceAgent:
     def build_prompt(self, state, legal_actions):
         return ""
