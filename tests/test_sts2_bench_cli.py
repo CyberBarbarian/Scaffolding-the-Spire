@@ -79,7 +79,6 @@ def test_unified_cli_dispatches_experiment_commands(monkeypatch):
     assert cli.main(["card-choice-trace", "--trace", "trace.jsonl", "--out", "results/replay.jsonl"]) == 0
     assert cli.main(["combat-snapshot", "extract", "--trace", "trace.jsonl", "--start-step", "3", "--out", "snapshot.json"]) == 0
     assert cli.main(["trace-analysis", "trace.jsonl", "--out-dir", "artifacts/trace_analysis/run"]) == 0
-    assert cli.main(["route-smoke", "--seed", "smoke"]) == 0
     assert cli.main(["process-smoke"]) == 0
 
     assert calls == [
@@ -88,7 +87,6 @@ def test_unified_cli_dispatches_experiment_commands(monkeypatch):
         ("sts2_bench.card_choice_trace_eval", ["--trace", "trace.jsonl", "--out", "results/replay.jsonl"]),
         ("sts2_bench.combat_snapshot", ["extract", "--trace", "trace.jsonl", "--start-step", "3", "--out", "snapshot.json"]),
         ("sts2_bench.trace_analysis", ["trace.jsonl", "--out-dir", "artifacts/trace_analysis/run"]),
-        ("sts2_bench.route_plan_smoke", ["--seed", "smoke"]),
         ("sts2_bench.process", []),
     ]
 
@@ -103,7 +101,6 @@ def test_unified_cli_help_lists_public_commands(capsys):
     assert "card-choice" in output
     assert "combat-snapshot" in output
     assert "process-smoke" in output
-    assert "route-smoke" in output
 
 
 def test_unified_cli_rejects_unknown_command():
@@ -125,8 +122,3 @@ def test_process_smoke_help_does_not_start_runtime(monkeypatch, capsys):
     assert process.main(["--help"]) == 0
     assert "process-smoke" in capsys.readouterr().out
 
-
-def test_route_plan_smoke_module_exposes_cli_main():
-    from sts2_bench import route_plan_smoke
-
-    assert callable(route_plan_smoke.main)

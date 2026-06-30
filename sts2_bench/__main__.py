@@ -21,7 +21,6 @@ COMMANDS: dict[str, Command] = {
     "card-choice-trace": Command("sts2_bench.card_choice_trace_eval", "Replay card reward choices from traces."),
     "combat-snapshot": Command("sts2_bench.combat_snapshot", "Extract, verify, or run combat snapshots."),
     "trace-analysis": Command("sts2_bench.trace_analysis", "Generate replay and failure-analysis artifacts."),
-    "route-smoke": Command("sts2_bench.route_plan_smoke", "Run the real-game route-plan smoke trace."),
     "process-smoke": Command("sts2_bench.process", "Start the headless process and print its ready message."),
 }
 

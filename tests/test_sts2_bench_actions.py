@@ -15,7 +15,6 @@ from sts2_bench.agents import (
     parse_json_object,
 )
 from sts2_bench.multi_agent import CoordinatorAgent
-from sts2_bench.rest_fullgame_experiment import COMMON_ROUTE_COT_INJECTION, MapPromptInjectionAgent
 from sts2_bench.run_benchmark import _redact_argv, load_benchmark_config
 from sts2_bench.runner import JsonlLogger, _custom_sequence_feedback, _decision_log_entry, agent_from_args, run_one
 from sts2_bench.sequences import normalize_card_sequence_payload
@@ -775,32 +774,6 @@ def test_map_prompt_omits_custom_sequence_contract_even_when_sequence_feature_is
     assert "route_plan_event" in prompt
     assert "combat_custom_sequence" not in prompt
     assert '"sequence"' not in prompt
-
-
-def test_rest_fullgame_route_cot_wrapper_uses_analysis_style_only_for_map_prompts():
-    base = OpenAICompatAgent(
-        base_url="http://127.0.0.1:1",
-        model="test",
-        prompt_style="analysis",
-        route_plan_enabled=True,
-        run_summary_enabled=False,
-    )
-    agent = MapPromptInjectionAgent(base, condition="control_cot", injection=COMMON_ROUTE_COT_INJECTION)
-    combat_state = _combat_turn_state()
-    map_state = {
-        "decision": "map_select",
-        "context": {"act": 1, "floor": 3, "room_type": "Map"},
-        "player": {"hp": 70, "max_hp": 80, "gold": 120, "deck_size": 12},
-        "choices": [],
-    }
-
-    combat_prompt = agent.build_prompt(combat_state, build_legal_actions(combat_state))
-    map_prompt = agent.build_prompt(map_state, build_legal_actions(map_state))
-
-    assert '"calculations"' not in combat_prompt
-    assert "route_rest_comparison" not in combat_prompt
-    assert '"calculations"' in map_prompt
-    assert "route_rest_comparison" in map_prompt
 
 
 def test_openai_compat_agent_prompt_can_disable_model_generated_sequence_actions():

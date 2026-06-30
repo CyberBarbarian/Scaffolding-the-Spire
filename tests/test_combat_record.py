@@ -63,35 +63,6 @@ def test_run_one_writes_per_combat_record_with_commands_and_hp_loss(tmp_path):
     ]
 
 
-def test_rest_fullgame_worker_command_passes_combat_record_options(tmp_path):
-    from sts2_bench.rest_fullgame_experiment import CONDITIONS, _worker_command, build_parser
-
-    args = build_parser().parse_args(
-        [
-            "--out-dir",
-            str(tmp_path / "run"),
-            "--combat-record-dir",
-            str(tmp_path / "records"),
-            "--no-combat-records",
-        ]
-    )
-
-    cmd = _worker_command(
-        args=args,
-        condition=CONDITIONS[0],
-        seed="bench_0000",
-        out_dir=tmp_path / "run",
-        trace_path=tmp_path / "run" / "traces" / "trace.jsonl",
-        analysis_dir=tmp_path / "run" / "analysis" / "case",
-        result_path=tmp_path / "run" / "worker_results" / "case.json",
-    )
-
-    assert "--combat-record-dir" in cmd
-    assert cmd[cmd.index("--combat-record-dir") + 1] == str(tmp_path / "records")
-    assert "--no-combat-records" in cmd
-    assert "--combat-records" not in cmd
-
-
 class _EndTurnAgent:
     def build_prompt(self, state, legal_actions):
         return ""
