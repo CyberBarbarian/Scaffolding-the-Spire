@@ -259,6 +259,8 @@ class RoutePlanTracker:
                 winged_boots_remaining=winged_boots_remaining,
                 step=step,
             )
+        if event_type == "route_plan_created" and selected_matches_plan:
+            return self._consume_followed(map_revision=map_revision, act=state_act)
 
         return RoutePlanValidationResult(
             [],
@@ -799,15 +801,22 @@ def _route_plan_feedback(code: str, message: str) -> str:
             "route_graph until the selected path reaches the visible Boss node, or the visible terminal node when "
             "Boss is not present in route_graph. "
         )
+    map_changed_hint = ""
+    if code in {"route_plan_invalid_after_map_change", "route_plan_update_missing_map_changed_reason"}:
+        map_changed_hint = (
+            'For this retry, do not silently follow the old active route. Emit route_plan_updated and include '
+            'reason_tags containing the separate string "map_changed". '
+        )
     return (
         f"Your previous map choice violated route-plan validation ({code}): {message} "
         f"{missing_created_hint}"
         f"{topology_hint}"
         f"{incomplete_hint}"
+        f"{map_changed_hint}"
         "If you have no active route plan, emit route_plan_created with a complete new_plan whose first node is the selected legal map node. "
         "If you are executing the active route, choose the planned next node and do not emit route_plan_event. "
         "If you need to change route, emit route_plan_updated with reason_tags, a non-empty reason, and a complete new_plan from the selected legal node. "
-        "If the map changed, include reason_tags containing map_changed. Then choose again."
+        'If the map changed, include reason_tags containing the separate string "map_changed". Then choose again.'
     )
 
 

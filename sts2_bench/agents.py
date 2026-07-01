@@ -783,9 +783,11 @@ def _route_graph_prompt_lines(
                     "Active route plan is advisory context, not a binding commitment. Evaluate the current MDP state: "
                     "choose from current state, legal_actions, route_graph, deck, relics, boss, and recent state changes. "
                     "If following active_route_plan.expected_next, select expected_next and omit route_plan_event while "
-                    "still explaining the action in reason. If changing route, select a different legal map action and "
-                    "emit route_plan_updated with reason, reason_tags, and a complete new_plan from the selected legal "
-                    "node to the visible Boss or visible terminal node."
+                    "still explaining the action in reason. You can follow expected_next only when that exact node is "
+                    "currently selectable in legal_actions. If expected_next is absent from legal_actions, or newly "
+                    "revealed map structure changes the route, select a legal map action and emit route_plan_updated "
+                    'with reason_tags including the separate string "map_changed", a non-empty reason, and a complete '
+                    "new_plan from the selected legal node to the visible Boss or visible terminal node."
                 ),
             ]
         )
@@ -1985,12 +1987,12 @@ def _prompt_header(
     route_plan_rules = [
         'For map_select decisions with a selected map action, include a top-level "route_plan_event" object only when creating or changing a route plan. When executing active_route_plan.expected_next, select that node, omit route_plan_event, and still include a top-level reason for the action.',
         'Use route_plan_event {"type":"route_plan_created","new_plan":[{"col":<int>,"row":<int>,"type":"<room type>"}],"reason_tags":["<tag>"],"reason":"<why this route>"} when no active route exists; the new_plan must be complete from the selected legal node to the visible Boss, or visible terminal node when Boss is not present.',
-        'Use route_plan_event {"type":"route_plan_updated","old_plan_remaining":[{"col":<int>,"row":<int>,"type":"<room type>"}],"new_plan":[{"col":<int>,"row":<int>,"type":"<room type>"}],"reason_tags":["low_hp|map_changed|avoid_elite|route_override"],"reason":"<why not follow the old route>"} before selecting a different route; route_plan_updated must include a non-empty reason.',
+        'Use route_plan_event {"type":"route_plan_updated","old_plan_remaining":[{"col":<int>,"row":<int>,"type":"<room type>"}],"new_plan":[{"col":<int>,"row":<int>,"type":"<room type>"}],"reason_tags":["low_hp","map_changed","avoid_elite","route_override"],"reason":"<why not follow the old route>"} before selecting a different route; route_plan_updated must include a non-empty reason.',
         "A route_plan_event new_plan must be complete from the selected legal map node through visible connected nodes to the visible Boss, or to the visible terminal node when Boss is not present. Do not submit a prefix, partial route, or omitted new_plan.",
         "Before outputting a route_plan_event, audit the path against the route map JSON: each adjacent pair in new_plan must follow an edge unless Winged Boots is available.",
         "With Winged Boots, submitted new_plan may contain disconnected forward jumps up to the remaining Winged Boots charges shown in route map constraints; every jump must move forward to a later row.",
         "Every node you include in new_plan must be copied exactly from route map nodes: exact col, row, and type strings such as Unknown or RestSite. Do not infer hidden room types and do not rename RestSite to Rest or Unknown to Event.",
-        "The first route_plan_event new_plan node, when present, must match the selected legal map action. Current legal_actions are the final execution authority. If a newly exposed map changes the route, include reason_tags containing map_changed.",
+        "The first route_plan_event new_plan node, when present, must match the selected legal map action. Current legal_actions are the final execution authority. If a newly exposed map changes the route, route_plan_updated is required and reason_tags must include the separate string \"map_changed\".",
     ]
     context_patch_schema = (
         '"evidence_refs":[<candidate action_id integers from Evidence context if used>],'

@@ -399,7 +399,6 @@ def _canonical_cards(cards: list[Any]) -> list[dict[str, Any]]:
         result.append(
             {
                 "index": card.get("index"),
-                "instance_id": card.get("instance_id"),
                 "name": _name(card.get("name")),
                 "cost": card.get("cost"),
                 "energy_cost": card.get("energy_cost"),
@@ -420,7 +419,6 @@ def _canonical_enemies(enemies: list[Any]) -> list[dict[str, Any]]:
         result.append(
             {
                 "index": enemy.get("index"),
-                "instance_id": enemy.get("instance_id"),
                 "name": _name(enemy.get("name")),
                 "hp": enemy.get("hp"),
                 "max_hp": enemy.get("max_hp"),
@@ -441,7 +439,6 @@ def _canonical_items(items: list[Any]) -> list[dict[str, Any]]:
             result.append(
                 {
                     "index": item.get("index", item.get("slot_index", item.get("slot"))),
-                    "instance_id": item.get("instance_id"),
                     "name": _name(item.get("name")),
                     "id": item.get("id"),
                     "amount": item.get("amount"),

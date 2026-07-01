@@ -2,7 +2,7 @@ import json
 
 from sts2_bench.actions import LegalAction
 from sts2_bench.agents import OpenAICompatAgent, build_llm_prompt
-from sts2_bench.route_plan import RoutePlanTracker
+from sts2_bench.route_plan import ActiveRoutePlan, RoutePlanTracker
 from sts2_bench.runner import JsonlLogger, agent_from_args, run_one
 
 
@@ -689,6 +689,32 @@ def test_empty_route_plan_event_placeholder_is_treated_as_omitted_when_following
     assert result.events == []
 
 
+def test_redundant_created_event_is_treated_as_follow_when_selected_node_matches_active_route():
+    tracker = RoutePlanTracker()
+    snapshot = _full_map(edges={(0, 0): [(0, 1)], (0, 1): [(1, 2)]})
+    first_action = _map_action(0, "Monster", 0, 1)
+    tracker.validate_and_apply(
+        state=_map_state(choices=[{"col": 0, "row": 1, "type": "Monster"}], full_map=snapshot),
+        legal_actions=[first_action],
+        action=first_action,
+        meta={"parsed": {"route_plan_event": _event("route_plan_created", [(0, 1, "Monster"), (1, 2, "Elite")])}},
+        step=0,
+    )
+    elite = _map_action(0, "Elite", 1, 2)
+
+    result = tracker.validate_and_apply(
+        state=_map_state(choices=[{"col": 1, "row": 2, "type": "Elite"}], full_map=snapshot),
+        legal_actions=[elite],
+        action=elite,
+        meta={"parsed": {"route_plan_event": _event("route_plan_created", [(1, 2, "Elite")])}},
+        step=1,
+    )
+
+    assert result.error is None
+    assert result.events == []
+    assert tracker.active is None
+
+
 def test_blank_route_plan_event_type_is_rejected_when_following_active_route():
     tracker = RoutePlanTracker()
     first_action = _map_action(0, "Monster", 0, 1)
@@ -879,6 +905,7 @@ def test_map_prompt_instructs_llm_to_emit_route_plan_event():
     assert "omit route_plan_event" in prompt
     assert "new_plan" in prompt
     assert "reason_tags" in prompt
+    assert '"reason_tags":["low_hp","map_changed","avoid_elite","route_override"]' in prompt
     assert "Canonical route map JSON:" in prompt
     assert "Route graph JSON:" not in prompt
     assert '"id":"r01c0"' in prompt
@@ -1029,11 +1056,39 @@ def test_map_prompt_includes_active_route_plan_context():
     assert '"expected_next":{"col":1,"row":2,"type":"Elite"}' in prompt
     assert '"role":"advisory_current_state_feature"' in prompt
     assert "Active route plan is advisory context, not a binding commitment" in prompt
+    assert "You can follow expected_next only when that exact node is currently selectable in legal_actions" in prompt
+    assert 'reason_tags including the separate string "map_changed"' in prompt
     assert "choose from current state, legal_actions, route_graph, deck, relics, boss, and recent state changes" in prompt
     assert "select expected_next and omit route_plan_event" in prompt
     assert "route_plan_updated" in prompt
     assert "risk_score" not in prompt
     assert "stickiness" not in prompt
+
+
+def test_map_changed_feedback_requires_explicit_map_changed_tag():
+    state = _map_state(
+        choices=[{"col": 1, "row": 2, "type": "Elite"}, {"col": 2, "row": 2, "type": "RestSite"}],
+        full_map=_full_map(current=(0, 1), edges={(0, 1): [(1, 2), (2, 2)]}),
+    )
+    tracker = RoutePlanTracker()
+    tracker.active = ActiveRoutePlan(
+        plan_id="rp_001",
+        remaining=[{"col": 3, "row": 3, "type": "Boss"}],
+        map_revision="old_revision",
+        act=1,
+    )
+
+    result = tracker.validate_and_apply(
+        state=state,
+        legal_actions=[_map_action(0, "Elite", 1, 2), _map_action(1, "RestSite", 2, 2)],
+        action=_map_action(0, "Elite", 1, 2),
+        meta={"parsed": {"action_id": 0, "reason": "try old route"}},
+        step=7,
+    )
+
+    assert result.error is not None
+    assert "route_plan_updated" in result.error.feedback
+    assert 'separate string "map_changed"' in result.error.feedback
 
 
 def test_runner_exposes_active_route_plan_to_next_map_decision(tmp_path):
