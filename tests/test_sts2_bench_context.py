@@ -1,4 +1,4 @@
-from sts2_bench.context import build_last_action_result, compact_state, render_full_map, render_state_text
+from sts2_bench.context import build_last_action_result, combat_skill_hints, compact_state, render_full_map, render_state_text
 
 
 def test_view_deck_uses_full_card_rendering():
@@ -53,6 +53,107 @@ def test_view_deck_uses_full_card_rendering():
     assert "upgrade: damage 6 -> 9" in text
     assert "upgrade_description: Deal 9 damage." in text
     assert "tip: Attack: Attacks are played against enemies." in text
+
+
+def test_combat_skill_hints_are_state_triggered_and_rendered():
+    state = {
+        "decision": "combat_play",
+        "context": {"act": 1, "floor": 6, "room_type": "Elite"},
+        "player": {"hp": 34, "max_hp": 80, "block": 2, "gold": 10, "deck_size": 12},
+        "round": 2,
+        "energy": 3,
+        "max_energy": 3,
+        "draw_pile_count": 5,
+        "discard_pile_count": 2,
+        "enemies": [
+            {
+                "index": 0,
+                "name": "Cultist",
+                "hp": 10,
+                "max_hp": 48,
+                "block": 0,
+                "intents": [{"type": "Attack", "damage": 6, "hits": 1}],
+            },
+            {
+                "index": 1,
+                "name": "Louse",
+                "hp": 8,
+                "max_hp": 14,
+                "block": 0,
+                "intents": [{"type": "Buff"}],
+            },
+        ],
+        "hand": [
+            {"index": 0, "name": "Bloodletting", "type": "Skill", "cost": 0, "description": "Lose 3 HP. Gain 2 Energy."},
+            {"index": 1, "name": "Pommel Strike", "type": "Attack", "cost": 1, "stats": {"damage": 9, "draw": 1}},
+        ],
+    }
+
+    hints = combat_skill_hints(state)
+    text = render_state_text(state)
+
+    assert hints == [
+        "order: lethal > survival > reduce actions > damage/setup; one action",
+        "survive: block/kill until safe; stop overblocking",
+        "kill_now: enemy[1] hp=8 dies to one card; avoid spread/setup",
+        "self_damage: only for lethal, survival, or a concrete same-turn play",
+    ]
+    assert "Combat skills:" in text
+    assert "kill_now: enemy[1] hp=8 dies to one card" in text
+    assert "self_damage: only for lethal, survival" in text
+
+
+def test_combat_skill_hints_no_attack_discourage_pure_block():
+    state = {
+        "decision": "combat_play",
+        "context": {"act": 1, "floor": 17, "room_type": "Boss"},
+        "player": {"hp": 54, "max_hp": 86, "block": 0, "gold": 143, "deck_size": 21},
+        "round": 1,
+        "energy": 3,
+        "max_energy": 3,
+        "draw_pile_count": 14,
+        "discard_pile_count": 0,
+        "enemies": [
+            {
+                "index": 0,
+                "name": "Lagavulin Matriarch",
+                "hp": 222,
+                "max_hp": 222,
+                "block": 12,
+                "intents": [{"type": "Sleep"}],
+            }
+        ],
+        "hand": [{"index": 0, "name": "Defend", "type": "Skill", "cost": 1, "stats": {"block": 5}}],
+    }
+
+    hints = combat_skill_hints(state)
+
+    assert "no_attack: skip pure block; use damage/draw/scaling" in hints
+
+
+def test_combat_skill_hints_focus_lowest_enemy_when_no_kill_is_available():
+    state = {
+        "decision": "combat_play",
+        "context": {"act": 2, "floor": 6, "room_type": "Monster"},
+        "player": {"hp": 60, "max_hp": 93, "block": 0, "gold": 41, "deck_size": 28},
+        "round": 3,
+        "energy": 3,
+        "max_energy": 3,
+        "draw_pile_count": 12,
+        "discard_pile_count": 7,
+        "enemies": [
+            {"index": 0, "name": "Myte", "hp": 48, "max_hp": 66, "block": 0, "intents": [{"type": "Attack", "damage": 7}]},
+            {"index": 1, "name": "Myte", "hp": 23, "max_hp": 66, "block": 0, "intents": [{"type": "Attack", "damage": 7}]},
+        ],
+        "hand": [
+            {"index": 0, "name": "Strike", "type": "Attack", "cost": 1, "stats": {"damage": 9}, "target_type": "AnyEnemy"},
+            {"index": 1, "name": "Defend", "type": "Skill", "cost": 1, "stats": {"block": 5}},
+        ],
+    }
+
+    hints = combat_skill_hints(state)
+
+    assert "focus: enemy[1] lowest hp=23; avoid spreading" in hints
 
 
 def test_combat_power_descriptions_are_rendered_without_target_damage_preview():

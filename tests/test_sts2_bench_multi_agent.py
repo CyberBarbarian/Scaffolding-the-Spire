@@ -756,6 +756,20 @@ def test_run_config_records_coordinator_context_split():
         turn_chat_update_mode = "delta"
         turn_chat_assistant_history = "compact"
         turn_chat_plan = True
+        route_plan_enabled = False
+        route_plan_enforcement = "soft"
+        route_map_prompt_format = "canonical"
+        route_candidate_objective = "max_restsites"
+        self_consistency_enabled = True
+        self_consistency_samples = 5
+        self_consistency_decisions = "map_select,card_reward"
+        self_consistency_mode = "majority_vote"
+        reflection_enabled = True
+        reflection_decisions = "noncombat_non_map"
+        reflection_mode = "verifier_vote"
+        reflection_max_options = 6
+        action_prompt_order = "shuffle_map"
+        action_prompt_order_seed = 7
         reward_posterior_evaluator = True
         character = "Ironclad"
         ascension = 0
@@ -779,6 +793,9 @@ def test_run_config_records_coordinator_context_split():
     context = config["agent"]["context_management"]
     assert config["agent"]["llm_fallback_mode"] == "error"
     assert context["mode"] == "coordinator"
+    assert context["route_candidate_planner"]["objective"] == "max_restsites"
+    assert config["agent"]["route_plan"]["enabled"] is False
+    assert config["agent"]["route_plan"]["enforcement"] == "soft"
     assert context["ca"]["mode"] == "turn_chat"
     assert context["ca"]["turn_chat"]["window"] == 3
     assert context["occ"]["mode"] == "room_process"

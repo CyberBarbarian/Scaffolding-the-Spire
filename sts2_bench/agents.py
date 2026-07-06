@@ -14,6 +14,8 @@ from typing import Any, Literal, Protocol
 
 from .actions import LegalAction
 from .context import (
+    append_combat_fact_lines,
+    append_combat_skill_lines,
     append_last_action_result,
     append_viewed_information,
     build_last_action_result,
@@ -1013,6 +1015,9 @@ def _render_current_turn_state(state: dict[str, Any]) -> str:
         )
     ]
 
+    append_combat_fact_lines(lines, state)
+    append_combat_skill_lines(lines, state)
+
     powers = state.get("player_powers") or []
     if powers:
         lines.append("Player powers:")
@@ -1973,6 +1978,9 @@ def _prompt_header(
         if combat_card_sequences_enabled
         else "After playing a card, using a potion, choosing a reward, or viewing information, you will receive a fresh state and may act again if the game still allows actions."
     )
+    combat_evaluation_rules = [
+        "For combat, write a concise COMBAT_EVALUATION using current Combat facts and any Combat skills shown.",
+    ]
     shared = [
         *sequence_rules,
         state_update_rule,
@@ -2068,10 +2076,10 @@ def _prompt_header(
             *shared,
             *(route_plan_rules if route_plan_enabled else []),
             *turn_check_rules,
-            "Before choosing, write a compact public analysis in JSON. Analyze the current situation, do any needed arithmetic, compare a few plausible legal actions, then choose.",
+            "Combat: use current Combat facts/skills and choose the first atomic action.",
+            "For non-combat choices, reason briefly about the current options.",
             "Return only valid JSON with this schema:",
             schema,
-            "For combat, compute enemy attacks from intents yourself and compare playable damage, block, energy, and lethal lines.",
             "For map choices, compare path rewards and risks. For rewards, compare deck impact.",
         ]
 
@@ -2093,12 +2101,14 @@ def _prompt_header(
     )
     return [
         "You are playing Slay the Spire 2 through a headless benchmark environment.",
-        "Choose exactly one legal action. Return only JSON with this schema:",
+        "Choose exactly one legal action.",
         *shared,
         *(route_plan_rules if route_plan_enabled else []),
         "Also copy the selected legal action label exactly into selected_action_label; action ids are state-local, so never reuse an action_id from earlier messages without checking the current legal actions.",
         *turn_check_rules,
-        schema,
+        *combat_evaluation_rules,
+        "For non-combat choices, decide briefly from the current options.",
+        f"End with the final decision on the last line as one JSON object with this schema: {schema}",
     ]
 
 

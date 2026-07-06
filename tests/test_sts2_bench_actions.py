@@ -551,7 +551,13 @@ def test_openai_compat_agent_prompt_includes_rule_based_run_summary():
     prompt = agent.build_prompt(state, build_legal_actions(state))
 
     assert "Run summary:" in prompt
-    assert "Card damage and block values shown in the state are engine preview values" in prompt
+    assert "For combat, write a concise COMBAT_EVALUATION using current Combat facts and any Combat skills shown." in prompt
+    assert "Combat facts:" in prompt
+    assert "Combat skills:" in prompt
+    assert "order: lethal > survival > reduce actions > damage/setup; one action" in prompt
+    assert "no_attack: skip pure block; use damage/draw/scaling" in prompt
+    assert "incoming_attack_total=0 current_block=0 hp_if_end_turn_now=18" in prompt
+    assert "future_risk_check_reasons=boss_or_elite,low_hp,no_current_attack,non_attack_intent" in prompt
     assert "- position: act=1 floor=17 room=Boss boss=Lagavulin Matriarch" in prompt
     assert "- resources: hp=18/85 gold=66 deck_size=22 potions=0/4 relic_count=2" in prompt
     assert "low HP; survival and rest decisions need extra scrutiny" in prompt

@@ -361,6 +361,9 @@ def build_run_config(args: argparse.Namespace, seeds: list[str], argv: list[str]
             "enabled": turn_check_enabled,
         },
     }
+    route_candidate_config = {
+        "objective": getattr(args, "route_candidate_objective", "none"),
+    }
     if args.agent == "coordinator":
         ca_mode = "combat_mdp_state" if args.context_mode == "combat_mdp_state" else "turn_chat"
         ca_context: dict[str, object] = {"mode": ca_mode}
@@ -372,6 +375,7 @@ def build_run_config(args: argparse.Namespace, seeds: list[str], argv: list[str]
             ca_context["turn_chat"] = turn_chat_config
         context_management: dict[str, object] = {
             "mode": "coordinator",
+            "route_candidate_planner": route_candidate_config,
             "ca": ca_context,
             "occ": {
                 "mode": "room_process",
@@ -387,6 +391,7 @@ def build_run_config(args: argparse.Namespace, seeds: list[str], argv: list[str]
     else:
         context_management = {
             "mode": args.context_mode,
+            "route_candidate_planner": route_candidate_config,
             "turn_chat": turn_chat_config,
             "combat_reasoning_pool": {
                 "enabled": bool(getattr(args, "combat_reasoning_pool_enabled", False)),
@@ -611,6 +616,12 @@ def main(argv: list[str] | None = None) -> int:
         help="For coordinator card rewards, run an evidence-only LLM deck-state posterior evaluator before OCC chooses",
     )
     parser.add_argument(
+        "--route-candidate-objective",
+        choices=["none", "max_restsites", "max_restsites_low_risk"],
+        default=env_str("STS2_BENCH_ROUTE_CANDIDATE_OBJECTIVE", "none"),
+        help="Optionally auto-select map routes from enumerated complete visible route candidates instead of calling the LLM for map_select",
+    )
+    parser.add_argument(
         "--self-consistency",
         action=argparse.BooleanOptionalAction,
         dest="self_consistency_enabled",
@@ -833,6 +844,9 @@ def main(argv: list[str] | None = None) -> int:
             combat_card_sequences_enabled=args.combat_card_sequences_enabled,
             combat_reasoning_pool_enabled=args.combat_reasoning_pool_enabled,
             combat_turn_board_enabled=args.combat_turn_board_enabled,
+            route_candidate_objective=(
+                None if args.route_candidate_objective == "none" else args.route_candidate_objective
+            ),
         )
         for seed in seeds:
             result = run_one(
@@ -855,6 +869,9 @@ def main(argv: list[str] | None = None) -> int:
                 log_level=args.log_level,
                 route_plan_enabled=args.route_plan_enabled,
                 route_plan_enforcement=args.route_plan_enforcement,
+                route_candidate_objective=(
+                    None if args.route_candidate_objective == "none" else args.route_candidate_objective
+                ),
             )
             results.append(result)
             print(json.dumps({"seed": seed, "result": result.to_dict()}, ensure_ascii=False), flush=True)

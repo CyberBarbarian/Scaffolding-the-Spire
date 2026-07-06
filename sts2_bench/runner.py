@@ -37,11 +37,17 @@ from .feedback import FeedbackBus
 from .multi_agent import CoordinatorAgent, OutOfCombatContextAgent
 from .posterior import LLMRewardPosteriorEvaluator
 from .process import Sts2Process
+from .route_candidates import (
+    RouteCandidate,
+    RouteObjective,
+    enumerate_route_candidates,
+    route_to_text,
+    select_route_candidate,
+)
 from .route_plan import RoutePlanTracker
 from .sequences import MAX_CUSTOM_SEQUENCE_VALIDATION_LENGTH, execute_card_sequence
 from .sequence_validation import validate_custom_sequence
 from .run_context import RunContextStore
-from .routing import route_state
 
 
 LogLevel = Literal["metrics", "decisions", "full"]
@@ -86,6 +92,139 @@ class RunResult:
         data["extra"] = dict(self.extra)
         return data
 
+
+@dataclass
+class RouteCandidatePlannerAgent:
+    """Delegate agent that deterministically commits to enumerated map routes."""
+
+    inner: Agent
+    objective: RouteObjective = "max_restsites"
+    planned_remaining: list[dict[str, Any]] = field(default_factory=list)
+    force_replan: bool = False
+
+    def build_prompt(self, state: dict[str, Any], legal_actions: list[LegalAction]) -> str:
+        if state.get("decision") == "map_select" and isinstance(state.get("full_map"), dict):
+            return (
+                "Route candidate planner is active for this map_select decision. "
+                f"It will enumerate complete visible routes and select objective={self.objective}; "
+                "the delegated LLM agent is not called for this route choice."
+            )
+        return self.inner.build_prompt(state, legal_actions)
+
+    def choose(
+        self,
+        state: dict[str, Any],
+        legal_actions: list[LegalAction],
+        *,
+        prompt: str | None = None,
+    ) -> tuple[LegalAction, dict[str, Any]]:
+        if state.get("decision") == "map_select":
+            chosen = self._choose_map(state, legal_actions)
+            if chosen is not None:
+                return chosen
+        return self.inner.choose(state, legal_actions, prompt=prompt)
+
+    def reset_episode(self) -> None:
+        self.planned_remaining.clear()
+        self.force_replan = False
+        reset = getattr(self.inner, "reset_episode", None)
+        if callable(reset):
+            reset()
+
+    def receive_external_feedback(
+        self,
+        state: dict[str, Any],
+        action: LegalAction,
+        meta: dict[str, Any],
+        feedback: str,
+        legal_actions: list[LegalAction],
+    ) -> None:
+        if "route-plan validation" in feedback:
+            self.force_replan = True
+        receive = getattr(self.inner, "receive_external_feedback", None)
+        if callable(receive):
+            receive(state, action, meta, feedback, legal_actions)
+
+    def record_transition(
+        self,
+        state: dict[str, Any],
+        action: LegalAction,
+        meta: dict[str, Any],
+        next_state: dict[str, Any] | None = None,
+    ) -> None:
+        record = getattr(self.inner, "record_transition", None)
+        if callable(record):
+            record(state, action, meta, next_state)
+
+    def _choose_map(
+        self,
+        state: dict[str, Any],
+        legal_actions: list[LegalAction],
+    ) -> tuple[LegalAction, dict[str, Any]] | None:
+        map_actions = [action for action in legal_actions if action.kind == "map"]
+        if not map_actions:
+            return None
+
+        if self.planned_remaining and not self.force_replan:
+            planned_next = self.planned_remaining[0]
+            action = _matching_map_action(map_actions, planned_next)
+            if action is not None:
+                self.planned_remaining = self.planned_remaining[1:]
+                return action, {
+                    "agent": "route_candidate_planner",
+                    "delegated_agent": type(self.inner).__name__,
+                    "active_agent": "none",
+                    "route_candidate_objective": self.objective,
+                    "route_candidate_followed": True,
+                    "route_candidate_remaining": [dict(node) for node in self.planned_remaining],
+                    "parsed": {
+                        "action_id": action.action_id,
+                        "selected_action_label": action.label,
+                        "reason": "Follow the next node of the enumerated route candidate plan.",
+                    },
+                }
+
+        full_map = state.get("full_map")
+        if not isinstance(full_map, dict):
+            return None
+
+        candidates = enumerate_route_candidates(full_map, state.get("choices") or [], legal_actions=legal_actions)
+        selected = select_route_candidate(candidates, objective=self.objective)
+        if selected is None:
+            return None
+        action = _action_for_route_candidate(map_actions, selected)
+        if action is None:
+            return None
+
+        event_type = "route_plan_updated" if self.planned_remaining or self.force_replan else "route_plan_created"
+        plan = [dict(node) for node in selected.nodes]
+        self.planned_remaining = [dict(node) for node in selected.nodes[1:]]
+        self.force_replan = False
+        return action, {
+            "agent": "route_candidate_planner",
+            "delegated_agent": type(self.inner).__name__,
+            "active_agent": "none",
+            "route_candidate_objective": self.objective,
+            "route_candidate_followed": False,
+            "route_candidate_count": len(candidates),
+            "route_candidate_counts": selected.counts,
+            "route_candidate_route_text": route_to_text(selected),
+            "route_candidate_remaining": [dict(node) for node in self.planned_remaining],
+            "parsed": {
+                "action_id": action.action_id,
+                "selected_action_label": action.label,
+                "route_plan_event": {
+                    "event_type": event_type,
+                    "new_plan": plan,
+                    "reason_tags": ["route_candidate", self.objective],
+                    "reason": (
+                        f"Enumerated {len(candidates)} complete visible routes and selected "
+                        f"objective={self.objective}."
+                    ),
+                },
+                "reason": f"Selected enumerated route candidate: {route_to_text(selected)}",
+            },
+        }
 
 class JsonlLogger:
     def __init__(self, path: Path | str | None) -> None:
@@ -132,6 +271,7 @@ def run_one(
     route_plan_enforcement: RoutePlanEnforcement = "hard",
     decision_hook: DecisionHook | None = None,
     combat_recorder: Any | None = None,
+    route_candidate_objective: RouteObjective | None = None,
 ) -> RunResult:
     """Run one game and return summary metrics."""
 
@@ -181,7 +321,7 @@ def run_one(
                 _fill_result(result, state)
                 return result
 
-            if include_full_map and decision == "map_select" and "full_map" not in state:
+            if (include_full_map or route_candidate_objective is not None) and decision == "map_select" and "full_map" not in state:
                 map_state = proc.send({"cmd": "get_map"})
                 if map_state.get("type") == "map":
                     state = {**state, "full_map": map_state}
@@ -777,6 +917,9 @@ def _update_card_reward_reopen_guard(
 
 
 def _agent_run_context_store(agent: Agent) -> RunContextStore | None:
+    inner = getattr(agent, "inner", None)
+    if inner is not None and inner is not agent:
+        return _agent_run_context_store(inner)
     if isinstance(agent, CoordinatorAgent):
         return agent.store
     if isinstance(agent, OutOfCombatContextAgent):
@@ -784,11 +927,38 @@ def _agent_run_context_store(agent: Agent) -> RunContextStore | None:
     return None
 
 
+def _matching_map_action(actions: list[LegalAction], node: dict[str, Any]) -> LegalAction | None:
+    target_col = _maybe_int(node.get("col"))
+    target_row = _maybe_int(node.get("row"))
+    if target_col is None or target_row is None:
+        return None
+    for action in actions:
+        args = action.command.get("args") or {}
+        if _maybe_int(args.get("col")) == target_col and _maybe_int(args.get("row")) == target_row:
+            return action
+    return None
+
+
+def _action_for_route_candidate(actions: list[LegalAction], candidate: RouteCandidate) -> LegalAction | None:
+    if candidate.action_id is not None:
+        for action in actions:
+            if action.action_id == candidate.action_id:
+                return action
+    return _matching_map_action(actions, candidate.start)
+
+
+def _maybe_int(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _active_agent_for_validation(state: dict[str, Any], meta: dict[str, Any]) -> str | None:
     active_agent = meta.get("active_agent")
     if active_agent in {"ca", "occ", "none"}:
         return str(active_agent)
-    return route_state(state).active_agent
+    return None
 
 
 def _record_agent_transition(
@@ -1154,6 +1324,13 @@ def _agent_meta_summary(meta: dict[str, Any]) -> dict[str, Any]:
         "action_prompt_order_changed",
         "action_prompt_map_action_ids",
         "reflection_verifier_selected_action_id",
+        "action_prompt_map_action_labels",
+        "route_candidate_objective",
+        "route_candidate_followed",
+        "route_candidate_count",
+        "route_candidate_counts",
+        "route_candidate_route_text",
+        "route_candidate_remaining",
     ):
         if key in meta and meta[key] is not None:
             summary[key] = meta[key]
@@ -1291,20 +1468,24 @@ def agent_from_args(
     combat_card_sequences_enabled: bool = True,
     combat_reasoning_pool_enabled: bool = False,
     combat_turn_board_enabled: bool = False,
+    route_candidate_objective: RouteObjective | None = None,
 ) -> Agent:
     if route_plan_enforcement not in {"hard", "soft"}:
         raise ValueError(f"Unsupported route_plan_enforcement: {route_plan_enforcement}")
     if kind == "random":
         if conversation_mode != "single_turn":
             raise ValueError("turn_chat context management is only supported by the llm agent")
-        return RandomAgent(
-            seed=0,
-            include_json_state=include_json_state,
-            prompt_style=prompt_style,
-            memory_enabled=memory_enabled,
-            memory_window=memory_window,
-            memory_mode=memory_mode,
-            run_summary_enabled=run_summary_enabled,
+        return _wrap_route_candidate_agent(
+            RandomAgent(
+                seed=0,
+                include_json_state=include_json_state,
+                prompt_style=prompt_style,
+                memory_enabled=memory_enabled,
+                memory_window=memory_window,
+                memory_mode=memory_mode,
+                run_summary_enabled=run_summary_enabled,
+            ),
+            route_candidate_objective,
         )
     if kind in {"llm", "coordinator"}:
         if not base_url or not model:
@@ -1391,55 +1572,67 @@ def agent_from_args(
                 if reward_posterior_evaluator_enabled
                 else None
             )
-            return CoordinatorAgent(
-                ca_agent=ca_agent,
-                occ_agent=OutOfCombatContextAgent(
-                    occ_inner,
-                    store,
-                    history_window=turn_chat_window,
-                    reward_posterior_evaluator=reward_posterior_evaluator,
+            return _wrap_route_candidate_agent(
+                CoordinatorAgent(
+                    ca_agent=ca_agent,
+                    occ_agent=OutOfCombatContextAgent(
+                        occ_inner,
+                        store,
+                        history_window=turn_chat_window,
+                        reward_posterior_evaluator=reward_posterior_evaluator,
+                    ),
+                    store=store,
+                    fallback_mode=llm_fallback_mode,
                 ),
-                store=store,
-                fallback_mode=llm_fallback_mode,
+                route_candidate_objective,
             )
-        return OpenAICompatAgent(
-            base_url=base_url,
-            model=model,
-            api_key=api_key,
-            timeout=llm_timeout,
-            max_retries=llm_max_retries,
-            fallback_mode=llm_fallback_mode,
-            temperature=llm_temperature,
-            include_json_state=include_json_state,
-            prompt_style=prompt_style,
-            memory_enabled=memory_enabled,
-            memory_window=memory_window,
-            memory_mode=memory_mode,
-            run_summary_enabled=run_summary_enabled,
-            conversation_mode=conversation_mode,
-            turn_chat_window=turn_chat_window,
-            turn_chat_update_mode=turn_chat_update_mode,
-            turn_chat_assistant_history=turn_chat_assistant_history,
-            turn_chat_plan_enabled=turn_chat_plan_enabled,
-            turn_check_enabled=turn_check_enabled,
-            route_plan_enabled=route_plan_enabled,
-            route_map_prompt_format=route_map_prompt_format,
-            context_patch_fields_enabled=True,
-            self_consistency_enabled=self_consistency_enabled,
-            self_consistency_samples=self_consistency_samples,
-            self_consistency_decisions=self_consistency_decisions,
-            self_consistency_mode=self_consistency_mode,  # type: ignore[arg-type]
-            reflection_enabled=reflection_enabled,
-            reflection_decisions=reflection_decisions,
-            reflection_mode=reflection_mode,  # type: ignore[arg-type]
-            reflection_max_options=reflection_max_options,
-            action_prompt_order=action_prompt_order,
-            action_prompt_order_seed=action_prompt_order_seed,
-            combat_card_sequences_enabled=combat_card_sequences_enabled,
-            combat_reasoning_pool_enabled=combat_reasoning_pool_enabled,
-            combat_turn_board_enabled=combat_turn_board_enabled,
+        return _wrap_route_candidate_agent(
+            OpenAICompatAgent(
+                base_url=base_url,
+                model=model,
+                api_key=api_key,
+                timeout=llm_timeout,
+                max_retries=llm_max_retries,
+                fallback_mode=llm_fallback_mode,
+                temperature=llm_temperature,
+                include_json_state=include_json_state,
+                prompt_style=prompt_style,
+                memory_enabled=memory_enabled,
+                memory_window=memory_window,
+                memory_mode=memory_mode,
+                run_summary_enabled=run_summary_enabled,
+                conversation_mode=conversation_mode,
+                turn_chat_window=turn_chat_window,
+                turn_chat_update_mode=turn_chat_update_mode,
+                turn_chat_assistant_history=turn_chat_assistant_history,
+                turn_chat_plan_enabled=turn_chat_plan_enabled,
+                turn_check_enabled=turn_check_enabled,
+                route_plan_enabled=route_plan_enabled,
+                route_map_prompt_format=route_map_prompt_format,
+                context_patch_fields_enabled=True,
+                self_consistency_enabled=self_consistency_enabled,
+                self_consistency_samples=self_consistency_samples,
+                self_consistency_decisions=self_consistency_decisions,
+                self_consistency_mode=self_consistency_mode,  # type: ignore[arg-type]
+                reflection_enabled=reflection_enabled,
+                reflection_decisions=reflection_decisions,
+                reflection_mode=reflection_mode,  # type: ignore[arg-type]
+                reflection_max_options=reflection_max_options,
+                action_prompt_order=action_prompt_order,
+                action_prompt_order_seed=action_prompt_order_seed,
+                combat_card_sequences_enabled=combat_card_sequences_enabled,
+                combat_reasoning_pool_enabled=combat_reasoning_pool_enabled,
+                combat_turn_board_enabled=combat_turn_board_enabled,
+            ),
+            route_candidate_objective,
         )
     raise ValueError(f"Unknown agent kind: {kind}")
+
+
+def _wrap_route_candidate_agent(agent: Agent, objective: RouteObjective | None) -> Agent:
+    if objective is None:
+        return agent
+    return RouteCandidatePlannerAgent(agent, objective=objective)
 
 
 def _is_local_url(url: str) -> bool:
