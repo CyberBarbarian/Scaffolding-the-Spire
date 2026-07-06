@@ -124,6 +124,8 @@ def compact_state(state: dict[str, Any]) -> dict[str, Any]:
 
     data = _compact_obj(state)
     viewed = []
+    if state.get("decision") == "combat_play":
+        data["combat_facts"] = combat_facts(state)
     full_map = state.get("full_map")
     if isinstance(full_map, dict) and full_map.get("type") == "map":
         data["route_graph"] = build_route_graph(
@@ -175,6 +177,79 @@ def incoming_damage(state: dict[str, Any]) -> int:
             if isinstance(damage, (int, float)) and isinstance(hits, (int, float)):
                 total += int(damage) * int(hits)
     return total
+
+
+def _as_int(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, (int, float)):
+        return int(value)
+    return None
+
+
+def combat_facts(state: dict[str, Any]) -> dict[str, Any]:
+    """Return derived combat facts that are safer as state than prompt policy."""
+
+    player = state.get("player") or {}
+    hp = _as_int(player.get("hp"))
+    max_hp = _as_int(player.get("max_hp"))
+    current_block = _as_int(player.get("block")) or 0
+    enemies = state.get("enemies", []) or []
+    incoming_parts: list[str] = []
+    non_attack_intents: list[str] = []
+    incoming_total = 0
+    for enemy in enemies:
+        enemy_name = name(enemy.get("name"))
+        enemy_index = enemy.get("index", "?")
+        for intent in enemy.get("intents") or []:
+            intent_type = str(intent.get("type", "?"))
+            if intent_type in {"Attack", "DeathBlow"}:
+                damage = _as_int(intent.get("damage"))
+                hits = _as_int(intent.get("hits")) or 1
+                if damage is None:
+                    incoming_parts.append(f"{enemy_index}:{enemy_name}:{intent_type}=unknown")
+                    continue
+                incoming_total += damage * hits
+                suffix = f"{damage}x{hits}" if hits > 1 else str(damage)
+                incoming_parts.append(f"{enemy_index}:{enemy_name}:{intent_type} {suffix}")
+            else:
+                non_attack_intents.append(f"{enemy_index}:{enemy_name}:{intent_type}")
+
+    hp_if_end = None
+    if hp is not None:
+        hp_if_end = hp - max(0, incoming_total - current_block)
+
+    preview_fields = sorted(
+        {
+            "damage" if key == "calculateddamage" else key
+            for card in state.get("hand", []) or []
+            for key, value in (card.get("stats") or {}).items()
+            if value is not None and key in {"damage", "calculateddamage", "block", "magic", "draw"}
+        }
+    )
+    context = state.get("context") or {}
+    room_type = context.get("room_type", state.get("room_type"))
+    future_risk_reasons: list[str] = []
+    if room_type in {"Boss", "Elite"}:
+        future_risk_reasons.append("boss_or_elite")
+    if hp is not None and max_hp is not None and hp <= max(12, int(max_hp * 0.25)):
+        future_risk_reasons.append("low_hp")
+    if enemies and incoming_total == 0:
+        future_risk_reasons.append("no_current_attack")
+    if non_attack_intents:
+        future_risk_reasons.append("non_attack_intent")
+
+    return {
+        "incoming_attack_total": incoming_total,
+        "incoming_attack_parts": incoming_parts,
+        "current_block": current_block,
+        "hp_if_end_turn_now": hp_if_end,
+        "enemy_intent_damage_basis": "engine_displayed_current_values",
+        "card_preview_values_basis": "engine_displayed_current_values",
+        "card_preview_fields": preview_fields,
+        "non_attack_intents": non_attack_intents,
+        "future_risk_check_reasons": future_risk_reasons,
+    }
 
 
 def card_cost_label(card: dict[str, Any]) -> Any:
@@ -248,6 +323,176 @@ def vars_line(obj: dict[str, Any]) -> str:
         return json.dumps(vars_obj, ensure_ascii=False, separators=(",", ":"))
     except TypeError:
         return str(vars_obj)
+
+
+def append_combat_fact_lines(lines: list[str], state: dict[str, Any], *, prefix: str = "  ") -> None:
+    facts = combat_facts(state)
+    lines.append("Combat facts:")
+    parts = [
+        f"incoming_attack_total={facts['incoming_attack_total']}",
+        f"current_block={facts['current_block']}",
+        f"hp_if_end_turn_now={facts['hp_if_end_turn_now']}",
+    ]
+    lines.append(prefix + " ".join(parts))
+    if facts["incoming_attack_parts"]:
+        lines.append(prefix + "incoming_attack_parts=" + "; ".join(facts["incoming_attack_parts"]))
+    if facts["non_attack_intents"]:
+        lines.append(prefix + "non_attack_intents=" + "; ".join(facts["non_attack_intents"]))
+    preview_fields = facts["card_preview_fields"]
+    fields_text = ",".join(preview_fields) if preview_fields else "none"
+    lines.append(
+        prefix
+        + "basis: enemy intent damage and card preview fields are engine_displayed_current_values"
+        + f" card_preview_fields={fields_text}"
+    )
+    if facts["future_risk_check_reasons"]:
+        lines.append(prefix + "future_risk_check_reasons=" + ",".join(facts["future_risk_check_reasons"]))
+
+
+def combat_skill_hints(state: dict[str, Any], *, max_hints: int = 4) -> list[str]:
+    """Return compact combat heuristics triggered by the visible state."""
+
+    if state.get("decision", state.get("type")) != "combat_play":
+        return []
+
+    facts = combat_facts(state)
+    hints = [
+        "order: lethal > survival > reduce actions > damage/setup; one action",
+    ]
+    current_block = _as_int((state.get("player") or {}).get("block")) or 0
+    incoming = _as_int(facts.get("incoming_attack_total")) or 0
+    if incoming > current_block:
+        hints.append("survive: block/kill until safe; stop overblocking")
+    elif incoming == 0 and facts.get("non_attack_intents"):
+        hints.append("no_attack: skip pure block; use damage/draw/scaling")
+
+    enemies = [enemy for enemy in state.get("enemies", []) or [] if (_as_int(enemy.get("hp")) or 0) > 0]
+    hand = state.get("hand", []) or []
+    multi_hint = _multi_enemy_skill_hint(enemies, hand, energy=_as_int(state.get("energy")) or 0)
+    if multi_hint:
+        hints.append(multi_hint)
+
+    if _hand_has_self_damage(hand):
+        hints.append("self_damage: only for lethal, survival, or a concrete same-turn play")
+    if _hand_has_draw(hand):
+        hints.append("draw: real draw can be early if safe; view actions only reveal info")
+
+    return hints[:max_hints]
+
+
+def append_combat_skill_lines(lines: list[str], state: dict[str, Any], *, prefix: str = "  ") -> None:
+    hints = combat_skill_hints(state)
+    if not hints:
+        return
+    lines.append("Combat skills:")
+    for hint in hints:
+        lines.append(prefix + hint)
+
+
+def _hand_has_self_damage(hand: list[dict[str, Any]]) -> bool:
+    for card in hand:
+        text = " ".join(
+            str(part).lower()
+            for part in (
+                name(card.get("name")),
+                card_description(card),
+                card.get("raw_description"),
+            )
+            if part
+        )
+        if "lose" in text and ("hp" in text or "health" in text):
+            return True
+        if "blood" in text and "energy" in text:
+            return True
+    return False
+
+
+def _hand_has_draw(hand: list[dict[str, Any]]) -> bool:
+    for card in hand:
+        stats = card.get("stats") or {}
+        draw = _as_int(stats.get("draw") or stats.get("cards"))
+        if draw and draw > 0:
+            return True
+        text = " ".join(
+            str(part).lower()
+            for part in (
+                card_description(card),
+                card.get("raw_description"),
+            )
+            if part
+        )
+        if "draw" in text:
+            return True
+    return False
+
+
+def _multi_enemy_skill_hint(enemies: list[dict[str, Any]], hand: list[dict[str, Any]], *, energy: int) -> str:
+    if len(enemies) <= 1:
+        return ""
+
+    best_single_damage = _best_single_target_attack_damage(hand, energy=energy)
+    if best_single_damage > 0:
+        killable = [
+            enemy
+            for enemy in enemies
+            if _enemy_effective_hp(enemy) <= best_single_damage
+        ]
+        if killable:
+            target = min(killable, key=lambda enemy: (_enemy_effective_hp(enemy), enemy.get("index", 999)))
+            return f"kill_now: enemy[{target.get('index','?')}] hp={target.get('hp','?')} dies to one card; avoid spread/setup"
+
+    if len(enemies) >= 3 and _hand_has_aoe_attack(hand, energy=energy):
+        return "aoe: hit-all is strong vs 3+ unless one enemy is killable"
+
+    target = min(enemies, key=lambda enemy: (_enemy_effective_hp(enemy), enemy.get("index", 999)))
+    return f"focus: enemy[{target.get('index','?')}] lowest hp={target.get('hp','?')}; avoid spreading"
+
+
+def _enemy_effective_hp(enemy: dict[str, Any]) -> int:
+    return (_as_int(enemy.get("hp")) or 0) + (_as_int(enemy.get("block")) or 0)
+
+
+def _best_single_target_attack_damage(hand: list[dict[str, Any]], *, energy: int) -> int:
+    return max(
+        (_card_damage(card) for card in hand if _is_playable_attack(card, energy=energy) and not _is_aoe_card(card)),
+        default=0,
+    )
+
+
+def _hand_has_aoe_attack(hand: list[dict[str, Any]], *, energy: int) -> bool:
+    return any(_is_playable_attack(card, energy=energy) and _is_aoe_card(card) for card in hand)
+
+
+def _is_playable_attack(card: dict[str, Any], *, energy: int) -> bool:
+    if card.get("can_play") is False:
+        return False
+    if str(card.get("type") or "").lower() != "attack":
+        return False
+    cost = _as_int(card_cost_label(card))
+    if cost is not None and cost > energy:
+        return False
+    return _card_damage(card) > 0
+
+
+def _card_damage(card: dict[str, Any]) -> int:
+    stats = card.get("stats") or {}
+    return _as_int(stats.get("damage")) or _as_int(stats.get("calculateddamage")) or 0
+
+
+def _is_aoe_card(card: dict[str, Any]) -> bool:
+    target_type = str(card.get("target_type") or card.get("target") or "").lower()
+    if "all" in target_type:
+        return True
+    text = " ".join(
+        str(part).lower()
+        for part in (
+            name(card.get("name")),
+            card_description(card),
+            card.get("raw_description"),
+        )
+        if part
+    )
+    return "all enemies" in text or "all enemy" in text
 
 
 def append_hover_tip_lines(lines: list[str], obj: dict[str, Any], *, prefix: str = "  ") -> None:
@@ -885,6 +1130,8 @@ def render_state_text(state: dict[str, Any]) -> str:
             f"Combat: round={state.get('round', '?')} energy={state.get('energy', '?')}/{state.get('max_energy', '?')} "
             f"draw_pile={state.get('draw_pile_count', '?')} discard_pile={state.get('discard_pile_count', '?')}"
         )
+        append_combat_fact_lines(lines, state)
+        append_combat_skill_lines(lines, state)
         powers = state.get("player_powers") or []
         if powers:
             lines.append(f"Player powers ({len(powers)}):")

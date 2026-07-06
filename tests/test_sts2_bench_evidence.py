@@ -279,6 +279,25 @@ class _MissingReasonThenReasonAgent:
         self.feedback.append(feedback)
 
 
+class _PlainLlmStyleScriptAgent:
+    def build_prompt(self, state, legal_actions):
+        return ""
+
+    def choose(self, state, legal_actions, *, prompt=None):
+        skip = next(action for action in legal_actions if action.kind == "card_reward_skip")
+        return skip, {
+            "agent": "plain_script",
+            "parsed": {
+                "action_id": skip.action_id,
+                "selected_action_label": skip.label,
+                "reason": "Skip keeps the deck small.",
+                "evidence_refs": [],
+                "run_plan_patch": {},
+                "run_memory_facts": [],
+            },
+        }
+
+
 class _CardRewardProcess:
     def __init__(self):
         self.sent = []
@@ -360,3 +379,23 @@ def test_runner_reasks_when_real_action_omits_reason(tmp_path):
     assert "reason must be a non-empty string" in agent.feedback[0]
     assert feedback_event["validator"] == "action_reason"
     assert feedback_event["code"] == "missing_action_reason"
+
+
+def test_runner_does_not_apply_occ_context_contract_to_plain_llm_agent(tmp_path):
+    out = tmp_path / "run.jsonl"
+    logger = JsonlLogger(out)
+    try:
+        result = run_one(
+            agent=_PlainLlmStyleScriptAgent(),
+            seed="plain-llm-no-occ-contract",
+            process=_CardRewardProcess(),
+            logger=logger,
+            max_steps=2,
+        )
+    finally:
+        logger.close()
+
+    rows = [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+    assert result.error is None
+    assert not [row for row in rows if row.get("type") == "evidence_validation_error"]

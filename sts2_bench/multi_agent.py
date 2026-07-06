@@ -222,6 +222,7 @@ class OutOfCombatContextAgent:
         chosen_prompt = prompt if prompt is not None else self.build_prompt(state, legal_actions)
         action, meta = self.inner.choose(state, legal_actions, prompt=chosen_prompt)
         meta = dict(meta)
+        meta["active_agent"] = "occ"
         evidence_bundle = build_evidence_bundle(state, legal_actions, store=self.store)
         meta["evidence_bundle_hash"] = evidence_bundle.bundle_hash()
         meta["deck_summary_visible"] = evidence_bundle.deck_summary_visible
