@@ -6,7 +6,7 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass, field, replace
-from typing import Any
+from typing import Any, Literal
 
 from .actions import LegalAction
 from .agents import Agent, FallbackMode, ModelActionError, first_non_view_action
@@ -170,6 +170,7 @@ class OutOfCombatContextAgent:
     inner: Agent
     store: RunContextStore
     history_window: int = 6
+    context_mode: Literal["room_process", "reference_turn"] = "room_process"
     reward_posterior_evaluator: Any | None = None
     history: list[dict[str, str]] = field(default_factory=list)
     room_process: RoomProcessLedger = field(default_factory=RoomProcessLedger)
@@ -193,7 +194,9 @@ class OutOfCombatContextAgent:
                 [
                     base_prompt,
                     render_reward_decision_context(evidence_bundle),
-                    _render_room_process_context(self.room_process, state),
+                    _render_room_process_context(self.room_process, state)
+                    if self.context_mode == "room_process"
+                    else "",
                 ]
             )
         if state.get("decision") == "map_select":
@@ -208,7 +211,7 @@ class OutOfCombatContextAgent:
                 base_prompt,
                 render_evidence_context(evidence_bundle),
                 render_out_of_combat_context(self.store, state),
-                _render_room_process_context(self.room_process, state),
+                self._render_occ_process_context(state),
             ]
         )
 
@@ -234,7 +237,7 @@ class OutOfCombatContextAgent:
         elif state.get("decision") == "map_select":
             meta["occ_context_mode"] = "structured_route"
         else:
-            meta["occ_context_mode"] = "room_process"
+            meta["occ_context_mode"] = self.context_mode
         meta["occ_history_turns"] = len(self.history)
         room_process_snapshot = self.room_process.snapshot_for_state(state)
         meta["room_process_visible"] = bool(room_process_snapshot)
@@ -243,6 +246,11 @@ class OutOfCombatContextAgent:
         if _is_card_reward_decision(state):
             self._attach_reward_posterior_meta(meta, evidence_bundle)
         return action, meta
+
+    def _render_occ_process_context(self, state: dict[str, Any]) -> str:
+        if self.context_mode == "reference_turn":
+            return _render_occ_history(self.history)
+        return _render_room_process_context(self.room_process, state)
 
     def reset_episode(self) -> None:
         self.history.clear()

@@ -103,16 +103,22 @@ def test_tracked_benchmark_config_allows_reverse_proxy_llm_latency(monkeypatch):
     load_benchmark_config(config)
 
     assert float(os.environ["STS2_BENCH_LLM_TIMEOUT"]) >= 90.0
-    assert int(os.environ["STS2_BENCH_LLM_MAX_RETRIES"]) >= 5
+    assert int(os.environ["STS2_BENCH_LLM_MAX_RETRIES"]) >= 1
 
 
-def test_tracked_benchmark_config_defaults_to_combat_mdp_state(monkeypatch):
+def test_tracked_benchmark_config_defaults_to_turn_chat_route_baseline(monkeypatch):
     config = Path(__file__).resolve().parents[1] / "sts2_bench" / "benchmark.yaml"
     monkeypatch.delenv("STS2_BENCH_CONTEXT_MODE", raising=False)
+    monkeypatch.delenv("STS2_BENCH_AGENT", raising=False)
+    monkeypatch.delenv("STS2_BENCH_ROUTE_CANDIDATE_OBJECTIVE", raising=False)
+    monkeypatch.delenv("STS2_BENCH_OCC_CONTEXT_MODE", raising=False)
 
     load_benchmark_config(config)
 
-    assert os.environ["STS2_BENCH_CONTEXT_MODE"] == "combat_mdp_state"
+    assert os.environ["STS2_BENCH_AGENT"] == "coordinator"
+    assert os.environ["STS2_BENCH_CONTEXT_MODE"] == "turn_chat"
+    assert os.environ["STS2_BENCH_ROUTE_CANDIDATE_OBJECTIVE"] == "max_restsites_low_risk"
+    assert os.environ["STS2_BENCH_OCC_CONTEXT_MODE"] == "reference_turn"
 
 
 def test_tracked_benchmark_config_enables_trace_analysis(monkeypatch):
@@ -124,14 +130,14 @@ def test_tracked_benchmark_config_enables_trace_analysis(monkeypatch):
     assert os.environ["STS2_BENCH_TRACE_ANALYSIS"] == "true"
 
 
-def test_tracked_benchmark_config_defaults_to_deepseek_v4_pro(monkeypatch):
+def test_tracked_benchmark_config_defaults_to_deepseek_v4_flash(monkeypatch):
     config = Path(__file__).resolve().parents[1] / "sts2_bench" / "benchmark.yaml"
     monkeypatch.delenv("STS2_BENCH_MODEL", raising=False)
 
     load_benchmark_config(config)
 
-    assert os.environ["STS2_BENCH_MODEL"] == "deepseek-v4-pro"
-    assert _load_simple_yaml_mapping(config)["model"] == "deepseek-v4-pro"
+    assert os.environ["STS2_BENCH_MODEL"] == "deepseek-v4-flash"
+    assert _load_simple_yaml_mapping(config)["model"] == "deepseek-v4-flash"
 
 
 def test_tracked_benchmark_config_documents_apihy_model_catalog():

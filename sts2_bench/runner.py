@@ -1469,9 +1469,12 @@ def agent_from_args(
     combat_reasoning_pool_enabled: bool = False,
     combat_turn_board_enabled: bool = False,
     route_candidate_objective: RouteObjective | None = None,
+    occ_context_mode: str = "room_process",
 ) -> Agent:
     if route_plan_enforcement not in {"hard", "soft"}:
         raise ValueError(f"Unsupported route_plan_enforcement: {route_plan_enforcement}")
+    if occ_context_mode not in {"room_process", "reference_turn"}:
+        raise ValueError(f"Unsupported occ_context_mode: {occ_context_mode}")
     if kind == "random":
         if conversation_mode != "single_turn":
             raise ValueError("turn_chat context management is only supported by the llm agent")
@@ -1579,6 +1582,7 @@ def agent_from_args(
                         occ_inner,
                         store,
                         history_window=turn_chat_window,
+                        context_mode=occ_context_mode,  # type: ignore[arg-type]
                         reward_posterior_evaluator=reward_posterior_evaluator,
                     ),
                     store=store,

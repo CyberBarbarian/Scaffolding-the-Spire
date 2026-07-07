@@ -51,6 +51,8 @@ CONFIG_ENV_KEYS = {
     "combat_turn_board_enabled": "STS2_BENCH_COMBAT_TURN_BOARD",
     "route_plan_enabled": "STS2_BENCH_ROUTE_PLAN_ENABLED",
     "route_plan_enforcement": "STS2_BENCH_ROUTE_PLAN_ENFORCEMENT",
+    "route_candidate_objective": "STS2_BENCH_ROUTE_CANDIDATE_OBJECTIVE",
+    "occ_context_mode": "STS2_BENCH_OCC_CONTEXT_MODE",
     "reward_posterior_evaluator": "STS2_BENCH_REWARD_POSTERIOR_EVALUATOR",
     "self_consistency_enabled": "STS2_BENCH_SELF_CONSISTENCY",
     "self_consistency_samples": "STS2_BENCH_SELF_CONSISTENCY_SAMPLES",
@@ -364,6 +366,7 @@ def build_run_config(args: argparse.Namespace, seeds: list[str], argv: list[str]
     route_candidate_config = {
         "objective": getattr(args, "route_candidate_objective", "none"),
     }
+    occ_context_mode = getattr(args, "occ_context_mode", "room_process")
     if args.agent == "coordinator":
         ca_mode = "combat_mdp_state" if args.context_mode == "combat_mdp_state" else "turn_chat"
         ca_context: dict[str, object] = {"mode": ca_mode}
@@ -378,16 +381,22 @@ def build_run_config(args: argparse.Namespace, seeds: list[str], argv: list[str]
             "route_candidate_planner": route_candidate_config,
             "ca": ca_context,
             "occ": {
-                "mode": "room_process",
+                "mode": occ_context_mode,
                 "run_context": "rm_rp_slice",
                 "reward_posterior_evaluator": bool(getattr(args, "reward_posterior_evaluator", True)),
-                "room_context": {
-                    "scope": "current_room",
-                    "source": "rm_rp_slice_plus_room_process_ledger",
-                    "reset": "room_change_or_map",
-                },
             },
         }
+        if occ_context_mode == "reference_turn":
+            context_management["occ"]["reference_context"] = {
+                "window": args.turn_chat_window,
+                "source": "rm_rp_slice_plus_short_occ_history",
+            }
+        else:
+            context_management["occ"]["room_context"] = {
+                "scope": "current_room",
+                "source": "rm_rp_slice_plus_room_process_ledger",
+                "reset": "room_change_or_map",
+            }
     else:
         context_management = {
             "mode": args.context_mode,
@@ -622,6 +631,12 @@ def main(argv: list[str] | None = None) -> int:
         help="Optionally auto-select map routes from enumerated complete visible route candidates instead of calling the LLM for map_select",
     )
     parser.add_argument(
+        "--occ-context-mode",
+        choices=["room_process", "reference_turn"],
+        default=env_str("STS2_BENCH_OCC_CONTEXT_MODE", "room_process"),
+        help="Coordinator OCC context style: room_process is current-room ledger; reference_turn restores the older short OCC history prompt",
+    )
+    parser.add_argument(
         "--self-consistency",
         action=argparse.BooleanOptionalAction,
         dest="self_consistency_enabled",
@@ -847,6 +862,7 @@ def main(argv: list[str] | None = None) -> int:
             route_candidate_objective=(
                 None if args.route_candidate_objective == "none" else args.route_candidate_objective
             ),
+            occ_context_mode=args.occ_context_mode,
         )
         for seed in seeds:
             result = run_one(

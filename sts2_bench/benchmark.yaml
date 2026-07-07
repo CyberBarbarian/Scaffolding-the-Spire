@@ -2,14 +2,14 @@
 # 这个文件会被 git 追踪，用来固定 benchmark 的非敏感实验参数。
 # API key 不要写在这里；请写到仓库根目录的 .env。
 
-# 选择使用的 agent。random 表示随机策略；llm 表示调用 OpenAI-compatible API。
-agent: random
+# 选择使用的 agent。coordinator 表示 OCC/CA 分工的 LLM agent；random 表示随机策略；llm 表示单 agent LLM。
+agent: coordinator
 
-# OpenAI-compatible API 的基础地址。DeepSeek 可以使用 https://api.deepseek.com 或 https://api.deepseek.com/v1。
-base_url: ""
+# OpenAI-compatible API 的基础地址。代码会在末尾自动补 /v1/chat/completions。
+base_url: "https://zgc.apihy.com"
 
-# 调用的模型名称。默认使用 DeepSeek V4 Pro；这里必须写 provider 模型名 deepseek-v4-pro。
-model: "deepseek-v4-pro"
+# 调用的模型名称。最近路线/战斗基线实验使用 deepseek-v4-flash。
+model: "deepseek-v4-flash"
 
 # Non-secret relay model catalog for local experiment overrides.
 # Keep API keys in .env. For APiHY, use STS2_BENCH_BASE_URL=https://zgc.apihy.com/v1.
@@ -29,12 +29,12 @@ model_catalog:
     non_chat_models: "gpt-image-2"
     notes: "gpt-5.5 chat works through this relay when max_tokens is omitted."
 
-# 单次 LLM HTTP 请求超时时间，单位秒。调试 DeepSeek 卡住时可以先设为 15-30。
-llm_timeout: 120
+# 单次 LLM HTTP 请求超时时间，单位秒。当前中转站偶发慢响应，基线实验使用 180。
+llm_timeout: 180
 
 # LLM 请求或 JSON 解析失败后的重试次数。正式 benchmark 至少保留 1 次严格纠错请求；
 # 调试连通性时可以临时设为 0，避免每一步等待太久。
-llm_max_retries: 5
+llm_max_retries: 1
 
 # 所有 LLM 重试失败后的处理。error 会停止当前 run 并记录错误；action 才会使用确定性动作回退。
 llm_fallback_mode: error
@@ -61,9 +61,9 @@ memory_mode: factual_diff
 # 是否在 prompt 中加入规则生成的短 run summary。属于 agent 方法，可用 --no-run-summary 做消融。
 run_summary_enabled: false
 
-# Agent 侧上下文管理方法。single_turn 是当前每步独立 prompt；turn_chat 只在同一个玩家出牌回合内保留短 chat history。
+# Agent 侧上下文管理方法。turn_chat 只在同一个玩家出牌回合内保留短 chat history。
 context_management:
-  mode: combat_mdp_state
+  mode: turn_chat
   turn_check:
     enabled: false
   turn_chat:
@@ -73,16 +73,26 @@ context_management:
     update_mode: delta
     # 第一版只支持 compact：历史里的 assistant 只保留 action 和简短 reason，不保留完整分析。
     assistant_history: compact
-    # 是否在每个玩家出牌回合的第一条 turn_chat prompt 中要求模型先给一个可修正的 turn_plan。
+    # 是否在每个玩家出牌回合的第一条 turn_chat prompt 中要求模型给 turn_check/plan 类 guardrail。
     plan:
-      enabled: true
+      enabled: false
 
 # 选择角色。可选 Ironclad、Silent、Defect、Regent、Necrobinder。
 route_plan:
   enabled: true
   enforcement: hard
 
-combat_card_sequences_enabled: true
+# 地图由枚举器自动选择完整可见路线。当前基线：火堆数优先，风险只作为同火堆数下的辅助排序。
+route_candidate_objective: max_restsites_low_risk
+
+# OCC 使用旧版 short reference history，以复现前面过 Act 1 的实验设置。
+occ_context_mode: reference_turn
+
+# 当前基线关闭多卡 sequence，让 CA 每次只选择一个当前原子动作。
+combat_card_sequences_enabled: false
+
+# 当前基线关闭选牌 posterior evaluator，避免和 route/CA 改动混杂。
+reward_posterior_evaluator: false
 
 diagnostics:
   self_consistency:
@@ -113,14 +123,14 @@ seeds: ""
 # 本次运行的局数。
 count: 1
 
-# 每局最多允许的决策步数。这是安全上限；做爬塔层数 benchmark 时应设置得足够大。
-max_steps: 300
+# 每局最多允许的决策步数。这是安全上限；最近完整跑法使用 900。
+max_steps: 900
 
 # JSONL 输出路径。空字符串表示不写 trace 文件，只在终端打印结果。
-out: results/random_ironclad_a0.jsonl
+out: results/coordinator_deepseek_route_lowrisk.jsonl
 
 # JSONL 记录详细程度。metrics 最小；decisions 记录轻量决策摘要；full 记录完整 state、prompt、raw response。
-log_level: metrics
+log_level: decisions
 
 # Generate replay/report artifacts after each benchmark trace is closed.
 trace_analysis: true

@@ -760,6 +760,7 @@ def test_run_config_records_coordinator_context_split():
         route_plan_enforcement = "soft"
         route_map_prompt_format = "canonical"
         route_candidate_objective = "max_restsites"
+        occ_context_mode = "room_process"
         self_consistency_enabled = True
         self_consistency_samples = 5
         self_consistency_decisions = "map_select,card_reward"
@@ -826,6 +827,7 @@ def test_run_config_records_coordinator_combat_mdp_ca_mode():
         turn_chat_update_mode = "delta"
         turn_chat_assistant_history = "compact"
         turn_chat_plan = False
+        occ_context_mode = "room_process"
         reward_posterior_evaluator = True
         character = "Ironclad"
         ascension = 0
