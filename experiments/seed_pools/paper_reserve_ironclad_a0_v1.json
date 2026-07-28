@@ -1,0 +1,8 @@
+[
+  {
+    "seed": "ironclad_a0_20260627",
+    "role": "reserve",
+    "holdout": false,
+    "selection_basis": "Previously completed full-game trajectories exist, but historical coverage is thinner than for the three core seeds."
+  }
+]

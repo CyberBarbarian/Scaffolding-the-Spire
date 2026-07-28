@@ -78,16 +78,24 @@ def test_unified_cli_dispatches_experiment_commands(monkeypatch):
     assert cli.main(["card-choice-bias", "--out", "results/bias.jsonl"]) == 0
     assert cli.main(["card-choice-trace", "--trace", "trace.jsonl", "--out", "results/replay.jsonl"]) == 0
     assert cli.main(["combat-snapshot", "extract", "--trace", "trace.jsonl", "--start-step", "3", "--out", "snapshot.json"]) == 0
+    assert cli.main(["direct-cli-experiment", "--protocol", "protocol.json", "--dry-run"]) == 0
+    assert cli.main(["direct-cli-report", "engine.jsonl", "--config", "config.json", "--summary", "summary.json", "--benchmark-trace", "benchmark.jsonl", "--out-dir", "analysis"]) == 0
+    assert cli.main(["default-v1-experiment", "--protocol", "protocol.json", "--dry-run"]) == 0
     assert cli.main(["trace-analysis", "trace.jsonl", "--out-dir", "artifacts/trace_analysis/run"]) == 0
     assert cli.main(["process-smoke"]) == 0
+    assert cli.main(["parallel", "--suite", "suite.json", "--dry-run"]) == 0
 
     assert calls == [
         ("sts2_bench.card_choice_eval", ["--out", "results/card_choice.jsonl"]),
         ("sts2_bench.card_choice_bias_eval", ["--out", "results/bias.jsonl"]),
         ("sts2_bench.card_choice_trace_eval", ["--trace", "trace.jsonl", "--out", "results/replay.jsonl"]),
         ("sts2_bench.combat_snapshot", ["extract", "--trace", "trace.jsonl", "--start-step", "3", "--out", "snapshot.json"]),
+        ("sts2_bench.direct_cli_experiment", ["--protocol", "protocol.json", "--dry-run"]),
+        ("sts2_bench.direct_cli_report", ["engine.jsonl", "--config", "config.json", "--summary", "summary.json", "--benchmark-trace", "benchmark.jsonl", "--out-dir", "analysis"]),
+        ("sts2_bench.default_v1_experiment", ["--protocol", "protocol.json", "--dry-run"]),
         ("sts2_bench.trace_analysis", ["trace.jsonl", "--out-dir", "artifacts/trace_analysis/run"]),
         ("sts2_bench.process", []),
+        ("sts2_bench.parallel_benchmark", ["--suite", "suite.json", "--dry-run"]),
     ]
 
 
@@ -100,6 +108,11 @@ def test_unified_cli_help_lists_public_commands(capsys):
     assert "run" in output
     assert "card-choice" in output
     assert "combat-snapshot" in output
+    assert "direct-cli-experiment" in output
+    assert "default-v1-experiment" in output
+    assert "parallel" in output
+    assert "reflection-pairs" not in output
+    assert "reflection-triads" not in output
     assert "process-smoke" in output
 
 
@@ -121,4 +134,3 @@ def test_process_smoke_help_does_not_start_runtime(monkeypatch, capsys):
 
     assert process.main(["--help"]) == 0
     assert "process-smoke" in capsys.readouterr().out
-

@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "experiment_id": "nightly-gemini-postfix-b2-route-b-smoke-20260726",
+  "scope": "bounded_post_fix_smoke_only_not_formal_samples",
+  "model": "gemini-3.5-flash",
+  "base_url": "https://zgc.apihy.com/v1",
+  "provider_catalog_timeout_sec": 30,
+  "provider_generation_timeout_sec": 60,
+  "max_parallel_conditions": 1,
+  "paired_scene_max_parallel_arms": 1,
+  "temperature": 0.0,
+  "request_timeout_sec": 180,
+  "request_retries": 1,
+  "condition_timeout_sec": 3600,
+  "fallback_mode": "error",
+  "character": "Defect",
+  "ascension": 0,
+  "lang": "en",
+  "seed": "ironclad_a0_2407",
+  "agent_real_action_budget": 24,
+  "direct_cli_decision_budget": 24,
+  "output_root": "C:/WorkSpace/BG-Agent/sts2-agent-bench/results/nightly_gemini_postfix_b2_route_b_smoke_20260726",
+  "parallel_conditions": [
+    {
+      "id": "B2_full_bg_agent",
+      "runner": "agent",
+      "template": "experiments/ablation_combat_state_only_defect_template_20260726.json",
+      "derive": "managed_control",
+      "treatment": "post-fix full role-specialized BG-Agent control"
+    }
+  ],
+  "paired_scene_condition": {
+    "id": "A5_no_rule_projection_recent_changes",
+    "source_condition": "B2_full_bg_agent",
+    "selection": "first combat_play decision after an accepted in-combat action with a non-empty authoritative last_action_result",
+    "control": "rule projection and immediate preceding state-change display enabled",
+    "treatment": "both rule projection and immediate preceding state-change display removed",
+    "steps_per_arm": 1,
+    "pairing": "same replay snapshot, model, temperature, legal actions, and authoritative state"
+  },
+  "release_gate": {
+    "formal_pool_eligible": false,
+    "intentional_budget_stop_is_expected": true,
+    "reward_posterior_authoritative_state_fix_required": true,
+    "managed_turn_intent_history_fix_required": true,
+    "formal_batches_remain_blocked_until_manual_review": true
+  }
+}

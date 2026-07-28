@@ -1,0 +1,20 @@
+{
+  "schema_version": 2,
+  "extends": "full_run_research_memory_v24_lossless_action_context_capacity.json",
+  "extends_sha256": "A996D30A43793CE36D6460BF039C46655D579E4C7F494320BACF8384C5419385",
+  "overrides": {
+    "experiment_id": "full-run-research-memory-v25-complete-context-retry-and-artifact-integrity",
+    "study_phase": "natural_exposure_pilot",
+    "purpose": "Minimal system-integrity successor to V24. V25 preserves the frozen baseline, complete state/card/legal-action context, CoT route behavior, memory semantics, retrieval, injection and reflection schedules. When a reflection response is empty or output-truncated, its bounded format retry now receives the same complete evidence instead of an information-free empty-body repair request. Ordinary nonempty JSON syntax errors retain syntax-only repair. Seed manifests hash every memory snapshot and seed-specific audit rows; arm manifests hash the final memory store and audit log. V24 remains an immutable pre-acceptance artifact.",
+    "memory": {
+      "reflection_retry_contract": "Nonempty non-truncated malformed JSON uses syntax-only repair. Empty or finish_reason=length output uses the existing bounded retry budget to regenerate from the identical complete evidence plus a compact-JSON instruction; no evidence is omitted and no semantic Python judgment is added.",
+      "artifact_integrity_contract": "Every seed memory snapshot is path-and-SHA256 bound in its manifest; seed audit rows are count-and-hash bound; the final arm manifest path-and-SHA256 binds memory_store.json and memory_store.audit.jsonl."
+    },
+    "freeze": {
+      "intervention_files": {
+        "sts2_bench/layered_experience.py": "1B0F08D57A582BCE7D9EE828C65B9CCDEF1F97A25A88A57591BF086A373FD866",
+        "sts2_bench/full_reflection_pairs.py": "E3F93FCAA7B8192C89227BD6421EFC149E61BF72964C0BCDA22CF4637185EB9B"
+      }
+    }
+  }
+}

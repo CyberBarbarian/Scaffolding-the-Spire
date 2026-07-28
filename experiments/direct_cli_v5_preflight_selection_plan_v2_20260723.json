@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "selection_plan_id": "direct-cli-v5-preflight-selection-v2-20260723",
+  "locked_at": "2026-07-23T03:19:28.3876517+00:00",
+  "status": "locked_before_provider_calls",
+  "model": "deepseek-v4-flash",
+  "base_url": "https://zgc.apihy.com/v1",
+  "preflight_output_limit_control": "provider_default_omitted",
+  "output_root": "results/direct_cli_v5_preflight_v7_20260723",
+  "call_policy": {
+    "max_provider_calls_per_context": 1,
+    "request_retries": 0,
+    "failure_disposition": "preserve_and_invalidate_plan"
+  },
+  "standard_selection_rule": "For each frozen source trace, select terminal_decision indexes 0, floor((N-1)/2), and N-1, where N is the complete number of terminal_decision events in that trace.",
+  "historical_failure_rule": "Replay every finish_reason=length model_protocol_error recorded before the v4 protocol was invalidated; the frozen ledger contains exactly the three named contexts below, all produced with max_tokens=4096.",
+  "paper_sample": false,
+  "sources": [
+    {"source_id": "ironclad_v3_seed1007_rep1", "character": "Ironclad", "artifacts_path": "results/direct_cli_rules_v2_formal_ironclad_v3_20260723/runs/ironclad_a0_1007/replicate_01/attempts/attempt_001/artifacts", "config_sha256": "ea54b5264dfbe88e5193cff6c4c955b97eb89f4148bd7624d8d8fe18cee7aa5c", "events_sha256": "7743e59c52bdac1c6713ecb72b490ff4dc12701061bda7fdf7b27131059441a4", "terminal_sha256": "e63fca5ca7195d6be19b2956a3ade2fd917e64e6840ea7db88166ec4f577bafc", "terminal_decision_count": 50, "source_max_tokens": 512},
+    {"source_id": "silent_v3_seed3407_rep1", "character": "Silent", "artifacts_path": "results/direct_cli_rules_v2_formal_silent_v3_20260723/runs/ironclad_a0_3407/replicate_01/attempts/attempt_001/artifacts", "config_sha256": "7af9925e098725bdeaa1dd64e2ff9b363498e9a49f9b727d5152d2e5ebc38d0e", "events_sha256": "50afb0284097285e1342bace524cff719437c098f8e9580cb3a083503285af45", "terminal_sha256": "1f5a5a606bb30579d81bb68b58ee697c3beec651a4ea39da08d272b1db4349a1", "terminal_decision_count": 21, "source_max_tokens": 512},
+    {"source_id": "defect_v3_seed1007_rep1", "character": "Defect", "artifacts_path": "results/direct_cli_rules_v2_formal_defect_v3_20260723/runs/ironclad_a0_1007/replicate_01/attempts/attempt_001/artifacts", "config_sha256": "dbba8e71ac88e9799f94fc4cee891c7fd835a727998822444ce3fa0ddf6682e9", "events_sha256": "4574058800fa2162795d31137d2c3878f1a8420c7a936d5c5c0fc03e999bc97b", "terminal_sha256": "72e3875766c5e9d228561cb4d80a43ad93e4aa61d058bbb407525246a2cf7d19", "terminal_decision_count": 32, "source_max_tokens": 512},
+    {"source_id": "regent_v3_seed1007_rep1", "character": "Regent", "artifacts_path": "results/direct_cli_rules_v2_formal_regent_v3_20260723/runs/ironclad_a0_1007/replicate_01/attempts/attempt_001/artifacts", "config_sha256": "2d37e23c911d3366fed704ae2350e88b1c50818299a8401cdd06ae3f4ac17e09", "events_sha256": "e471589111f1867612da6dcd763a597dc9638c4a47d456b907ae88d62b904adf", "terminal_sha256": "0341bf57423c1464a36d233fe049d6b2af28a5ce833e513369dc451e6182a8a9", "terminal_decision_count": 32, "source_max_tokens": 512},
+    {"source_id": "necrobinder_v3_seed2407_rep1", "character": "Necrobinder", "artifacts_path": "results/direct_cli_rules_v2_formal_necrobinder_v3_20260723/runs/ironclad_a0_2407/replicate_01/attempts/attempt_001/artifacts", "config_sha256": "2d24baec81758d8b0607c0682b93dd30051b22908c10d027dd09f761297c6bb7", "events_sha256": "68cfbe5326752a09d8ef4e5e4f8393c49dc4e06867c7596979f2a1ad3c13940a", "terminal_sha256": "794a7bc111e1308e00c9687552d4c3356e1b22d05b753c2a6edf220d6b109f72", "terminal_decision_count": 32, "source_max_tokens": 512},
+    {"source_id": "defect_v4_seed3407_rep1", "character": "Defect", "artifacts_path": "results/direct_cli_rules_v2_formal_defect_v4_20260723/runs/ironclad_a0_3407/replicate_01/attempts/attempt_001/artifacts", "config_sha256": "5f0872d67d370e60dad44e68105a5b442fe77f60ee949474e3cb274a75ed7f17", "events_sha256": "85ac653191f463578b06a8d48c0a18b9251dc932f5d8e8fa2392bc019d36cccd", "terminal_sha256": "7202e33322781679b13442eabc53f8ed9e7e34eb096c82839438d8b8ed377b23", "terminal_decision_count": 2, "source_max_tokens": 4096},
+    {"source_id": "regent_v4_seed1007_rep1", "character": "Regent", "artifacts_path": "results/direct_cli_rules_v2_formal_regent_v4_20260723/runs/ironclad_a0_1007/replicate_01/attempts/attempt_001/artifacts", "config_sha256": "f2c8a1a37e31653413f6fec42d3b3273a7f83330b6572a4a123a14000fa50f04", "events_sha256": "cffec0d00a3383dd0505f13c8a94f8b9ae157eeab7e6a0526e0c06b2534cc848", "terminal_sha256": "72d2ba2a8487c593b3c06d7f61a78e14230cd5a4fcd0e5c0ad19f7f5d1acce44", "terminal_decision_count": 11, "source_max_tokens": 4096},
+    {"source_id": "regent_v4_seed2407_rep1", "character": "Regent", "artifacts_path": "results/direct_cli_rules_v2_formal_regent_v4_20260723/runs/ironclad_a0_2407/replicate_01/attempts/attempt_001/artifacts", "config_sha256": "b2e8a2b8987d865f9e8a593dc40e4ae8f5fd1aebf13b4f7ddaedbe75cd4fb7e7", "events_sha256": "fd315d545c37b1bdf2b11bab791fa2a38601609bf2499b75763c4911f8c345a8", "terminal_sha256": "3d5be7198636031306c4cca34b927a704719c455dad243369237bf31afb7569b", "terminal_decision_count": 23, "source_max_tokens": 4096}
+  ],
+  "contexts": [
+    {"name": "ironclad_1007_d0", "source_id": "ironclad_v3_seed1007_rep1", "character": "Ironclad", "selection": "early", "decision_index": 0},
+    {"name": "ironclad_1007_d24", "source_id": "ironclad_v3_seed1007_rep1", "character": "Ironclad", "selection": "middle", "decision_index": 24},
+    {"name": "ironclad_1007_d49", "source_id": "ironclad_v3_seed1007_rep1", "character": "Ironclad", "selection": "late", "decision_index": 49},
+    {"name": "silent_3407_d0", "source_id": "silent_v3_seed3407_rep1", "character": "Silent", "selection": "early", "decision_index": 0},
+    {"name": "silent_3407_d10", "source_id": "silent_v3_seed3407_rep1", "character": "Silent", "selection": "middle", "decision_index": 10},
+    {"name": "silent_3407_d20", "source_id": "silent_v3_seed3407_rep1", "character": "Silent", "selection": "late", "decision_index": 20},
+    {"name": "defect_1007_d0", "source_id": "defect_v3_seed1007_rep1", "character": "Defect", "selection": "early", "decision_index": 0},
+    {"name": "defect_1007_d15", "source_id": "defect_v3_seed1007_rep1", "character": "Defect", "selection": "middle", "decision_index": 15},
+    {"name": "defect_1007_d31", "source_id": "defect_v3_seed1007_rep1", "character": "Defect", "selection": "late", "decision_index": 31},
+    {"name": "regent_1007_d0", "source_id": "regent_v3_seed1007_rep1", "character": "Regent", "selection": "early", "decision_index": 0},
+    {"name": "regent_1007_d15", "source_id": "regent_v3_seed1007_rep1", "character": "Regent", "selection": "middle", "decision_index": 15},
+    {"name": "regent_1007_d31", "source_id": "regent_v3_seed1007_rep1", "character": "Regent", "selection": "late", "decision_index": 31},
+    {"name": "necrobinder_2407_d0", "source_id": "necrobinder_v3_seed2407_rep1", "character": "Necrobinder", "selection": "early", "decision_index": 0},
+    {"name": "necrobinder_2407_d15", "source_id": "necrobinder_v3_seed2407_rep1", "character": "Necrobinder", "selection": "middle", "decision_index": 15},
+    {"name": "necrobinder_2407_d31", "source_id": "necrobinder_v3_seed2407_rep1", "character": "Necrobinder", "selection": "late", "decision_index": 31},
+    {"name": "defect_3407_d2", "source_id": "defect_v4_seed3407_rep1", "character": "Defect", "selection": "historical_failure", "decision_index": 2},
+    {"name": "regent_1007_d11", "source_id": "regent_v4_seed1007_rep1", "character": "Regent", "selection": "historical_failure", "decision_index": 11},
+    {"name": "regent_2407_d23", "source_id": "regent_v4_seed2407_rep1", "character": "Regent", "selection": "historical_failure", "decision_index": 23}
+  ]
+}

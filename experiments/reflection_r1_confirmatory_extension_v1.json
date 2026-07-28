@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "extension_id": "reflection-r1-triggered-scenes-blocks-3-to-5",
+  "declared_at_local_date": "2026-07-13",
+  "analysis_status": "user_directed_extension_after_reviewing_blocks_1_to_2",
+  "description": "Add three fresh matched B0/R0/R1 blocks only for the three scenes where R1 delivered at least once. This is a confirmatory trend extension, not the preregistered Stage 2 and not pooled as if declared before blocks 1-2 were observed.",
+  "parent_experiment": "experiments/reflection_r1_v1.json",
+  "parent_experiment_sha256": "f6a2a9ce702a2a81526ecb375f8904abe487c3529a0b162c29c8245ff110bbe5",
+  "parent_stage1_analysis": "results/reflection_triads_r1_v1_20260712/triad_analysis.json",
+  "parent_stage1_analysis_sha256": "b98ea863d835ea18d4fe804619fa4ff5a33f0a915a5a8c9696370428802a42d7",
+  "parent_stage1_suite_status_sha256": "159c6801b2d04fdbe5bb134bcf2c186e9b4e07154834022924aef8fd01a2380f",
+  "output_root": "results/reflection_triads_r1_confirmatory_20260713",
+  "selected_scenarios": [
+    "act1_kin_boss_multienemy_loss67",
+    "act2_entomancer_multihit_elite_loss43",
+    "act3_mecha_knight_lategame_elite_loss25"
+  ],
+  "excluded_scenarios": {
+    "act1_bygone_effigy_elite_loss52": "R1 delivered zero times in both exploratory blocks; repeating the unchanged gate would not test reflection exposure.",
+    "act3_queen_multienemy_boss_loss42": "R1 delivered zero times in both exploratory blocks; gate redesign would define a new intervention that cannot be pooled with R1 v1."
+  },
+  "block_range": [3, 5],
+  "new_triad_count": 9,
+  "new_arm_count": 27,
+  "target_total_blocks_per_selected_scenario": 5,
+  "workers": 3,
+  "start_interval_sec": 5.0,
+  "endpoint_failure_limit": 2,
+  "frozen_sources": {
+    "reflection_probe": "406aae3b5d303b60f25bd9fc6e5cc7a817a0c44ced274e5d6e35936f1013c6a0",
+    "reflection_r1": "c1d9bbc31e12bda0cc569e98825ef64ad1fa1188f99a9beb1d1b7a9fa06c4f46",
+    "reflection_triads_extension_runner": "dd6b4c1af383bc40d77dd37be7a2a6963e2da7db9e3a1f5a39b29f858855c804",
+    "reflection_extension_launcher": "a14b270bd5a804a92bc2fe73a726844be4cd9fcb28d1d8111979c3d5597d3cb2"
+  },
+  "invariants": [
+    "Do not change the frozen baseline.",
+    "Do not change reflection-card text or R1 gate semantics.",
+    "Run B0/R0/R1 serially inside each triad and parallelize only across triads.",
+    "Stop submitting new triads after two consecutive endpoint failures.",
+    "Report blocks 3-5 separately before showing cumulative five-block trends."
+  ]
+}

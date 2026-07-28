@@ -1,10 +1,17 @@
 import json
 import re
 
+import pytest
+
 from sts2_bench.actions import LegalAction
 from sts2_bench.evidence import build_evidence_bundle
 from sts2_bench.runner import _decision_log_entry
-from sts2_bench.trace_analysis import analyze_benchmark_trace, analyze_trace
+from sts2_bench.trace_analysis import (
+    TRACE_ANALYSIS_MARKER,
+    TRACE_ANALYSIS_MARKER_CONTENT,
+    analyze_benchmark_trace,
+    analyze_trace,
+)
 
 
 def _write_jsonl(path, rows):
@@ -292,8 +299,45 @@ def test_analyze_benchmark_trace_splits_multi_run_reports(tmp_path):
     assert (out_dir / "00_seed_a" / "replay.md").is_file()
     assert (out_dir / "01_seed_b.jsonl").is_file()
     assert (out_dir / "01_seed_b" / "deck_and_card_rewards_zh.md").is_file()
+    assert (out_dir / TRACE_ANALYSIS_MARKER).read_text(encoding="utf-8") == TRACE_ANALYSIS_MARKER_CONTENT
     saved_index = json.loads((out_dir / "index.json").read_text(encoding="utf-8"))
     assert saved_index["run_count"] == 2
+
+
+def test_trace_analysis_directory_marker_proves_output_ownership(tmp_path):
+    trace_path = tmp_path / "trace.jsonl"
+    _write_jsonl(
+        trace_path,
+        [
+            {"type": "start", "seed": "seed-a", "character": "Ironclad", "ascension": 0},
+            {
+                "type": "result",
+                "result": {
+                    "seed": "seed-a",
+                    "character": "Ironclad",
+                    "ascension": 0,
+                    "victory": False,
+                    "error": None,
+                },
+            },
+        ],
+    )
+    unsafe = tmp_path / "source-material"
+    unsafe.mkdir()
+    sentinel = unsafe / "keep.txt"
+    sentinel.write_text("preserve\n", encoding="utf-8")
+
+    with pytest.raises(FileExistsError, match="non-empty unowned directory"):
+        analyze_trace(trace_path, unsafe)
+    assert sentinel.read_text(encoding="utf-8") == "preserve\n"
+    assert not (unsafe / TRACE_ANALYSIS_MARKER).exists()
+
+    owned = tmp_path / "empty-output"
+    owned.mkdir()
+    analyze_trace(trace_path, owned)
+    assert (owned / TRACE_ANALYSIS_MARKER).read_text(encoding="utf-8") == TRACE_ANALYSIS_MARKER_CONTENT
+    analyze_trace(trace_path, owned)
+    assert (owned / "summary.json").is_file()
 
 
 def test_decision_log_entry_records_evidence_summary_flags():
@@ -351,6 +395,32 @@ def test_decision_log_entry_records_evidence_summary_flags():
     assert entry["evidence_bundle"]["deck_summary_visible"] is True
     assert entry["evidence_bundle"]["deck_group_count"] == 2
     assert entry["evidence_bundle"]["decision_type"] == "card_reward"
+
+
+def test_full_decision_log_preserves_authoritative_engine_state():
+    state = _state(
+        "combat_play",
+        act=1,
+        floor=3,
+        room="Monster",
+        hp=65,
+        hand=[{"index": 0, "instance_id": "card-instance-17", "name": "Strike"}],
+        draw_pile=[{"instance_id": "draw-instance-2", "name": "Bash"}],
+        inactive_enemies=[{"instance_id": "enemy-old-1", "name": "Slime"}],
+    )
+
+    entry = _decision_log_entry(
+        log_level="full",
+        step=4,
+        state=state,
+        legal_actions=[],
+        prompt="prompt",
+    )
+
+    assert entry["authoritative_state"] == state
+    assert entry["authoritative_state"]["hand"][0]["instance_id"] == "card-instance-17"
+    assert entry["authoritative_state"]["draw_pile"][0]["instance_id"] == "draw-instance-2"
+    assert entry["authoritative_state"]["inactive_enemies"][0]["instance_id"] == "enemy-old-1"
 
 
 def test_analyze_trace_writes_replay_metrics_and_high_risk_events(tmp_path):
@@ -936,6 +1006,61 @@ def test_post_card_reward_skip_cleanup_is_not_reported_as_unopened_pack(tmp_path
     assert report["card_rewards"][0]["offered"] == ["Bloodletting", "Anger", "Expect a Fight"]
 
 
+def test_analyze_trace_prefers_authoritative_terminal_deck(tmp_path):
+    trace_path = tmp_path / "authoritative_terminal.jsonl"
+    out_dir = tmp_path / "analysis"
+    terminal_state = {
+        "decision": "game_over",
+        "victory": True,
+        "context": {"act": 3, "floor": 51, "room_type": "Boss"},
+        "player": {
+            "hp": 7,
+            "max_hp": 80,
+            "gold": 12,
+            "deck_size": 2,
+            "deck": [
+                {"id": "strike", "name": "Strike", "upgrade_level": 0},
+                {"id": "bash", "name": "Bash", "upgrade_level": 1},
+            ],
+            "relics": [{"id": "burning_blood", "name": "Burning Blood"}],
+            "potions": [],
+        },
+    }
+    _write_jsonl(
+        trace_path,
+        [
+            {"type": "start", "seed": "seed-terminal", "character": "Ironclad", "ascension": 0},
+            {
+                "type": "result",
+                "result": {
+                    "seed": "seed-terminal",
+                    "character": "Ironclad",
+                    "ascension": 0,
+                    "victory": True,
+                    "decision": "game_over",
+                    "deck_size": 2,
+                    "error": None,
+                    "truncated": False,
+                    "extra": {"authoritative_terminal_state": terminal_state},
+                },
+            },
+        ],
+    )
+
+    report = analyze_trace(trace_path, out_dir)
+
+    assert report["final_deck"]["source"] == "authoritative_terminal_state"
+    assert [card["name"] for card in report["final_deck"]["cards"]] == ["Strike", "Bash"]
+    assert report["final_deck"]["cards"][1]["upgrade_level"] == 1
+    assert report["final_deck"]["engine_card_objects"] == terminal_state["player"]["deck"]
+    assert report["final_inventory"]["source"] == "authoritative_terminal_state"
+    assert report["final_inventory"]["relics"] == terminal_state["player"]["relics"]
+    assert report["final_inventory"]["potions"] == []
+    assert report["terminal_state"] == terminal_state
+    deck_report = (out_dir / "deck_and_card_rewards_zh.md").read_text(encoding="utf-8")
+    assert "终局牌组（引擎终局状态）" in deck_report
+
+
 def test_analyze_trace_reconstructs_final_deck_and_writes_chinese_deck_report(tmp_path):
     trace_path = tmp_path / "deck_reconstruction.jsonl"
     out_dir = tmp_path / "analysis"
@@ -1211,6 +1336,16 @@ def test_analyze_trace_splits_multi_card_bundle_deck_additions(tmp_path):
                 hp=80,
                 max_hp=80,
                 player={"hp": 80, "max_hp": 80, "gold": 99, "deck_size": 10},
+                bundles=[
+                    {
+                        "index": 1,
+                        "cards": [
+                            {"id": "CARD.IRON_WAVE", "name": "Iron Wave", "upgraded": False},
+                            {"id": "CARD.SHRUG_IT_OFF", "name": "Shrug It Off", "upgraded": False},
+                            {"id": "CARD.DISMANTLE", "name": "Dismantle", "upgraded": False},
+                        ],
+                    }
+                ],
             ),
             [
                 {
@@ -1220,7 +1355,13 @@ def test_analyze_trace_splits_multi_card_bundle_deck_additions(tmp_path):
                 }
             ],
         ),
-        _action(0, "bundle_select", "select bundle 1: Iron Wave, Shrug It Off, Dismantle", "bundle_select"),
+        _action(
+            0,
+            "bundle_select",
+            "select bundle 1: Iron Wave, Shrug It Off, Dismantle",
+            "bundle_select",
+            command={"cmd": "action", "action": "select_bundle", "args": {"bundle_index": 1}},
+        ),
         _decision(
             1,
             _state(
@@ -1265,6 +1406,90 @@ def test_analyze_trace_splits_multi_card_bundle_deck_additions(tmp_path):
     assert report["final_deck"]["matches_result_deck_size"] is True
     names = [card["name"] for card in report["final_deck"]["cards"]]
     assert names[-3:] == ["Iron Wave", "Shrug It Off", "Dismantle"]
+    assert report["bundle_selections"] == [
+        {
+            "step": 0,
+            "act": 1,
+            "floor": 1,
+            "room_type": "Event",
+            "hp": 80,
+            "max_hp": 80,
+            "bundle_index": 1,
+            "selected": "select bundle 1: Iron Wave, Shrug It Off, Dismantle",
+            "cards": ["Iron Wave", "Shrug It Off", "Dismantle"],
+            "cards_zh": ["铁斩波", "耸肩无视", "拆卸"],
+            "cards_bilingual": ["铁斩波 / Iron Wave", "耸肩无视 / Shrug It Off", "拆卸 / Dismantle"],
+            "engine_cards": [
+                {"id": "CARD.IRON_WAVE", "name": "Iron Wave", "upgraded": False},
+                {"id": "CARD.SHRUG_IT_OFF", "name": "Shrug It Off", "upgraded": False},
+                {"id": "CARD.DISMANTLE", "name": "Dismantle", "upgraded": False},
+            ],
+        }
+    ]
+
+
+def test_analyze_trace_uses_first_authoritative_deck_for_non_ironclad_character(tmp_path):
+    trace_path = tmp_path / "silent_initial_deck.jsonl"
+    out_dir = tmp_path / "analysis"
+    starter_deck = [
+        {"id": "CARD.STRIKE_SILENT", "name": "Strike"},
+        {"id": "CARD.DEFEND_SILENT", "name": "Defend"},
+        {"id": "CARD.NEUTRALIZE", "name": "Neutralize"},
+    ]
+    rows = [
+        {"type": "start", "seed": "seed-s", "character": "Silent", "ascension": 0},
+        _decision(
+            0,
+            _state(
+                "map_select",
+                act=1,
+                floor=1,
+                room="Map",
+                hp=70,
+                max_hp=70,
+                player={
+                    "hp": 70,
+                    "max_hp": 70,
+                    "gold": 99,
+                    "deck_size": 3,
+                    "deck": starter_deck,
+                },
+            ),
+            [_map_action(0, "go to Monster at col=0 row=0", 0, 0)],
+        ),
+        _action(
+            0,
+            "map_select",
+            "go to Monster at col=0 row=0",
+            "map",
+            command={"cmd": "action", "action": "select_map_node", "args": {"col": 0, "row": 0}},
+        ),
+        {
+            "type": "result",
+            "result": {
+                "seed": "seed-s",
+                "character": "Silent",
+                "ascension": 0,
+                "victory": False,
+                "decision": "game_over",
+                "act": 1,
+                "floor": 1,
+                "room_type": "Monster",
+                "hp": 70,
+                "max_hp": 70,
+                "deck_size": 3,
+                "error": None,
+                "truncated": False,
+            },
+        },
+    ]
+    _write_jsonl(trace_path, rows)
+
+    report = analyze_trace(trace_path, out_dir)
+
+    assert report["final_deck"]["initial_source"] == "trace_initial_state"
+    assert report["final_deck"]["initial_size"] == 3
+    assert [card["name"] for card in report["final_deck"]["cards"]] == ["Strike", "Defend", "Neutralize"]
 
 
 def test_analyze_trace_does_not_use_mid_run_card_select_as_initial_deck(tmp_path):

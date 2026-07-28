@@ -40,7 +40,12 @@ def execute_card_sequence(
     commands_executed: list[dict[str, Any]] = []
     for step in plan:
         if current.get("decision") != "combat_play":
-            return CardSequenceResult(current, steps_executed, "manual decision is required")
+            return CardSequenceResult(
+                current,
+                steps_executed,
+                "manual decision is required",
+                commands_executed,
+            )
 
         hand = current.get("hand", [])
         energy = current.get("energy", 0)
@@ -51,13 +56,23 @@ def execute_card_sequence(
         has_explicit_target = requested_target_index is not None
         card = _find_sequence_card(hand, step)
         if card is None:
-            return CardSequenceResult(current, steps_executed, f"card index {card_index} is no longer in hand")
+            return CardSequenceResult(
+                current,
+                steps_executed,
+                f"card index {card_index} is no longer in hand",
+                commands_executed,
+            )
         if stop_if_card is not None:
             stopped_reason = stop_if_card(card)
             if stopped_reason:
                 return CardSequenceResult(current, steps_executed, stopped_reason, commands_executed)
         if not card.get("can_play") or _card_cost_value(card) > energy:
-            return CardSequenceResult(current, steps_executed, f"{_name(card.get('name'))} cannot be played now")
+            return CardSequenceResult(
+                current,
+                steps_executed,
+                f"{_name(card.get('name'))} cannot be played now",
+                commands_executed,
+            )
 
         args = {"card_index": card["index"]}
         if card.get("target_type") == "AnyEnemy":
@@ -69,14 +84,25 @@ def execute_card_sequence(
                         current,
                         steps_executed,
                         f"enemy target {requested_target_index} is not available",
+                        commands_executed,
                     )
                 args["target_index"] = target_index
             elif len(live_enemies) == 1:
                 args["target_index"] = live_enemies[0]["index"]
             else:
-                return CardSequenceResult(current, steps_executed, f"{_name(card.get('name'))} needs a target")
+                return CardSequenceResult(
+                    current,
+                    steps_executed,
+                    f"{_name(card.get('name'))} needs a target",
+                    commands_executed,
+                )
         elif has_explicit_target:
-            return CardSequenceResult(current, steps_executed, f"{_name(card.get('name'))} does not take an enemy target")
+            return CardSequenceResult(
+                current,
+                steps_executed,
+                f"{_name(card.get('name'))} does not take an enemy target",
+                commands_executed,
+            )
 
         command = {"cmd": "action", "action": "play_card", "args": args}
         current = send_fn(command)

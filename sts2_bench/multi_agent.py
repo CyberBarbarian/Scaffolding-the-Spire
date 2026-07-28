@@ -8,12 +8,12 @@ import re
 from dataclasses import dataclass, field, replace
 from typing import Any, Literal
 
-from .actions import LegalAction
+from .actions import LegalAction, action_matches_legal_surface
 from .agents import Agent, FallbackMode, ModelActionError, first_non_view_action
 from .evidence import build_evidence_bundle, render_evidence_context, render_reward_decision_context
 from .posterior import RewardPosteriorEvaluation
 from .routing import route_state
-from .run_context import PLAN_PATCH_KEYS, RunContextStore, render_out_of_combat_context
+from .run_context import RunContextStore, render_out_of_combat_context
 
 
 @dataclass
@@ -172,12 +172,15 @@ class OutOfCombatContextAgent:
     history_window: int = 6
     context_mode: Literal["room_process", "reference_turn"] = "room_process"
     reward_posterior_evaluator: Any | None = None
+    reward_only: bool = False
     history: list[dict[str, str]] = field(default_factory=list)
     room_process: RoomProcessLedger = field(default_factory=RoomProcessLedger)
     _last_reward_context: dict[str, Any] = field(default_factory=dict, init=False, repr=False)
 
     def build_prompt(self, state: dict[str, Any], legal_actions: list[LegalAction]) -> str:
         base_prompt = self.inner.build_prompt(state, legal_actions)
+        if self.reward_only and not _is_card_reward_decision(state):
+            return base_prompt
         evidence_bundle = build_evidence_bundle(state, legal_actions, store=self.store)
         if _is_card_reward_decision(state):
             evidence_bundle, posterior_meta = self._attach_reward_posterior_evaluation(
@@ -193,7 +196,10 @@ class OutOfCombatContextAgent:
             return "\n\n".join(
                 [
                     base_prompt,
-                    render_reward_decision_context(evidence_bundle),
+                    render_reward_decision_context(
+                        evidence_bundle,
+                        posterior_enabled=self.reward_posterior_evaluator is not None,
+                    ),
                     _render_room_process_context(self.room_process, state)
                     if self.context_mode == "room_process"
                     else "",
@@ -222,10 +228,12 @@ class OutOfCombatContextAgent:
         *,
         prompt: str | None = None,
     ) -> tuple[LegalAction, dict[str, Any]]:
+        if self.reward_only and not _is_card_reward_decision(state):
+            return self.inner.choose(state, legal_actions, prompt=prompt)
         chosen_prompt = prompt if prompt is not None else self.build_prompt(state, legal_actions)
         action, meta = self.inner.choose(state, legal_actions, prompt=chosen_prompt)
         meta = dict(meta)
-        meta["active_agent"] = "occ"
+        meta["active_agent"] = "llm" if self.reward_only else "occ"
         evidence_bundle = build_evidence_bundle(state, legal_actions, store=self.store)
         meta["evidence_bundle_hash"] = evidence_bundle.bundle_hash()
         meta["deck_summary_visible"] = evidence_bundle.deck_summary_visible
@@ -244,7 +252,9 @@ class OutOfCombatContextAgent:
         meta["room_process_action_count"] = len(room_process_snapshot.get("actions") or [])
         meta["room_process_inspected_card_reward_count"] = len(room_process_snapshot.get("inspected_card_rewards") or [])
         if _is_card_reward_decision(state):
+            meta["reward_posterior_evaluator_enabled"] = self.reward_posterior_evaluator is not None
             self._attach_reward_posterior_meta(meta, evidence_bundle)
+            meta.setdefault("reward_posterior_evaluation_visible", False)
         return action, meta
 
     def _render_occ_process_context(self, state: dict[str, Any]) -> str:
@@ -279,6 +289,11 @@ class OutOfCombatContextAgent:
         meta: dict[str, Any],
         next_state: dict[str, Any] | None = None,
     ) -> None:
+        if self.reward_only:
+            record = getattr(self.inner, "record_transition", None)
+            if callable(record):
+                record(state, action, meta, next_state)
+            return
         self.record_room_transition(state, action, meta, next_state)
         self._remember_transition(state, action, meta, next_state)
         record = getattr(self.inner, "record_transition", None)
@@ -357,6 +372,13 @@ class CoordinatorAgent:
     store: RunContextStore = field(default_factory=RunContextStore)
     fallback_mode: FallbackMode = "error"
 
+    def __post_init__(self) -> None:
+        occ_store = getattr(self.occ_agent, "store", None)
+        if isinstance(occ_store, RunContextStore) and occ_store is not self.store:
+            raise ValueError(
+                "CoordinatorAgent and its OCC context agent must share the same RunContextStore"
+            )
+
     def build_prompt(self, state: dict[str, Any], legal_actions: list[LegalAction]) -> str:
         route = route_state(state)
         if route.active_agent == "ca":
@@ -386,7 +408,12 @@ class CoordinatorAgent:
             prompt=prompt if prompt is not None else delegate.build_prompt(state, legal_actions),
         )
         meta = dict(meta)
-        action, stale_meta = _guard_action(action, legal_actions, fallback_mode=self.fallback_mode)
+        action, stale_meta = _guard_action(
+            state,
+            action,
+            legal_actions,
+            fallback_mode=self.fallback_mode,
+        )
         meta.update(stale_meta)
         meta["active_agent"] = route.active_agent
         meta["route_reason"] = route.reason
@@ -450,6 +477,17 @@ class CoordinatorAgent:
         record = getattr(delegate, "record_transition", None)
         if callable(record):
             record(state, action, meta, next_state)
+
+    def record_runtime_transition(
+        self,
+        state: dict[str, Any],
+        action: LegalAction,
+        meta: dict[str, Any],
+        next_state: dict[str, Any] | None = None,
+    ) -> None:
+        """Record engine-owned facts without invoking either model delegate."""
+
+        self._record_route_step_transition(state, action, meta, next_state)
 
     def _record_route_step_transition(
         self,
@@ -556,12 +594,13 @@ class CoordinatorAgent:
 
 
 def _guard_action(
+    state: dict[str, Any],
     action: LegalAction,
     legal_actions: list[LegalAction],
     *,
     fallback_mode: FallbackMode,
 ) -> tuple[LegalAction, dict[str, Any]]:
-    if action in legal_actions:
+    if action_matches_legal_surface(state, action, legal_actions):
         return action, {}
     if fallback_mode == "error":
         raise ModelActionError("delegate returned an action outside the current legal action list")
@@ -740,20 +779,12 @@ def _label_mentions_card_reward(label: Any) -> bool:
 def _render_route_occ_context(evidence_bundle, store: RunContextStore, state: dict[str, Any]) -> str:
     context = store.context_slice(state)
     run_memory = context["run_memory"]
-    deck_summary: dict[str, Any] = {"visible": evidence_bundle.deck_summary_visible}
-    if isinstance(evidence_bundle.deck_summary, dict):
-        deck_summary.update(evidence_bundle.deck_summary)
+    active_route_plan = state.get("active_route_plan")
+    if not store.route_plan_enabled or not isinstance(active_route_plan, dict):
+        active_route_plan = None
     payload = {
         "decision": state.get("decision"),
         "snapshot_hash": context["snapshot_hash"],
-        "run_plan": context["run_plan"],
-        "run_memory": {
-            "pending_mandates": run_memory.get("pending_mandates") or [],
-            "recent_facts": run_memory.get("recent_facts") or [],
-        },
-        "route_process": _route_process_for_prompt(run_memory.get("recent_route_steps") or []),
-        "hp_loss_trajectory": _hp_loss_trajectory_for_prompt(run_memory.get("recent_combat_reports") or [], state),
-        "deck_summary": deck_summary,
         "evidence_summary": {
             "decision_type": evidence_bundle.decision_type,
             "legal_action_count": len(evidence_bundle.candidate_evidence),
@@ -771,15 +802,60 @@ def _render_route_occ_context(evidence_bundle, store: RunContextStore, state: di
                 "run_plan_patch",
                 "run_memory_facts",
             ],
-            "allowed_run_plan_patch_keys": sorted(PLAN_PATCH_KEYS),
+            "allowed_run_plan_patch_keys": sorted(store.allowed_plan_patch_keys()),
             "empty_patch": {"run_plan_patch": {}, "run_memory_facts": []},
         },
     }
+    run_plan = context["run_plan"]
+    if store.route_plan_enabled or _mapping_has_content(run_plan):
+        payload["run_plan"] = run_plan
+    pending_mandates = run_memory.get("pending_mandates") or []
+    recent_facts = run_memory.get("recent_facts") or []
+    if pending_mandates or recent_facts:
+        payload["run_memory"] = {
+            "pending_mandates": pending_mandates,
+            "recent_facts": recent_facts,
+        }
+    route_steps = run_memory.get("recent_route_steps") or []
+    if route_steps:
+        payload["route_process"] = _route_process_for_prompt(
+            route_steps,
+            include_route_plan_metadata=store.route_plan_enabled,
+        )
+    recent_combat_reports = run_memory.get("recent_combat_reports") or []
+    if recent_combat_reports:
+        payload["hp_loss_trajectory"] = _hp_loss_trajectory_for_prompt(recent_combat_reports, state)
+    if store.route_plan_enabled:
+        payload["route_plan_authority"] = (
+            "active_route_plan_only" if store.formal_route_plan_enabled else "run_plan"
+        )
+        payload["active_route_plan"] = active_route_plan
     return "Route OCC context JSON:\n" + json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
-def _route_process_for_prompt(route_steps: list[dict[str, Any]]) -> dict[str, Any]:
-    steps = [_route_step_for_prompt(step) for step in route_steps if isinstance(step, dict)]
+def _mapping_has_content(value: Any) -> bool:
+    if not isinstance(value, dict):
+        return bool(value)
+    return any(
+        bool(item)
+        for key, item in value.items()
+        if key != "route_plan"
+    )
+
+
+def _route_process_for_prompt(
+    route_steps: list[dict[str, Any]],
+    *,
+    include_route_plan_metadata: bool = True,
+) -> dict[str, Any]:
+    steps = [
+        _route_step_for_prompt(
+            step,
+            include_route_plan_metadata=include_route_plan_metadata,
+        )
+        for step in route_steps
+        if isinstance(step, dict)
+    ]
     visited_room_types = _unique_nonempty(
         (step.get("selected") or {}).get("type") for step in steps if isinstance(step.get("selected"), dict)
     )
@@ -793,8 +869,12 @@ def _route_process_for_prompt(route_steps: list[dict[str, Any]]) -> dict[str, An
     }
 
 
-def _route_step_for_prompt(step: dict[str, Any]) -> dict[str, Any]:
-    keys = (
+def _route_step_for_prompt(
+    step: dict[str, Any],
+    *,
+    include_route_plan_metadata: bool = True,
+) -> dict[str, Any]:
+    keys = [
         "act",
         "floor",
         "selected",
@@ -802,10 +882,10 @@ def _route_step_for_prompt(step: dict[str, Any]) -> dict[str, Any]:
         "max_hp",
         "gold_at_selection",
         "deck_size_at_selection",
-        "selected_matches_active_plan",
-        "route_plan_event_type",
         "next_decision",
-    )
+    ]
+    if include_route_plan_metadata:
+        keys.extend(("selected_matches_active_plan", "route_plan_event_type"))
     return {key: step.get(key) for key in keys if key in step}
 
 
@@ -1013,7 +1093,7 @@ def _combat_fact_text(
 def _render_occ_history(history: list[dict[str, str]]) -> str:
     lines = [
         "OCC short turn history:",
-        "These entries are reference only; always re-evaluate the current state and choose only a current legal action_id.",
+        "These entries are reference only; always re-evaluate the current state and use the current decision's declared legal selection protocol.",
     ]
     if not history:
         lines.append("- (empty)")

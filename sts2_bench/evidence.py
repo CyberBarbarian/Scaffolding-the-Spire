@@ -7,7 +7,7 @@ import json
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
-from .actions import LegalAction
+from .actions import LegalAction, card_select_combination_count
 from .context import card_cost_label, description_of, name
 from .run_context import RunContextStore
 
@@ -135,7 +135,7 @@ class DeckBuildContextModule:
         }
 
 
-class CombatReflectionModule:
+class RecentTransitionEvidenceModule:
     """Expose recent observed transitions without inventing strategy."""
 
     def build(self, state: dict[str, Any], legal_actions: list[LegalAction]) -> dict[str, Any]:
@@ -177,6 +177,46 @@ class RouteEvidenceModule:
             "state_facts": [f"route_candidate_count={len(candidates)}"],
             "candidate_evidence": candidates,
             "missing_information": missing_information,
+        }
+
+
+class CardSelectEvidenceModule:
+    """Describe the exact subset rule without repeating every legal combination."""
+
+    def build(self, state: dict[str, Any], legal_actions: list[LegalAction]) -> dict[str, Any]:
+        min_select = int(state.get("min_select", 1) or 0)
+        max_select = int(state.get("max_select", min_select) or min_select)
+        nonempty_min_select = max(1, min_select)
+        non_selection_candidates = [
+            _candidate_from_action(action)
+            for action in legal_actions
+            if action.kind not in {"card_select", "card_select_space"}
+            and action.command.get("cmd") != "bench_view"
+        ]
+        cards = state.get("cards") or []
+        candidate_indices = [card.get("index") for card in cards if isinstance(card, dict)]
+        candidate_payload = json.dumps(cards, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        candidate_digest = hashlib.sha256(candidate_payload.encode("utf-8")).hexdigest()
+        return {
+            "state_facts": [
+                f"card_select_candidate_count={len(cards)}",
+                "card_select_candidate_indices="
+                + json.dumps(candidate_indices, ensure_ascii=False, separators=(",", ":")),
+                f"card_select_candidate_digest_sha256={candidate_digest}",
+                f"card_select_min_select={min_select}",
+                f"card_select_max_select={max_select}",
+                f"card_select_nonempty_min_select={nonempty_min_select}",
+                f"card_select_can_skip={str(any(action.kind == 'card_select_skip' for action in legal_actions)).lower()}",
+                "card_select_legal_combination_count="
+                + str(card_select_combination_count(len(cards), min_select, max_select)),
+                (
+                    "card_select_legal_selection_rule=every non-empty distinct subset of current candidate indices "
+                    "whose size is between nonempty_min_select and max_select; empty selects the separate skip action "
+                    "only when card_select_can_skip=true"
+                ),
+                "card_select_complete_candidate_objects_visible_in_legal_actions=true",
+            ],
+            "candidate_evidence": non_selection_candidates,
         }
 
 
@@ -253,17 +293,21 @@ def render_evidence_context(bundle: EvidenceBundle) -> str:
         [
             "Evidence context (advisory only):",
             "Current game state and current legal actions override this evidence.",
-            "Evidence modules do not score, rank, recommend, or choose actions; the LLM policy must choose exactly one current legal action_id.",
+            "Evidence modules do not score, rank, recommend, or choose actions; the LLM policy must use the current decision's declared legal selection protocol.",
             json.dumps(bundle.to_dict(), ensure_ascii=False, sort_keys=True, separators=(",", ":")),
         ]
     )
 
 
-def render_reward_decision_context(bundle: EvidenceBundle) -> str:
-    return "\n".join(
-        [
+def render_reward_decision_context(
+    bundle: EvidenceBundle,
+    *,
+    posterior_enabled: bool = True,
+) -> str:
+    if posterior_enabled:
+        lines = [
             "Reward decision context: history-free current facts only.",
-            "Use the current state, current legal actions, complete grouped deck inventory, recent combat fact board, and posterior audit.",
+            "Use the current state, current legal actions, complete grouped deck inventory, posterior audit, and any recent combat facts that are present.",
             "When deck_summary_visible is true, the complete grouped deck inventory is already included; do not choose view deck merely to inspect deck composition already shown.",
             "Bayesian-style posterior protocol: treat the unchanged current deck as the baseline, then compare each pick as a post-action deck state conditioned only on current visible evidence.",
             "Taking a card requires a current-evidence marginal improvement over skip. If no offered card materially improves the current deck, choose skip.",
@@ -271,9 +315,31 @@ def render_reward_decision_context(bundle: EvidenceBundle) -> str:
             "Reward posterior deck-state analysis, when present, is a separate evidence-only comparison of candidate deck states. It is not a recommendation and must not override current legal actions.",
             "Do not use prior reward reasons, OCC history, or build plans. Do not assume future archetypes, future rests, or future support cards.",
             "Treat skip card reward as a peer legal action. Compare the current deck against each candidate post-action deck state.",
-            render_evidence_context(bundle),
         ]
-    )
+        visible_bundle = bundle
+    else:
+        lines = [
+            "Card reward decision context: current facts only.",
+            "Use the current state, current legal actions, and complete grouped deck inventory.",
+            "When deck_summary_visible is true, the complete grouped deck inventory is already included; do not choose view deck merely to inspect deck composition already shown.",
+            "Do not use prior reward reasons, OCC history, or build plans. Do not assume future archetypes, future rests, or future support cards.",
+            "Treat skip card reward as a peer legal action when it is currently legal.",
+            "Current deck inventory JSON:",
+            json.dumps(
+                {
+                    "deck_summary": dict(bundle.deck_summary)
+                    if isinstance(bundle.deck_summary, dict)
+                    else None,
+                    "deck_summary_visible": bundle.deck_summary_visible,
+                    "skip_action_visible": bundle.skip_action_visible,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+        ]
+        return "\n".join(lines)
+    return "\n".join([*lines, render_evidence_context(visible_bundle)])
 
 
 def validate_evidence_refs(parsed: dict[str, Any], bundle: EvidenceBundle) -> str | None:
@@ -326,7 +392,7 @@ def evidence_ref_feedback(error: str) -> str:
 
 
 def _modules_for_state(state: dict[str, Any]) -> list[EvidenceModule]:
-    modules: list[EvidenceModule] = [DeckBuildContextModule(), CombatReflectionModule()]
+    modules: list[EvidenceModule] = [DeckBuildContextModule(), RecentTransitionEvidenceModule()]
     decision = state.get("decision")
     if decision in {"card_reward", "combat_reward", "treasure"}:
         modules.append(RewardEvidenceModule())
@@ -334,6 +400,8 @@ def _modules_for_state(state: dict[str, Any]) -> list[EvidenceModule]:
         modules.append(ShopEvidenceModule())
     elif decision == "map_select":
         modules.append(RouteEvidenceModule())
+    elif decision == "card_select":
+        modules.append(CardSelectEvidenceModule())
     else:
         modules.append(GenericEvidenceModule())
     return modules

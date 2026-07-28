@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "gate_id": "reflection-formal-global-v1",
+  "enabled": false,
+  "status": "locked_pending_explicit_reflection_review",
+  "reason": "No Reflection, structured-memory, gated, online, triad, candidate, or fullgame-Reflection artifact is formal until this registry and the selected protocol are explicitly approved together.",
+  "formal_artifact_class": "formal_reflection_sample",
+  "exploratory_artifact_class": "exploratory_reflection_only",
+  "approved_protocol_ids": [],
+  "approved_protocol_hashes": {},
+  "exploratory_surface_families": [
+    "full_run_layered_reflection",
+    "full_run_research_memory",
+    "reflection_probe",
+    "reflection_candidate",
+    "reflection_triads",
+    "reflection_extension",
+    "minimal_gated_reflection",
+    "minimal_structured_memory",
+    "gated_memory",
+    "repeated_gated_fullgame",
+    "sequential_online_memory",
+    "online_cross_domain_memory"
+  ],
+  "formal_summary_acceptance": "deny_unless_gate_enabled_and_protocol_id_approved",
+  "exploratory_run_requirement": "explicit_exploratory_flag",
+  "updated_for": "reflection_integrity_review_20260723"
+}

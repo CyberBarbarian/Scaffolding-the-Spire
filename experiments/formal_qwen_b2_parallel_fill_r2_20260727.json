@@ -1,0 +1,77 @@
+{
+  "schema_version": 1,
+  "experiment_id": "formal-qwen-b2-parallel-fill-r2-20260727",
+  "purpose": "Current-source B2 formal family used to fill spare global model lanes while B1 completes; counted paper slots remain globally unique and mapped outside this matrix.",
+  "output_root": "C:/WorkSpace/BG-Agent/sts2-agent-bench/results/qwen_b2_parallel_fill_r2",
+  "model": "qwen3.6-flash",
+  "base_url": "https://zgc.apihy.com/v1",
+  "global_model_lane_cap": 20,
+  "tokens": [
+    {
+      "id": "qwen-route-latest-20260727",
+      "env_file": "C:/Users/alltr/AppData/Local/Temp/bg_agent_qwen_latest_20260727.env"
+    }
+  ],
+  "retry": {
+    "max_cycles": 3,
+    "backoff_initial_sec": 15,
+    "backoff_cap_sec": 180
+  },
+  "protocols": [
+    {
+      "condition": "b2_full_bg_agent",
+      "character": "Ironclad",
+      "runner": "agent",
+      "template": "ablation_combat_state_only_defect_template_20260726.json",
+      "switches": {
+        "context_mode": "combat_mdp_state",
+        "route_plan": true,
+        "reward_posterior_evaluator": true
+      }
+    },
+    {
+      "condition": "b2_full_bg_agent",
+      "character": "Silent",
+      "runner": "agent",
+      "template": "ablation_combat_state_only_defect_template_20260726.json",
+      "switches": {
+        "context_mode": "combat_mdp_state",
+        "route_plan": true,
+        "reward_posterior_evaluator": true
+      }
+    },
+    {
+      "condition": "b2_full_bg_agent",
+      "character": "Defect",
+      "runner": "agent",
+      "template": "ablation_combat_state_only_defect_template_20260726.json",
+      "switches": {
+        "context_mode": "combat_mdp_state",
+        "route_plan": true,
+        "reward_posterior_evaluator": true
+      }
+    },
+    {
+      "condition": "b2_full_bg_agent",
+      "character": "Regent",
+      "runner": "agent",
+      "template": "ablation_combat_state_only_defect_template_20260726.json",
+      "switches": {
+        "context_mode": "combat_mdp_state",
+        "route_plan": true,
+        "reward_posterior_evaluator": true
+      }
+    },
+    {
+      "condition": "b2_full_bg_agent",
+      "character": "Necrobinder",
+      "runner": "agent",
+      "template": "ablation_combat_state_only_defect_template_20260726.json",
+      "switches": {
+        "context_mode": "combat_mdp_state",
+        "route_plan": true,
+        "reward_posterior_evaluator": true
+      }
+    }
+  ]
+}

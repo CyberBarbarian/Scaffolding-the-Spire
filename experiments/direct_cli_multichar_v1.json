@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "experiment_id": "AGENT-01-MC",
+  "description": "Cross-character extension of the completed Ironclad direct-CLI zero-scaffold baseline.",
+  "reference_experiment": {
+    "character": "Ironclad",
+    "protocol": "experiments/direct_cli_baseline_v1.json",
+    "artifact_root": "results/direct_cli_baseline_v1_20260721",
+    "completed_runs": 15
+  },
+  "new_protocols": [
+    "experiments/direct_cli_baseline_v1_silent.json",
+    "experiments/direct_cli_baseline_v1_defect.json",
+    "experiments/direct_cli_baseline_v1_regent.json",
+    "experiments/direct_cli_baseline_v1_necrobinder.json"
+  ],
+  "characters": [
+    "Silent",
+    "Defect",
+    "Regent",
+    "Necrobinder"
+  ],
+  "matched_seeds": [
+    "ironclad_a0_3407",
+    "ironclad_a0_1007",
+    "ironclad_a0_2407"
+  ],
+  "seed_note": "The seed strings retain their historical ironclad_a0 labels but are reused verbatim for matched cross-character world RNG.",
+  "repeats_per_character_seed": 5,
+  "new_runs": 60,
+  "total_runs_with_reference": 75,
+  "scheduler": {
+    "parallel_experiment_runners": 4,
+    "seed_lanes_per_character": 3,
+    "maximum_concurrent_game_lanes": 12,
+    "within_character_seed_lane": "five_replicates_serial"
+  }
+}

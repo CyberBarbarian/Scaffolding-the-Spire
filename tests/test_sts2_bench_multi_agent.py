@@ -2,14 +2,18 @@ import json
 
 import pytest
 
-from sts2_bench.actions import LegalAction
-from sts2_bench.agents import ModelActionError
+from sts2_bench.actions import (
+    LegalAction,
+    build_legal_actions,
+    materialize_card_select_space_action,
+)
+from sts2_bench.agents import ModelActionError, OpenAICompatAgent
 from sts2_bench.evidence import build_evidence_bundle
 from sts2_bench.multi_agent import CoordinatorAgent, OutOfCombatContextAgent
 from sts2_bench.routing import route_state
 from sts2_bench.run_benchmark import build_run_config
 from sts2_bench.run_context import RunContextStore
-from sts2_bench.runner import agent_from_args
+from sts2_bench.runner import agent_from_args, run_one
 
 
 def _action(action_id=0, kind="map", label="go to Monster"):
@@ -24,6 +28,39 @@ def _action(action_id=0, kind="map", label="go to Monster"):
 def _json_block_after(prompt, marker):
     payload = prompt.split(marker + "\n", 1)[1].split("\n\n", 1)[0]
     return json.loads(payload)
+
+
+def test_occ_card_select_prompt_keeps_complete_cards_without_repeating_subset_evidence():
+    cards = [
+        {
+            "index": index,
+            "name": f"Card {index}",
+            "description": f"Complete effect {index}.",
+            "after_upgrade": {"description": f"Complete upgraded effect {index}."},
+            "engine_extension": {"must_remain_visible": index},
+        }
+        for index in range(12)
+    ]
+    state = {
+        "decision": "card_select",
+        "min_select": 4,
+        "max_select": 4,
+        "can_skip": False,
+        "cards": cards,
+    }
+    legal_actions = build_legal_actions(state)
+    inner = OpenAICompatAgent(base_url="http://127.0.0.1:1", model="test")
+    wrapped = OutOfCombatContextAgent(inner, RunContextStore())
+
+    prompt = wrapped.build_prompt(state, legal_actions)
+
+    action_space = _json_block_after(prompt, "Legal actions:")
+    assert action_space["candidates"] == cards
+    assert action_space["legal_combination_count"] == 495
+    assert "select cards 0,1,2,3" not in prompt
+    evidence = _json_block_after(prompt, "Evidence modules do not score, rank, recommend, or choose actions; the LLM policy must use the current decision's declared legal selection protocol.")
+    assert evidence["candidate_evidence"] == []
+    assert "card_select_legal_combination_count=495" in evidence["state_facts"]
 
 
 class _FakeAgent:
@@ -61,6 +98,83 @@ class _StaleActionAgent(_FakeAgent):
         return stale, {"agent": self.name, "parsed": {"action_id": 99, "reason": "stale"}}
 
 
+class _MaterializedCardSelectAgent(_FakeAgent):
+    def __init__(self, name, selected_indices):
+        super().__init__(name)
+        self.selected_indices = selected_indices
+
+    def choose(self, state, legal_actions, *, prompt=None):
+        self.choices.append((state, legal_actions, prompt))
+        template = next(action for action in legal_actions if action.kind == "card_select_space")
+        action = materialize_card_select_space_action(
+            state,
+            template,
+            self.selected_indices,
+        )
+        return action, {
+            "agent": self.name,
+            "parsed": {
+                "selected_card_indices": list(self.selected_indices),
+                "reason": "Select the requested cards.",
+            },
+        }
+
+
+class _ForgedMaterializedCardSelectAgent(_FakeAgent):
+    def choose(self, state, legal_actions, *, prompt=None):
+        self.choices.append((state, legal_actions, prompt))
+        template = next(action for action in legal_actions if action.kind == "card_select_space")
+        forged = LegalAction(
+            action_id=template.action_id,
+            kind="card_select",
+            label="select cards 0,1,99: Card 0 + Card 1 + Missing",
+            command={
+                "cmd": "action",
+                "action": "select_cards",
+                "args": {"indices": "0,1,99"},
+            },
+        )
+        return forged, {
+            "agent": self.name,
+            "parsed": {
+                "selected_card_indices": [0, 1, 99],
+                "reason": "Forge a stale card selection.",
+            },
+        }
+
+
+class _CardSelectSpaceProcess:
+    def __init__(self, state):
+        self.state = state
+        self.sent_commands = []
+
+    def start(self):
+        pass
+
+    def start_run(self, **kwargs):
+        return self.state
+
+    def send(self, command):
+        self.sent_commands.append(command)
+        return {
+            "decision": "game_over",
+            "victory": False,
+            "context": {"act": 2, "floor": 1, "room_type": "Event"},
+            "player": {
+                "hp": 80,
+                "max_hp": 80,
+                "gold": 0,
+                "deck_size": len(self.state["cards"]),
+                "deck": list(self.state["cards"]),
+                "relics": [],
+                "potions": [],
+            },
+        }
+
+    def close(self):
+        pass
+
+
 class _FakeRewardPosteriorEvaluator:
     def __init__(self):
         self.calls = []
@@ -93,6 +207,58 @@ class _FakeRewardPosteriorEvaluator:
                 "reward_posterior_prompt_chars": 111,
             },
         )
+
+
+def test_coordinator_records_forced_map_fact_without_invoking_model_delegates():
+    ca = _FakeAgent("ca")
+    occ = _FakeAgent("occ")
+    store = RunContextStore(formal_route_plan_enabled=True)
+    coordinator = CoordinatorAgent(ca_agent=ca, occ_agent=occ, store=store)
+    state = {
+        "decision": "map_select",
+        "context": {"act": 1, "floor": 2, "room_type": "Map"},
+        "player": {"hp": 76, "max_hp": 80},
+        "choices": [{"col": 1, "row": 2, "type": "Elite"}],
+        "active_route_plan": {
+            "plan_id": "rp_001",
+            "expected_next": {"col": 1, "row": 2, "type": "Elite"},
+            "remaining": [{"col": 1, "row": 2, "type": "Elite"}],
+        },
+    }
+    action = LegalAction(
+        action_id=0,
+        label="go to Elite at col=1 row=2",
+        command={
+            "cmd": "action",
+            "action": "select_map_node",
+            "args": {"col": 1, "row": 2},
+        },
+        kind="map",
+    )
+    next_state = {
+        "decision": "combat_play",
+        "context": {"act": 1, "floor": 2, "room_type": "Elite"},
+        "player": {"hp": 76, "max_hp": 80},
+    }
+
+    coordinator.record_runtime_transition(
+        state,
+        action,
+        {
+            "agent": "runtime",
+            "policy": "forced_singleton_map",
+            "route_plan_effect": {"outcome": "followed_active_plan"},
+        },
+        next_state,
+    )
+
+    assert ca.choices == []
+    assert occ.choices == []
+    assert ca.transitions == []
+    assert occ.transitions == []
+    assert store.run_memory.facts == []
+    assert len(store.run_memory.route_steps) == 1
+    assert store.run_memory.route_steps[0]["selected_matches_active_plan"] is True
 
 
 def test_route_state_assigns_combat_and_combat_modal_to_ca():
@@ -172,6 +338,43 @@ def test_run_context_store_rejects_unknown_patch_keys():
         )
 
 
+def test_run_context_store_rejects_invalid_patch_atomically():
+    store = RunContextStore()
+    store.run_plan.build_plan = "Original build plan."
+    before = store.to_dict()
+    before_hash = store.snapshot_hash()
+
+    with pytest.raises(ValueError, match="open_threads must be a string or list of strings"):
+        store.apply_agent_patch(
+            {
+                "run_plan_patch": {
+                    "build_plan": "This valid-looking field must not leak through.",
+                    "open_threads": 123,
+                },
+                "run_memory_facts": [{"text": "This fact must not be appended."}],
+            },
+            owner="occ",
+            state={"decision": "card_reward", "context": {"floor": 3}},
+            action=_action(kind="card_reward_skip", label="skip card reward"),
+        )
+
+    assert store.to_dict() == before
+    assert store.snapshot_hash() == before_hash
+
+
+def test_coordinator_rejects_split_brain_occ_context_store():
+    coordinator_store = RunContextStore()
+    occ_store = RunContextStore()
+    occ = OutOfCombatContextAgent(_FakeAgent("occ"), occ_store)
+
+    with pytest.raises(ValueError, match="must share the same RunContextStore"):
+        CoordinatorAgent(
+            ca_agent=_FakeAgent("ca"),
+            occ_agent=occ,
+            store=coordinator_store,
+        )
+
+
 def test_out_of_combat_prompt_includes_rm_rp_slice_and_patch_schema():
     store = RunContextStore()
     store.apply_agent_patch(
@@ -195,6 +398,77 @@ def test_out_of_combat_prompt_includes_rm_rp_slice_and_patch_schema():
     assert "do not score, rank, recommend, or choose actions" in prompt
     assert "Do not leave run_plan_patch empty for a real OCC game action" not in prompt
     assert "occ prompt" in prompt
+
+
+def test_formal_route_plan_store_rejects_legacy_route_plan_patch():
+    store = RunContextStore(formal_route_plan_enabled=True)
+
+    with pytest.raises(ValueError, match="Unsupported run_plan_patch keys: route_plan"):
+        store.apply_agent_patch(
+            {"run_plan_patch": {"route_plan": ["r00c3", "r01c1"]}},
+            owner="occ",
+            state={"decision": "event_choice"},
+            action=_action(kind="event_choice", label="choose option"),
+        )
+
+    assert store.run_plan.route_plan == ""
+
+
+def test_formal_route_plan_map_prompt_hides_legacy_draft_and_exposes_null_active_plan():
+    store = RunContextStore(formal_route_plan_enabled=True)
+    store.run_plan.route_plan = "stale unverified route draft"
+    wrapped = OutOfCombatContextAgent(_FakeAgent("occ"), store)
+    state = {
+        "decision": "map_select",
+        "player": {"hp": 80, "max_hp": 80, "deck": []},
+        "choices": [{"col": 1, "row": 1, "type": "Monster"}],
+    }
+
+    prompt = wrapped.build_prompt(state, [_action(label="go to Monster")])
+    route_context = _json_block_after(prompt, "Route OCC context JSON:")
+
+    assert "stale unverified route draft" not in prompt
+    assert "route_plan" not in route_context["run_plan"]
+    assert route_context["active_route_plan"] is None
+    assert route_context["route_plan_authority"] == "active_route_plan_only"
+    assert "route_plan" not in route_context["output_contract"]["allowed_run_plan_patch_keys"]
+
+
+def test_disabled_route_plan_map_prompt_has_no_persistent_route_channel():
+    store = RunContextStore(
+        formal_route_plan_enabled=False,
+        route_plan_enabled=False,
+    )
+    store.run_plan.route_plan = "stale route draft must stay hidden"
+    store.run_memory.route_steps = [
+        {
+            "kind": "route_step",
+            "act": 1,
+            "floor": 1,
+            "selected": {"col": 1, "row": 1, "type": "Monster"},
+            "selected_matches_active_plan": None,
+            "route_plan_event_type": None,
+            "next_decision": "combat_play",
+        }
+    ]
+    wrapped = OutOfCombatContextAgent(_FakeAgent("occ"), store)
+    state = {
+        "decision": "map_select",
+        "player": {"hp": 80, "max_hp": 80, "deck": []},
+        "choices": [{"col": 1, "row": 1, "type": "Monster"}],
+    }
+
+    prompt = wrapped.build_prompt(state, [_action(label="go to Monster")])
+    route_context = _json_block_after(prompt, "Route OCC context JSON:")
+
+    assert "stale route draft must stay hidden" not in prompt
+    assert "run_plan" not in route_context
+    assert "active_route_plan" not in route_context
+    assert "route_plan_authority" not in route_context
+    assert "route_plan" not in route_context["output_contract"]["allowed_run_plan_patch_keys"]
+    assert "route_decision_contract" not in route_context
+    assert "selected_matches_active_plan" not in route_context["route_process"]["steps"][0]
+    assert "route_plan_event_type" not in route_context["route_process"]["steps"][0]
 
 
 def test_map_out_of_combat_prompt_uses_structured_route_context_without_candidate_duplication():
@@ -249,7 +523,7 @@ def test_map_out_of_combat_prompt_uses_structured_route_context_without_candidat
     assert "OCC short turn history" not in prompt
     assert "candidate_evidence" not in json.dumps(route_context, ensure_ascii=False)
     assert route_context["run_plan"]["route_plan"] == "Prefer the rest path if HP remains low."
-    assert "recent_combat_reports" not in route_context["run_memory"]
+    assert "run_memory" not in route_context
     assert route_context["route_process"]["steps"][0]["selected"] == {"col": 0, "row": 1, "type": "Monster"}
     assert route_context["route_process"]["steps"][0]["hp_at_selection"] == 42
     assert route_context["route_process"]["summary"]["visited_room_types"] == ["Monster"]
@@ -257,7 +531,7 @@ def test_map_out_of_combat_prompt_uses_structured_route_context_without_candidat
     assert route_context["hp_loss_trajectory"]["segments"][0]["room_type"] == "Monster"
     assert route_context["hp_loss_trajectory"]["summary"]["total_hp_loss"] == 8
     assert route_context["hp_loss_trajectory"]["summary"]["current_hp"] == 34
-    assert route_context["deck_summary"]["visible"] is True
+    assert route_context["evidence_summary"]["deck_summary_visible"] is True
     assert route_context["output_contract"]["required_keys"] == [
         "action_id",
         "selected_action_label",
@@ -340,11 +614,15 @@ def test_card_reward_prompt_uses_current_facts_without_run_plan_or_occ_history()
 
     prompt = wrapped.build_prompt(state, [_action(kind="card_reward", label="pick card 0: Shrug It Off")])
 
-    assert "Reward decision context: history-free current facts only" in prompt
+    assert "Card reward decision context: current facts only" in prompt
     assert "complete grouped deck inventory is already included" in prompt
-    assert "unchanged current deck as the baseline" in prompt
-    assert "marginal improvement over skip" in prompt
     assert "complete_grouped_inventory" in prompt
+    assert "posterior" not in prompt.lower()
+    assert "posterior_audit" not in prompt
+    assert "candidate_evidence" not in prompt
+    assert "Evidence context" not in prompt
+    assert "combat_notes" not in prompt
+    assert "COMBAT_EVALUATION" not in prompt
     assert "Old speculative exhaust plan" not in prompt
     assert "Previous card reward reason" not in prompt
     assert "OCC short turn history" not in prompt
@@ -393,9 +671,27 @@ def test_card_reward_prompt_includes_reward_posterior_deck_analysis_when_enabled
     assert "Reward posterior deck-state analysis" in prompt
     assert "comparison_to_unchanged_deck" in prompt
     assert "Skipping keeps the current deck unchanged." in prompt
+    assert meta["reward_posterior_evaluator_enabled"] is True
     assert meta["reward_posterior_evaluation_visible"] is True
     assert meta["reward_posterior_evaluation_hash"] == "abc123"
     assert meta["reward_posterior_evaluator"] == "fake"
+
+
+def test_card_reward_trace_meta_explicitly_records_posterior_off():
+    wrapped = OutOfCombatContextAgent(_FakeAgent("occ"), RunContextStore())
+    state = {
+        "decision": "card_reward",
+        "player": {"deck": [{"name": "Strike"}]},
+        "cards": [{"index": 0, "name": "Zap"}],
+        "can_skip": True,
+    }
+    legal_actions = [_action(kind="card_reward", label="pick card 0: Zap")]
+
+    prompt = wrapped.build_prompt(state, legal_actions)
+    _chosen, meta = wrapped.choose(state, legal_actions, prompt=prompt)
+
+    assert meta["reward_posterior_evaluator_enabled"] is False
+    assert meta["reward_posterior_evaluation_visible"] is False
 
 
 def test_card_reward_does_not_apply_build_plan_patch_or_auto_reason_fact():
@@ -648,6 +944,78 @@ def test_coordinator_strict_guard_raises_for_stale_delegate_action():
         coordinator.choose({"decision": "map_select"}, [_action()])
 
 
+def test_coordinator_accepts_valid_materialized_card_select_space_action():
+    state = {
+        "decision": "card_select",
+        "min_select": 3,
+        "max_select": 3,
+        "can_skip": False,
+        "cards": [{"index": index, "name": f"Card {index}"} for index in range(20)],
+    }
+    legal_actions = build_legal_actions(state)
+    coordinator = CoordinatorAgent(
+        ca_agent=_FakeAgent("ca"),
+        occ_agent=_MaterializedCardSelectAgent("occ", [0, 1, 2]),
+    )
+
+    chosen, meta = coordinator.choose(state, legal_actions)
+
+    assert chosen.kind == "card_select"
+    assert chosen.command["args"]["indices"] == "0,1,2"
+    assert meta["active_agent"] == "occ"
+
+
+def test_coordinator_rejects_forged_materialized_card_select_space_action():
+    state = {
+        "decision": "card_select",
+        "min_select": 3,
+        "max_select": 3,
+        "can_skip": False,
+        "cards": [{"index": index, "name": f"Card {index}"} for index in range(20)],
+    }
+    legal_actions = build_legal_actions(state)
+    coordinator = CoordinatorAgent(
+        ca_agent=_FakeAgent("ca"),
+        occ_agent=_ForgedMaterializedCardSelectAgent("occ"),
+    )
+
+    with pytest.raises(ModelActionError, match="outside the current legal action list"):
+        coordinator.choose(state, legal_actions)
+
+
+def test_runner_executes_materialized_card_select_space_action_end_to_end():
+    state = {
+        "decision": "card_select",
+        "context": {"act": 2, "floor": 1, "room_type": "Event"},
+        "min_select": 3,
+        "max_select": 3,
+        "can_skip": False,
+        "cards": [{"index": index, "name": f"Card {index}"} for index in range(20)],
+    }
+    process = _CardSelectSpaceProcess(state)
+    coordinator = CoordinatorAgent(
+        ca_agent=_FakeAgent("ca"),
+        occ_agent=_MaterializedCardSelectAgent("occ", [0, 1, 2]),
+    )
+
+    result = run_one(
+        agent=coordinator,
+        seed="card-select-space-mini",
+        process=process,
+        max_steps=2,
+    )
+
+    assert result.error is None
+    assert result.decision == "game_over"
+    assert process.sent_commands == [
+        {
+            "cmd": "action",
+            "action": "select_cards",
+            "args": {"indices": "0,1,2"},
+        }
+    ]
+
+
 def test_coordinator_records_transition_on_selected_child_agent():
     ca = _FakeAgent("ca")
     occ = _FakeAgent("occ")
@@ -678,7 +1046,7 @@ def test_agent_from_args_can_build_coordinator_agent():
 
     assert isinstance(agent, CoordinatorAgent)
     assert agent.fallback_mode == "error"
-    assert agent.ca_agent.conversation_mode == "turn_chat"
+    assert agent.ca_agent.conversation_mode == "single_turn"
     assert agent.ca_agent.turn_chat_plan_enabled is True
     assert agent.ca_agent.fallback_mode == "error"
     assert isinstance(agent.occ_agent, OutOfCombatContextAgent)
@@ -701,9 +1069,209 @@ def test_agent_from_args_can_build_coordinator_with_combat_mdp_ca():
 
     assert isinstance(agent, CoordinatorAgent)
     assert agent.ca_agent.conversation_mode == "combat_mdp_state"
-    assert agent.ca_agent.memory_enabled is False
+    assert agent.ca_agent.short_term_memory_enabled is False
     assert isinstance(agent.occ_agent, OutOfCombatContextAgent)
     assert agent.occ_agent.inner.conversation_mode == "single_turn"
+
+
+def test_agent_from_args_keeps_single_turn_ca_as_minimal_combat_context():
+    agent = agent_from_args(
+        "coordinator",
+        base_url="http://127.0.0.1:1",
+        model="test",
+        api_key="local",
+        conversation_mode="single_turn",
+    )
+
+    assert isinstance(agent, CoordinatorAgent)
+    assert agent.ca_agent.conversation_mode == "single_turn"
+    assert agent.ca_agent.turn_chat_buffer.messages == []
+
+
+@pytest.mark.parametrize("posterior_enabled", [True, False])
+def test_single_agent_reuses_history_free_reward_posterior_switch(posterior_enabled):
+    agent = agent_from_args(
+        "llm",
+        base_url="http://127.0.0.1:1",
+        model="test",
+        api_key="local",
+        reward_posterior_evaluator_enabled=posterior_enabled,
+    )
+
+    assert isinstance(agent, OutOfCombatContextAgent)
+    assert agent.reward_only is True
+    assert isinstance(agent.inner, OpenAICompatAgent)
+    assert (agent.reward_posterior_evaluator is not None) is posterior_enabled
+
+
+def test_agent_from_args_propagates_paired_context_switch_to_both_delegates():
+    agent = agent_from_args(
+        "coordinator",
+        base_url="http://127.0.0.1:1",
+        model="test",
+        api_key="local",
+        conversation_mode="single_turn",
+        rule_projection_and_recent_changes_enabled=False,
+    )
+
+    assert isinstance(agent, CoordinatorAgent)
+    assert agent.ca_agent.rule_projection_and_recent_changes_enabled is False
+    assert agent.occ_agent.inner.rule_projection_and_recent_changes_enabled is False
+    assert agent.store.formal_route_plan_enabled is True
+
+
+def test_all_four_ablation_controls_compose_without_provider_call_or_prompt_leak(monkeypatch):
+    agent = agent_from_args(
+        "llm",
+        base_url="http://127.0.0.1:1",
+        model="test",
+        api_key="local",
+        conversation_mode="single_turn",
+        reward_posterior_evaluator_enabled=False,
+        rule_projection_and_recent_changes_enabled=False,
+    )
+    assert isinstance(agent, OutOfCombatContextAgent)
+    assert isinstance(agent.inner, OpenAICompatAgent)
+    monkeypatch.setattr(
+        agent.inner,
+        "_chat",
+        lambda _messages: pytest.fail("prompt-only switch validation must not call a provider"),
+    )
+    state = {
+        "decision": "combat_play",
+        "context": {"act": 1, "floor": 3, "room_type": "Monster"},
+        "energy": 3,
+        "max_energy": 3,
+        "player": {
+            "name": "Defect",
+            "hp": 40,
+            "max_hp": 70,
+            "block": 0,
+            "deck": [
+                {
+                    "id": "CARD.ZAP",
+                    "name": "Zap",
+                    "type": "Skill",
+                    "cost": 1,
+                    "description": "Channel 1 Lightning.",
+                    "upgraded": False,
+                }
+            ],
+            "relics": [{"id": "CRACKED_CORE", "name": "Cracked Core"}],
+            "potions": [{"id": "SWIFT_POTION", "name": "Swift Potion"}],
+        },
+        "hand": [
+            {
+                "index": 0,
+                "id": "CARD.ZAP",
+                "name": "Zap",
+                "type": "Skill",
+                "cost": 1,
+                "description": "Channel 1 Lightning.",
+            }
+        ],
+        "enemies": [{"index": 0, "name": "Jaw Worm", "hp": 40, "block": 0}],
+        "last_action_result": {
+            "action_label": "play Defend",
+            "action_kind": "combat_card",
+            "changes": ["block: 0 -> 5"],
+        },
+    }
+    legal_actions = [
+        LegalAction(
+            action_id=0,
+            kind="combat_end_turn",
+            label="end turn",
+            command={"cmd": "action", "action": "end_turn"},
+        )
+    ]
+
+    prompt = agent.build_prompt(state, legal_actions)
+
+    assert agent.reward_only is True
+    assert agent.reward_posterior_evaluator is None
+    assert agent.inner.conversation_mode == "single_turn"
+    assert "Game rules for the current decision:" not in prompt
+    assert "Last action result:" not in prompt
+    assert '"last_action_result"' not in prompt
+    assert "Zap" in prompt
+    assert "Cracked Core" in prompt
+    assert "Swift Potion" in prompt
+    assert "Jaw Worm" in prompt
+    assert "Legal actions:" in prompt
+    assert "disabled" not in prompt.lower()
+    assert "ablation" not in prompt.lower()
+    for treatment_hint in (
+        "control group",
+        "treatment group",
+        "minimal formal",
+        "minimal context",
+        "simplified context",
+        "no persistent route",
+        "without route plan",
+    ):
+        assert treatment_hint not in prompt.lower()
+
+
+def test_explicit_default_switch_values_preserve_coordinator_prompt_exactly():
+    common = {
+        "base_url": "http://127.0.0.1:1",
+        "model": "test",
+        "api_key": "local",
+        "conversation_mode": "combat_mdp_state",
+        "reward_posterior_evaluator_enabled": True,
+    }
+    implicit = agent_from_args("coordinator", **common)
+    explicit = agent_from_args(
+        "coordinator",
+        **common,
+        rule_projection_and_recent_changes_enabled=True,
+    )
+    assert isinstance(implicit, CoordinatorAgent)
+    assert isinstance(explicit, CoordinatorAgent)
+    state = {
+        "decision": "combat_play",
+        "context": {"act": 1, "floor": 3, "room_type": "Monster"},
+        "player": {"hp": 40, "max_hp": 70, "energy": 3, "deck": [], "relics": [], "potions": []},
+        "combat": {"hand": [], "enemies": []},
+    }
+    legal_actions = [
+        LegalAction(
+            action_id=0,
+            kind="combat_end_turn",
+            label="end turn",
+            command={"cmd": "action", "action": "end_turn"},
+        )
+    ]
+
+    assert implicit.build_prompt(state, legal_actions) == explicit.build_prompt(state, legal_actions)
+
+
+def test_agent_from_args_disables_formal_and_legacy_route_plan_channels_together():
+    agent = agent_from_args(
+        "coordinator",
+        base_url="http://127.0.0.1:1",
+        model="test",
+        api_key="local",
+        conversation_mode="combat_mdp_state",
+        route_plan_enabled=False,
+    )
+
+    assert isinstance(agent, CoordinatorAgent)
+    assert agent.store.formal_route_plan_enabled is False
+    assert agent.store.route_plan_enabled is False
+    assert "route_plan" not in agent.store.allowed_plan_patch_keys()
+
+
+def test_agent_from_args_rejects_short_term_memory_for_coordinator():
+    with pytest.raises(ValueError, match="short_term_memory.*not supported by coordinator"):
+        agent_from_args(
+            "coordinator",
+            base_url="http://127.0.0.1:1",
+            model="test",
+            api_key="local",
+            short_term_memory_enabled=True,
+        )
 
 
 def test_agent_from_args_passes_combat_reasoning_pool_to_coordinator_ca():
@@ -736,6 +1304,36 @@ def test_agent_from_args_passes_combat_turn_board_to_coordinator_ca():
     assert agent.occ_agent.inner.combat_turn_board_enabled is False
 
 
+def test_agent_from_args_passes_combat_skill_hints_to_coordinator_ca_only():
+    agent = agent_from_args(
+        "coordinator",
+        base_url="http://127.0.0.1:1",
+        model="test",
+        api_key="local",
+        conversation_mode="combat_mdp_state",
+        combat_skill_hints_enabled=True,
+    )
+
+    assert agent.ca_agent.combat_skill_hints_enabled is True
+    assert agent.ca_agent.combat_mdp_buffer.skill_hints_enabled is True
+    assert agent.occ_agent.inner.combat_skill_hints_enabled is False
+
+
+def test_agent_from_args_passes_combat_skill_lines_to_both_coordinator_delegates():
+    agent = agent_from_args(
+        "coordinator",
+        base_url="http://127.0.0.1:1",
+        model="test",
+        api_key="local",
+        conversation_mode="turn_chat",
+        combat_skill_lines_enabled=False,
+    )
+
+    assert agent.ca_agent.combat_skill_lines_enabled is False
+    assert agent.ca_agent.turn_chat_buffer.combat_skill_lines_enabled is False
+    assert agent.occ_agent.inner.combat_skill_lines_enabled is False
+
+
 def test_run_config_records_coordinator_context_split():
     class Args:
         agent = "coordinator"
@@ -747,9 +1345,9 @@ def test_run_config_records_coordinator_context_split():
         llm_temperature = 0.0
         prompt_style = "analysis"
         include_json_state = False
-        memory_enabled = False
-        memory_window = 8
-        memory_mode = "factual_diff"
+        short_term_memory_enabled = False
+        short_term_memory_window = 8
+        short_term_memory_mode = "factual_diff"
         run_summary = True
         context_mode = "single_turn"
         turn_chat_window = 3
@@ -765,10 +1363,6 @@ def test_run_config_records_coordinator_context_split():
         self_consistency_samples = 5
         self_consistency_decisions = "map_select,card_reward"
         self_consistency_mode = "majority_vote"
-        reflection_enabled = True
-        reflection_decisions = "noncombat_non_map"
-        reflection_mode = "verifier_vote"
-        reflection_max_options = 6
         action_prompt_order = "shuffle_map"
         action_prompt_order_seed = 7
         reward_posterior_evaluator = True
@@ -797,8 +1391,9 @@ def test_run_config_records_coordinator_context_split():
     assert context["route_candidate_planner"]["objective"] == "max_restsites"
     assert config["agent"]["route_plan"]["enabled"] is False
     assert config["agent"]["route_plan"]["enforcement"] == "soft"
-    assert context["ca"]["mode"] == "turn_chat"
-    assert context["ca"]["turn_chat"]["window"] == 3
+    assert config["agent"]["rule_projection_and_recent_changes"]["enabled"] is True
+    assert context["ca"]["mode"] == "single_turn"
+    assert context["ca"]["history"] == "none"
     assert context["occ"]["mode"] == "room_process"
     assert context["occ"]["room_context"]["scope"] == "current_room"
     assert context["occ"]["room_context"]["source"] == "rm_rp_slice_plus_room_process_ledger"
@@ -818,9 +1413,9 @@ def test_run_config_records_coordinator_combat_mdp_ca_mode():
         llm_temperature = 0.0
         prompt_style = "analysis"
         include_json_state = False
-        memory_enabled = False
-        memory_window = 8
-        memory_mode = "factual_diff"
+        short_term_memory_enabled = False
+        short_term_memory_window = 8
+        short_term_memory_mode = "factual_diff"
         run_summary = True
         context_mode = "combat_mdp_state"
         turn_chat_window = 3

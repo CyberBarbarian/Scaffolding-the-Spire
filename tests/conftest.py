@@ -8,9 +8,11 @@ import subprocess
 import pytest
 from sts2_bench.seeds import DEFAULT_TEST_SEED
 
-STS2_CLI_ROOT = Path(__file__).resolve().parents[1]
-REPO_ROOT = STS2_CLI_ROOT
-LOCAL_DOTNET_DIR = REPO_ROOT / ".tools" / "dotnet"
+BENCH_ROOT = Path(__file__).resolve().parents[1]
+STS2_CLI_ROOT = Path(
+    os.environ.get("STS2_CLI_ROOT", str(BENCH_ROOT.parent / "sts2-cli"))
+).resolve()
+LOCAL_DOTNET_DIR = STS2_CLI_ROOT / ".tools" / "dotnet"
 LOCAL_DOTNET = LOCAL_DOTNET_DIR / ("dotnet.exe" if os.name == "nt" else "dotnet")
 MAC_ARM_DOTNET = Path(os.path.expanduser("~/.dotnet-arm64/dotnet"))
 if LOCAL_DOTNET.is_file():
@@ -76,8 +78,12 @@ class Game:
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
             text=True, bufsize=1, env=env,
         )
-        ready = self._read()
-        assert ready.get("type") == "ready", f"Expected ready, got: {ready}"
+        try:
+            ready = self._read()
+            assert ready.get("type") == "ready", f"Expected ready, got: {ready}"
+        except BaseException:
+            self._dispose_process(request_quit=False)
+            raise
 
     def _read(self):
         while True:
@@ -125,17 +131,31 @@ class Game:
     def set_draw_order(self, cards):
         return self.send({"cmd": "set_draw_order", "cards": cards})
 
+    def _dispose_process(self, *, request_quit):
+        proc = self.proc
+        if request_quit and proc.poll() is None:
+            try:
+                proc.stdin.write('{"cmd":"quit"}\n')
+                proc.stdin.flush()
+            except Exception:
+                pass
+        try:
+            if proc.poll() is None:
+                proc.terminate()
+                proc.wait(timeout=5)
+        except Exception:
+            proc.kill()
+            proc.wait(timeout=5)
+        finally:
+            for stream in (proc.stdin, proc.stdout, proc.stderr):
+                if stream is not None:
+                    try:
+                        stream.close()
+                    except OSError:
+                        pass
+
     def close(self):
-        try:
-            self.proc.stdin.write('{"cmd":"quit"}\n')
-            self.proc.stdin.flush()
-        except Exception:
-            pass
-        try:
-            self.proc.terminate()
-            self.proc.wait(timeout=5)
-        except Exception:
-            self.proc.kill()
+        self._dispose_process(request_quit=True)
 
     # --- Auto-play helpers ---
 
@@ -219,9 +239,9 @@ class Game:
         return state
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="module")
 def shared_game():
-    """Reuse one headless process across tests; reset engine state per test."""
+    """Reuse one headless process per module without blocking exclusive-process tests."""
     g = Game()
     yield g
     g.close()

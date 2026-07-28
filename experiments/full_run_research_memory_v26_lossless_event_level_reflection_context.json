@@ -1,0 +1,29 @@
+{
+  "schema_version": 2,
+  "extends": "full_run_research_memory_v25_complete_context_retry_and_artifact_integrity.json",
+  "extends_sha256": "6C242AC092C293D3F327C4913F0987333BFD7ABA6630FE6830DCF36AAF244C88",
+  "overrides": {
+    "experiment_id": "full-run-research-memory-v26-lossless-event-level-reflection-context",
+    "study_phase": "natural_exposure_pilot",
+    "purpose": "Minimal context-organization successor to V25. V26 changes only the reflection evidence representation and partitions the former whole-run reflection into three lossless domain evidence calls. Each combat is presented as one initial state plus ordered actions and resulting states; complete card definitions are stored once and deck order, duplicate counts, upgrades, and instance overrides use exact references; repeated memory/version exposure groups are stored once instead of being copied for every decision. Every representation is expanded before use in the acceptance audit and must round-trip exactly to the original evidence. Baseline prompts, complete decision-time context, legal actions, CoT routing, memory semantics, retrieval, injection, checkpoint timing, and lifecycle rules are unchanged. V25 remains an immutable paused pre-acceptance artifact.",
+    "memory": {
+      "reflection_schedule": {
+        "__replace__": true,
+        "combat_end": "once_per_completed_combat_cross_domain",
+        "act_end": "once_per_act_transition_cross_domain",
+        "run_end_combat": "once_per_complete_run_combat_evidence_cross_domain",
+        "run_end_card_choice": "once_per_complete_run_card_choice_evidence_cross_domain",
+        "run_end_route": "once_per_complete_run_route_evidence_cross_domain"
+      },
+      "run_end_context_partition_contract": "The one logical complete-run checkpoint is represented by three sequential model calls over complete combat, card-choice, and route evidence respectively. Cross-domain hypotheses remain allowed when grounded in the supplied slice. This changes context packaging, not environment decisions or checkpoint timing.",
+      "reflection_evidence_contract": "Model-facing reflection evidence is organized by checkpoint-level events rather than repeated decision snapshots. Combat, deck, and exposure representations must satisfy expand(compact(source)) == source before any provider request. No trajectory action, model reason, engine change, state fact, card effect, upgrade, deck duplicate/order, exposure, or memory version may be omitted.",
+      "reflection_evidence_audit_contract": "Every reflection_request records the representation versions, normalized model-evidence SHA256, and exactly expanded source-evidence SHA256. Acceptance expands the model-facing evidence before comparing it with the full trace."
+    },
+    "freeze": {
+      "intervention_files": {
+        "sts2_bench/layered_experience.py": "2431B254488DD620A006C5EF53E7FBB7334533143BBF16F02A0BC211EC5BABEC",
+        "sts2_bench/full_reflection_pairs.py": "15D1B893C534035226A07B746BD7DAEFD79E79C29C6840DD9592542E7F77FDC3"
+      }
+    }
+  }
+}

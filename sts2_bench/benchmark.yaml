@@ -5,15 +5,29 @@
 # 选择使用的 agent。coordinator 表示 OCC/CA 分工的 LLM agent；random 表示随机策略；llm 表示单 agent LLM。
 agent: coordinator
 
-# OpenAI-compatible API 的基础地址。代码会在末尾自动补 /v1/chat/completions。
-base_url: "https://zgc.apihy.com"
+# OpenAI-compatible API 的基础地址。代码会在末尾自动补 /chat/completions。
+# 当前长程正式实验使用已经验证可用的 APiHY Qwen relay。
+base_url: "https://zgc.apihy.com/v1"
 
-# 调用的模型名称。最近路线/战斗基线实验使用 deepseek-v4-flash。
-model: "deepseek-v4-flash"
+# 调用的模型名称。主实验与组件消融统一使用 Qwen 3.6 Flash。
+model: "qwen3.6-flash"
 
-# Non-secret relay model catalog for local experiment overrides.
-# Keep API keys in .env. For APiHY, use STS2_BENCH_BASE_URL=https://zgc.apihy.com/v1.
+# Non-secret relay model catalog for experiment overrides. Keep API keys in .env.
 model_catalog:
+  apihy_qwen:
+    base_url: "https://zgc.apihy.com/v1"
+    env_key: "STS2_BENCH_API_KEY"
+    fallback_env_key: "QWEN_API_KEY"
+    default_model: "qwen3.6-flash"
+    chat_models: "qwen3.6-flash"
+    notes: "Current long-run formal experiment default. Keep the relay credential outside tracked files."
+  apihy_gemini:
+    base_url: "https://zgc.apihy.com/v1"
+    env_key: "STS2_BENCH_API_KEY"
+    fallback_env_key: "GEMINI_API_KEY"
+    default_model: "gemini-3.5-flash"
+    chat_models: "gemini-3.5-flash"
+    notes: "Optional comparison route; not the current long-run default."
   apihy_deepseek:
     base_url: "https://zgc.apihy.com/v1"
     env_key: "DEEPSEEK_API_KEY"
@@ -42,30 +56,53 @@ llm_fallback_mode: error
 # LLM 采样温度。严肃 benchmark 默认 0.0，避免模型采样随机性影响复现实验。
 llm_temperature: 0.0
 
-# Prompt 模板风格。default 输出简短 JSON；analysis 要求模型给出局势分析、计算、候选动作比较后再选择 action。
-prompt_style: default
+# Prompt 模板风格。当前思维链（Chain-of-Thought，CoT）选路基线使用 analysis，
+# 要求模型先给出局势、计算和候选动作比较，再选择 action；该设置也会作用于其他 LLM 决策。
+prompt_style: analysis
 
 # 是否在 prompt 中附加 Compact state JSON。false 可以减少 token 和重复信息；true 适合调试结构化 state。
 include_json_state: false
 
-# 是否在 agent prompt 中加入局内短期记忆。这个记忆属于 agent 方法，不属于环境原始 state。
-# 如果 context_management.mode 设为 turn_chat，请把这里设为 false，避免两套上下文方法同时生效。
-memory_enabled: false
+# 是否在 agent prompt 中加入单局短期动作历史。它不跨局，也不是后续 experience_memory（经验记忆）。
+# coordinator 不支持该旧单 agent 方法；默认 coordinator 基线必须保持 false。
+short_term_memory_enabled: false
 
-# 短期记忆保留最近多少个已选择 action。数值越大越能记住近期操作，但 prompt 会更长。
-memory_window: 8
+# 单局短期动作历史保留最近多少个已选择 action。
+short_term_memory_window: 8
 
-# 记忆内容类型。action_reason 记录模型旧理由；factual_diff 记录 action 后真实 state 变化，更适合严肃 benchmark。
-memory_mode: factual_diff
+# 内容类型。action_reason 记录模型旧理由；factual_diff 记录 action 后真实 state 变化。
+short_term_memory_mode: factual_diff
 
 # 是否在 prompt 中加入规则生成的短 run summary。属于 agent 方法，可用 --no-run-summary 做消融。
 run_summary_enabled: false
 
-# Agent 侧上下文管理方法。turn_chat 只在同一个玩家出牌回合内保留短 chat history。
+# Agent 侧上下文管理方法。默认使用 MDP 结构化战斗上下文，不回放 chat history。
 context_management:
-  mode: turn_chat
+  mode: combat_mdp_state
   turn_check:
     enabled: false
+  # combat_mdp_state 专用：同一玩家回合内只保留最新一条可覆盖的 provisional
+  # turn intent；模型 reason/notes 不回灌，动作与变化由引擎事实链保存。
+  # 默认开启，让一个回合内的连续出牌决策共享模型自己的短期推理记录；换回合即清空。
+  combat_reasoning_pool:
+    enabled: true
+  # combat_mdp_state 专用：保留最近 4 个完整回合及 end_turn -> next_turn 事实，
+  # 更早回合滚动折叠进确定性 combat_summary；不包含额外策略提示。
+  combat_turn_board:
+    enabled: true
+  # combat_mdp_state 专用：把可见状态派生出的 Combat skills 作为结构化 guidance 注入 MDP state JSON。
+  # 默认关闭，保持默认配置无显式战斗提示注入。
+  combat_skill_hints:
+    enabled: false
+    profile: baseline
+    max_hints: 4
+  # 普通 turn_chat/single_turn combat prompt 里的文本版 "Combat skills:" 行。
+  # 默认关闭，避免默认配置通过非 MDP 路径带入显式战斗提示。
+  combat_skill_lines:
+    enabled: false
+  combat_dialogue:
+    # combat_dialogue 专用：保留当前回合及最近多少个已完成回合的原始成功对话。
+    history_turns: 3
   turn_chat:
     # 同一玩家出牌回合内保留最近多少组 user/assistant 消息。
     window: 10
@@ -77,13 +114,16 @@ context_management:
     plan:
       enabled: false
 
-# 选择角色。可选 Ironclad、Silent、Defect、Regent、Necrobinder。
+# 启用完整路线计划；hard 模式会重试或拒绝非法路线以及未声明的偏航。
 route_plan:
   enabled: true
   enforcement: hard
 
-# 地图由枚举器自动选择完整可见路线。当前基线：火堆数优先，风险只作为同火堆数下的辅助排序。
-route_candidate_objective: max_restsites_low_risk
+# 关闭确定性候选路线枚举器，把完整地图交给 Coordinator/OCC 的 LLM 进行 CoT 选路。
+route_candidate_objective: "none"
+
+# 不注入“火堆优先”等路线提示，让模型根据当前生命、牌组、遗物、Boss 和地图自主比较路线。
+map_route_hint: "none"
 
 # OCC 使用旧版 short reference history，以复现前面过 Act 1 的实验设置。
 occ_context_mode: reference_turn
@@ -100,15 +140,11 @@ diagnostics:
     samples: 3
     decisions: "map_select,card_reward"
     mode: diagnostic
-  reflection_verifier:
-    enabled: false
-    decisions: "card_reward"
-    mode: diagnostic
-    max_options: 8
   action_prompt_order:
     mode: default
     seed: 0
 
+# 选择角色。可选 Ironclad、Silent、Defect、Regent、Necrobinder。
 character: Ironclad
 
 # 进阶等级。0 表示无进阶，适合初始 benchmark。
@@ -117,7 +153,7 @@ ascension: 0
 # 状态文本语言。en 使用英文；zh 使用中文。
 lang: en
 
-# 固定 seed 文件路径。空字符串表示使用 sts2_bench/seeds_ironclad_a0.json 里的预设固定 seed。
+# 固定 seed 文件路径。空字符串表示使用 2-seed smoke pool；它只用于开发冒烟，不是正式评估池。
 seeds: ""
 
 # 本次运行的局数。
@@ -126,8 +162,11 @@ count: 1
 # 每局最多允许的决策步数。这是安全上限；最近完整跑法使用 900。
 max_steps: 900
 
-# JSONL 输出路径。空字符串表示不写 trace 文件，只在终端打印结果。
-out: results/coordinator_deepseek_route_lowrisk.jsonl
+# 实验命名空间。默认 artifact 路径使用 results/<experiment_id>/<run_id>/。
+experiment_id: coordinator-cot-route
+
+# JSONL 输出路径。null 表示根据稳定 run_id 创建独立目录，避免静默覆盖历史实验。
+out: null
 
 # JSONL 记录详细程度。metrics 最小；decisions 记录轻量决策摘要；full 记录完整 state、prompt、raw response。
 log_level: decisions

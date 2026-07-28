@@ -1,0 +1,120 @@
+{
+  "schema_version": 1,
+  "experiment_id": "kin-llm-candidate-state-fork-v1",
+  "policy_variant_id": "llm-act1-kin-fa1fdb214088-state-fork-once-v1",
+  "declared_at_local_date": "2026-07-13",
+  "analysis_status": "post_hoc_state_level_mechanism_exploration_after_sparse_trajectory_gate",
+  "description": "Fork B0, equal-length P1, and the frozen R1C candidate from exactly replayed Kin gate-hit states. Screen on the previously observed positive R1C state, then confirm only on a different state that the candidate content has never seen.",
+  "parent_experiment": "experiments/reflection_candidate_kin_conditioned_r1_v1.json",
+  "parent_experiment_sha256": "01A50F143608A86DD3555C519FE9BD1D66AB811A8F0D96A27120089239B511C1",
+  "candidate_id": "llm-act1_kin_boss_multienemy_loss67-fa1fdb214088",
+  "candidate_card_digest": "ab01035a30b28250f9f4a65b69004c125dc508324253ff75f77bbc33961dc60c",
+  "output_root": "results/reflection_candidate_kin_state_fork_v1_20260713",
+  "arms": [
+    "b0",
+    "p1",
+    "r1c"
+  ],
+  "delivery": {
+    "policy_id": "verified-target-first-decision-once-v1",
+    "max_injections_per_run": 1,
+    "insertion": "append_after_baseline_prompt",
+    "sham_policy": "neutral_equal_rendered_characters_v1"
+  },
+  "run_overrides": {
+    "log_level": "full",
+    "max_steps": 80
+  },
+  "states": [
+    {
+      "state_id": "kin-r1c-observed-positive-round15",
+      "stage": "screen",
+      "selection_status": "post_hoc_observed_positive_mechanism_state",
+      "source_payload_arm": "r1c",
+      "base_snapshot": "results/complete_pressure_fights_20260708_1815/snapshots/act1_kin_boss_default_loss67.snapshot.json",
+      "base_snapshot_sha256": "E435D18F8DB483AE85F0ABA36E88EF21EE5A712BDFA749D8E40C80115A63320A",
+      "source_trace": "results/reflection_candidate_kin_conditioned_r1_v1_20260713/blocks/block_002/act1_kin_boss_multienemy_loss67/r1c/trace.jsonl",
+      "source_trace_sha256": "3846DEB39173436635C6506DE3EEDFCC73988BD65FBDF2D73CB742D54D93A40F",
+      "target_step": 66,
+      "expected_gate_observables": {
+        "round": 15,
+        "hp": 14,
+        "block": 0,
+        "energy": 3,
+        "incoming_total": 27,
+        "priest_multihit_total": 27,
+        "static_total_block_capacity": 24,
+        "residual_damage_after_max_visible_block": 3
+      },
+      "safe_block_gain_before_offense_or_end": 14
+    },
+    {
+      "state_id": "kin-sham-heldout-round15",
+      "stage": "confirmation",
+      "selection_status": "candidate_content_never_delivered_at_this_state",
+      "source_payload_arm": "p1",
+      "base_snapshot": "results/complete_pressure_fights_20260708_1815/snapshots/act1_kin_boss_default_loss67.snapshot.json",
+      "base_snapshot_sha256": "E435D18F8DB483AE85F0ABA36E88EF21EE5A712BDFA749D8E40C80115A63320A",
+      "source_trace": "results/reflection_candidate_kin_conditioned_r1_v1_20260713/blocks/block_001/act1_kin_boss_multienemy_loss67/p1/trace.jsonl",
+      "source_trace_sha256": "0A728B5466F7F05CE87CA5B8111334C9DA6888FF1E584E14620CE4EFAA6A17B2",
+      "target_step": 69,
+      "expected_gate_observables": {
+        "round": 15,
+        "hp": 16,
+        "block": 0,
+        "energy": 3,
+        "incoming_total": 27,
+        "priest_multihit_total": 27,
+        "static_total_block_capacity": 16,
+        "residual_damage_after_max_visible_block": 11
+      },
+      "safe_block_gain_before_offense_or_end": 12
+    }
+  ],
+  "evaluation": {
+    "primary": "first_committing_action_block_plus_safe_block_before_offense_or_end_plus_survival",
+    "first_committing_action_ignores_views": true,
+    "post_turn_hp_is_descriptive": true,
+    "terminal_outcome_is_secondary": true,
+    "steps_do_not_define_improvement": true
+  },
+  "screen": {
+    "state_id": "kin-r1c-observed-positive-round15",
+    "block_range": [1, 3],
+    "workers": 3,
+    "start_interval_sec": 3.0,
+    "minimum_complete_blocks": 3,
+    "r1c_first_committing_block_min": 3,
+    "r1c_safe_block_line_min": 2,
+    "r1c_survived_to_next_round_min": 3,
+    "r1c_max_mechanism_failure_excess_vs_b0": 1,
+    "r1c_max_mechanism_failure_excess_vs_p1": 1
+  },
+  "confirmation": {
+    "state_id": "kin-sham-heldout-round15",
+    "block_range": [4, 8],
+    "workers": 3,
+    "start_interval_sec": 3.0,
+    "minimum_complete_blocks": 5,
+    "r1c_first_committing_block_min": 4,
+    "r1c_safe_block_line_min": 4,
+    "r1c_mechanism_success_min": 4,
+    "r1c_survived_to_next_round_min": 4,
+    "r1c_mechanism_success_advantage_vs_b0_min": 2,
+    "r1c_mechanism_success_advantage_vs_p1_min": 2,
+    "r1c_early_attack_max": 1,
+    "r1c_max_survival_deficit_vs_b0": 1,
+    "r1c_max_survival_deficit_vs_p1": 1
+  },
+  "invariants": [
+    "Do not modify the frozen baseline, parent candidate, candidate text, or gate implementation.",
+    "Every arm starts a fresh engine process and replays the same frozen prefix to an identical target-state digest.",
+    "All arms share the same deterministic history-rehydration wrapper; B0 has no prompt-treatment wrapper, while P1 and R1C differ only in equal-character payload semantics.",
+    "P1 and R1C must inject exactly once at the first target-state decision and never again.",
+    "Run arms serially within a block and run blocks concurrently with balanced arm order.",
+    "The screen state is post-hoc and cannot confirm the candidate; only the distinct confirmation state can provide held-out state-level evidence.",
+    "Do not pool screen and confirmation to make the confirmation pass.",
+    "The replayed base prompt, legal-action digest, gate observables, and target visible-state digest must match the frozen source before any model call.",
+    "Terminal combat outcomes and post-turn HP are secondary; the preregistered local mechanism-success metric drives the state-level decision."
+  ]
+}

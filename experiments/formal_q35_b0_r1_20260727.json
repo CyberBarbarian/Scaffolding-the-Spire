@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "experiment_id": "formal-q35-b0-r1-20260727",
+  "purpose": "Fresh paper B0 Direct-CLI family using PackyAPI qwen3.5-flash after freezing all qwen3.6-flash trajectories.",
+  "output_root": "C:/WorkSpace/BG-Agent/sts2-agent-bench/results/q35_b0_r1",
+  "model": "qwen3.5-flash",
+  "base_url": "https://www.packyapi.ai/v1",
+  "global_model_lane_cap": 15,
+  "tokens": [
+    {
+      "id": "packy-q35-r1",
+      "env_file": "C:/Users/alltr/AppData/Local/Temp/bg_agent_qwen_packy_20260727.env"
+    }
+  ],
+  "retry": {
+    "max_cycles": 3,
+    "backoff_initial_sec": 10,
+    "backoff_cap_sec": 120
+  },
+  "protocols": [
+    {
+      "condition": "b0_direct_cli",
+      "character": "Ironclad",
+      "runner": "direct_cli",
+      "template": "direct_cli_baseline_rules_v2_defect_active_r5.json"
+    },
+    {
+      "condition": "b0_direct_cli",
+      "character": "Silent",
+      "runner": "direct_cli",
+      "template": "direct_cli_baseline_rules_v2_defect_active_r5.json"
+    },
+    {
+      "condition": "b0_direct_cli",
+      "character": "Defect",
+      "runner": "direct_cli",
+      "template": "direct_cli_baseline_rules_v2_defect_active_r5.json"
+    },
+    {
+      "condition": "b0_direct_cli",
+      "character": "Regent",
+      "runner": "direct_cli",
+      "template": "direct_cli_baseline_rules_v2_defect_active_r5.json"
+    },
+    {
+      "condition": "b0_direct_cli",
+      "character": "Necrobinder",
+      "runner": "direct_cli",
+      "template": "direct_cli_baseline_rules_v2_defect_active_r5.json"
+    }
+  ]
+}

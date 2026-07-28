@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import itertools
+import math
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -11,7 +12,12 @@ from .sequence_safety import is_sequence_atomic_card
 
 MAX_CARD_SEQUENCE_LENGTH = 3
 MAX_CARD_SEQUENCE_ACTIONS = 24
+MAX_MATERIALIZED_CARD_SELECT_ACTIONS = 256
 CustomSequenceExposure = Literal["safe", "eligible"]
+
+
+class UnsupportedDecisionError(RuntimeError):
+    """Raised when Headless exposes a decision the benchmark cannot safely execute."""
 
 
 @dataclass(frozen=True)
@@ -426,6 +432,16 @@ def _card_select_label(cards: list[dict[str, Any]]) -> str:
     return f"select cards {indices}: {names}"
 
 
+def card_select_combination_count(card_count: int, min_select: int, max_select: int) -> int:
+    """Return the semantic non-empty card-selection count without enumerating it."""
+
+    upper = min(max_select, card_count)
+    lower = max(1, min_select)
+    if card_count <= 0 or upper < lower:
+        return 0
+    return sum(math.comb(card_count, count) for count in range(lower, upper + 1))
+
+
 def _bundle_label(bundle: dict[str, Any]) -> str:
     index = bundle.get("index")
     title = _name(bundle.get("name") or bundle.get("title"))
@@ -451,6 +467,21 @@ def _card_select_actions(cards: list[dict[str, Any]], min_select: int, max_selec
     actions: list[dict[str, Any]] = []
     upper = min(max_select, len(cards))
     lower = max(1, min_select)
+    combination_count = card_select_combination_count(len(cards), min_select, max_select)
+    if combination_count > MAX_MATERIALIZED_CARD_SELECT_ACTIONS:
+        # Keep one executable representative so generic/fallback policies still
+        # have a safe action. LLM policies resolve any other valid subset from
+        # selected_card_indices without materializing the combinatorial list.
+        selected = list(cards[:lower])
+        indices = ",".join(str(card.get("index")) for card in selected)
+        return [
+            _action(
+                _card_select_label(selected),
+                "select_cards",
+                "card_select_space",
+                indices=indices,
+            )
+        ]
     for count in range(lower, upper + 1):
         for combo in itertools.combinations(cards, count):
             selected = list(combo)
@@ -462,6 +493,101 @@ def _card_select_actions(cards: list[dict[str, Any]], min_select: int, max_selec
             )
             actions.append(_action(label, "select_cards", "card_select", indices=indices))
     return actions
+
+
+def materialize_card_select_space_action(
+    state: dict[str, Any],
+    template: LegalAction,
+    selected_indices: list[int],
+) -> LegalAction:
+    """Resolve one executable member of a compressed card-selection action space."""
+
+    if template.kind != "card_select_space":
+        raise ValueError("card selection template must have kind card_select_space")
+
+    cards = [card for card in state.get("cards") or [] if isinstance(card, dict)]
+    by_index: dict[int, dict[str, Any]] = {}
+    for card in cards:
+        raw_index = card.get("index")
+        if isinstance(raw_index, bool):
+            continue
+        try:
+            index = int(raw_index)
+        except (TypeError, ValueError):
+            continue
+        if index in by_index:
+            raise ValueError(f"current card selection contains duplicate candidate index {index}")
+        by_index[index] = card
+
+    selected_set = set(selected_indices)
+    if any(index not in by_index for index in selected_indices):
+        raise ValueError(
+            "selected_card_indices do not identify current candidate cards: "
+            + str(selected_indices)
+        )
+    min_select = max(1, int(state.get("min_select", 1) or 0))
+    max_select = min(int(state.get("max_select", min_select) or min_select), len(cards))
+    if len(selected_indices) < min_select or len(selected_indices) > max_select:
+        raise ValueError(
+            f"selected_card_indices count must be between {min_select} and {max_select}, got {len(selected_indices)}"
+        )
+
+    normalized_indices = [index for index in by_index if index in selected_set]
+    selected_cards = [by_index[index] for index in normalized_indices]
+    indices_text = ",".join(str(index) for index in normalized_indices)
+    names = " + ".join(_name(card.get("name")) for card in selected_cards)
+    label = (
+        f"select card {normalized_indices[0]}: {names}"
+        if len(normalized_indices) == 1
+        else f"select cards {indices_text}: {names}"
+    )
+    return LegalAction(
+        action_id=template.action_id,
+        label=label,
+        command={"cmd": "action", "action": "select_cards", "args": {"indices": indices_text}},
+        kind="card_select",
+    )
+
+
+def action_matches_legal_surface(
+    state: dict[str, Any],
+    action: LegalAction,
+    legal_actions: list[LegalAction],
+) -> bool:
+    """Return whether an action is a concrete member of the current legal surface."""
+
+    if action in legal_actions:
+        return True
+    if action.kind != "card_select":
+        return False
+
+    templates = [
+        candidate
+        for candidate in legal_actions
+        if candidate.kind == "card_select_space" and candidate.action_id == action.action_id
+    ]
+    if len(templates) != 1:
+        return False
+
+    raw_indices = (action.command.get("args") or {}).get("indices")
+    if not isinstance(raw_indices, str) or not raw_indices:
+        return False
+    try:
+        selected_indices = [int(value) for value in raw_indices.split(",") if value != ""]
+    except ValueError:
+        return False
+    if len(selected_indices) != len(raw_indices.split(",")):
+        return False
+
+    try:
+        expected = materialize_card_select_space_action(
+            state,
+            templates[0],
+            selected_indices,
+        )
+    except ValueError:
+        return False
+    return action == expected
 
 
 def _targeted_card_actions(state: dict[str, Any], card: dict[str, Any]) -> list[dict[str, Any]]:
@@ -508,6 +634,10 @@ def build_legal_actions(
     selected full command in logs, not just the id.
     """
 
+    if state.get("engine_error") is True or state.get("error") == "engine_error":
+        raise UnsupportedDecisionError(
+            f"engine error state: {state.get('engine_error_reason') or state.get('message') or '?'}"
+        )
     decision = state.get("decision")
     raw: list[dict[str, Any]] = []
 
@@ -539,7 +669,7 @@ def build_legal_actions(
         energy = state.get("energy", 0)
         playable_cards: list[dict[str, Any]] = []
         for card in state.get("hand", []):
-            if not card.get("can_play"):
+            if card.get("can_play") is not True:
                 continue
             if _card_cost_value(card) > energy:
                 continue
@@ -599,7 +729,7 @@ def build_legal_actions(
             reward_index = reward.get("index")
             reward_kind = reward.get("kind", reward.get("type_name", "?"))
             is_blocked_card_reward = reward_kind == "card_reward" and reward_index in blocked_card_reward_claims
-            if reward.get("can_claim") is not False and not is_blocked_card_reward:
+            if reward.get("can_claim") is True and not is_blocked_card_reward:
                 label = (
                     f"open card reward {reward_index}: reveal offered cards"
                     if reward_kind == "card_reward"
@@ -613,7 +743,7 @@ def build_legal_actions(
                         reward_index=reward_index,
                     )
                 )
-            if reward.get("can_skip"):
+            if reward.get("can_skip") is True:
                 label = (
                     _card_reward_skip_label(
                         reward_index,
@@ -645,9 +775,6 @@ def build_legal_actions(
                     potion_index=potion_index,
                 )
             )
-        if not rewards:
-            raw.append(_action("proceed", "proceed", "proceed"))
-
     elif decision == "card_reward":
         for card in state.get("cards", []):
             raw.append(
@@ -658,7 +785,7 @@ def build_legal_actions(
                     card_index=card.get("index"),
                 )
             )
-        if state.get("can_skip", True):
+        if state.get("can_skip") is True:
             raw.append(_action("skip card reward", "skip_card_reward", "card_reward_skip"))
 
     elif decision == "treasure":
@@ -672,33 +799,42 @@ def build_legal_actions(
                     relic_index=relic.get("index"),
                 )
             )
-        if not relics and state.get("can_proceed"):
+        if not relics and state.get("can_proceed") is True:
             raw.append(_action("proceed", "proceed", "proceed"))
 
-    elif decision in {"rest_site", "event_choice"}:
-        action_name = "choose_option"
-        kind = "rest_site" if decision == "rest_site" else "event"
+    elif decision == "rest_site":
         for option in state.get("options", []):
-            if option.get("is_locked"):
-                continue
-            if option.get("is_enabled") is False:
+            if option.get("is_enabled") is not True:
                 continue
             title = _name(option.get("title") or option.get("name") or option.get("description"))
             raw.append(
                 _action(
                     f"choose option {option.get('index')}: {title}",
-                    action_name,
-                    kind,
+                    "choose_option",
+                    "rest_site",
                     option_index=option.get("index"),
                 )
             )
-        if decision == "event_choice" and state.get("can_leave"):
+
+    elif decision == "event_choice":
+        for option in state.get("options", []):
+            if option.get("is_locked") is not False:
+                continue
+            title = _name(option.get("title") or option.get("name") or option.get("description"))
+            raw.append(
+                _action(
+                    f"choose option {option.get('index')}: {title}",
+                    "choose_option",
+                    "event",
+                    option_index=option.get("index"),
+                )
+            )
+        if state.get("can_leave") is True:
             raw.append(_action("leave event", "leave_room", "event_leave"))
 
     elif decision == "shop":
-        player_gold = int((state.get("player") or {}).get("gold", 0) or 0)
         for card in state.get("cards", []) or []:
-            if card.get("is_stocked") and _price(card) <= player_gold:
+            if card.get("is_stocked") is True and card.get("can_buy") is True:
                 raw.append(
                     _action(
                         f"buy card {card.get('index')}: {_name(card.get('name'))} for {_price(card)} gold",
@@ -708,7 +844,7 @@ def build_legal_actions(
                     )
                 )
         for relic in state.get("relics", []) or []:
-            if relic.get("is_stocked") and _price(relic) <= player_gold:
+            if relic.get("is_stocked") is True and relic.get("can_buy") is True:
                 raw.append(
                     _action(
                         f"buy relic {relic.get('index')}: {_name(relic.get('name'))} for {_price(relic)} gold",
@@ -718,7 +854,7 @@ def build_legal_actions(
                     )
                 )
         for potion in state.get("potions", []) or []:
-            if potion.get("is_stocked") and _price(potion) <= player_gold:
+            if potion.get("is_stocked") is True and potion.get("can_buy") is True:
                 raw.append(
                     _action(
                         f"buy potion {potion.get('index')}: {_name(potion.get('name'))} for {_price(potion)} gold",
@@ -728,17 +864,13 @@ def build_legal_actions(
                     )
                 )
         removal_cost = state.get("card_removal_cost")
-        if isinstance(removal_cost, (int, float)) and removal_cost <= player_gold:
+        if isinstance(removal_cost, (int, float)) and state.get("can_remove_card") is True:
             raw.append(_action(f"remove a card for {int(removal_cost)} gold", "remove_card", "shop_remove_card"))
         raw.append(_action("leave shop", "leave_room", "shop_leave"))
 
     elif decision == "fake_merchant_shop":
-        player_gold = int((state.get("player") or {}).get("gold", 0) or 0)
         for relic in state.get("relics", []) or []:
-            can_buy = relic.get("can_buy")
-            if can_buy is None:
-                can_buy = relic.get("is_stocked") and _price(relic) <= player_gold
-            if not can_buy:
+            if not (relic.get("is_stocked") is True and relic.get("can_buy") is True):
                 continue
             raw.append(
                 _action(
@@ -750,7 +882,7 @@ def build_legal_actions(
             )
 
         foul_potion_action = state.get("foul_potion_action")
-        if state.get("can_throw_foul_potion") and isinstance(foul_potion_action, dict):
+        if state.get("can_throw_foul_potion") is True and isinstance(foul_potion_action, dict):
             action_name = foul_potion_action.get("action")
             potion_index = foul_potion_action.get("potion_index")
             if action_name and potion_index is not None:
@@ -763,14 +895,14 @@ def build_legal_actions(
                     )
                 )
 
-        if state.get("can_leave"):
+        if state.get("can_leave") is True:
             raw.append(_action("leave fake merchant", "leave_room", "fake_merchant_leave"))
 
     elif decision == "card_select":
         cards = state.get("cards") or []
         min_select = int(state.get("min_select", 1) or 0)
         max_select = int(state.get("max_select", min_select) or min_select)
-        if state.get("can_skip", min_select == 0):
+        if state.get("can_skip") is True:
             raw.append(_action("skip selection", "skip_select", "card_select_skip"))
         raw.extend(_card_select_actions(cards, min_select, max_select))
 
@@ -786,10 +918,12 @@ def build_legal_actions(
             )
 
     elif decision == "crystal_sphere":
-        if state.get("can_proceed"):
+        if state.get("can_proceed") is True:
             raw.append(_action("proceed from crystal sphere", "crystal_sphere_proceed", "crystal_sphere"))
-        for tool in ("big", "small"):
-            raw.append(_action(f"set crystal sphere tool: {tool}", "crystal_sphere_set_tool", "crystal_sphere_tool", tool=tool))
+        if state.get("can_use_big_tool") is True:
+            raw.append(_action("set crystal sphere tool: big", "crystal_sphere_set_tool", "crystal_sphere_tool", tool="big"))
+        if state.get("can_use_small_tool") is True:
+            raw.append(_action("set crystal sphere tool: small", "crystal_sphere_set_tool", "crystal_sphere_tool", tool="small"))
         for cell in state.get("clickable_cells", []) or []:
             raw.append(
                 _action(
@@ -801,11 +935,18 @@ def build_legal_actions(
                 )
             )
 
+    elif decision == "event_result":
+        if state.get("can_proceed") is True:
+            raw.append(_action("proceed from event result", "proceed", "event_result_proceed"))
+
     elif decision == "game_over":
         raw = []
 
     else:
-        raw.append(_action("proceed", "proceed", "proceed"))
+        room_type = (state.get("context") or {}).get("room_type") or state.get("room_type")
+        raise UnsupportedDecisionError(
+            f"unsupported decision: {decision!r} (room_type={room_type!r}); refusing implicit proceed"
+        )
 
     return [
         LegalAction(action_id=i, label=item["label"], command=item["command"], kind=item["kind"])

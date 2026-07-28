@@ -1,0 +1,57 @@
+{
+  "schema_version": 2,
+  "extends": "full_run_layered_reflection_v21.json",
+  "extends_sha256": "65BB2233D42B137D0405384B8CA33A2A92F8DEF704C38E9EFDD2CF697075E091",
+  "overrides": {
+    "experiment_id": "full-run-research-memory-v22-natural-exposure-pilot-round1",
+    "study_phase": "natural_exposure_pilot",
+    "purpose": "First same-seed natural-exposure Pilot run for the minimal structured-memory research contract. The baseline model, complete state/card/legal-action context, CoT route policy, transport behavior, and environment are inherited byte-for-byte from V21. Python validates only format, evidence and memory references, identity, transactions, prompt delivery, and logs. The same deepseek-v4-flash model performs checkpoint generation and critic review. Round 1 starts from an empty store and is not a performance claim.",
+    "seeds": [
+      "ironclad_a0_1007"
+    ],
+    "memory": {
+      "__replace__": true,
+      "initial_state": "empty",
+      "persistence": "round1_empty_then_hash_pinned_round2_same_seed",
+      "reflection_schedule": {
+        "combat_end": "once_per_completed_combat_cross_domain",
+        "act_end": "once_per_act_transition_cross_domain",
+        "run_end": "once_per_complete_run_cross_domain"
+      },
+      "evidence_contract": {
+        "combat": "every completed combat preserves identity, outcome, every ordered action command, full model reason, engine change list, and decision-relevant structured before/after facts, joined by identity to the full trace and complete accumulated card catalog",
+        "card_choice": "every card decision preserves complete offered card effects, duplicate-preserving deck, relics, exact choice or skip, resulting deck, and later-use trajectory evidence",
+        "route": "every route decision preserves all visible choices, chosen action, complete deck, relics, card catalog, and full visible map snapshot"
+      },
+      "injection_schedule": {
+        "combat": "every_relevant_real_decision_without_per_combat_cap",
+        "card_reward": "every_relevant_real_decision",
+        "map_select": "every_relevant_real_decision"
+      },
+      "retrieval_contract": "pending_and_active_items_use_transparent_case_and_punctuation_insensitive OR matching over exact enemy names, card families, model tags, decision names, and route strings; empty keys are domain-general; no Top-K and no semantic Python gate",
+      "lifecycle_contract": "new_items_are_pending; actually injected Pending items are reviewed at their local combat/act checkpoint and again at run_end, Active items only at run_end; same-gate Pending merge is storage consolidation rather than efficacy evidence; all other lifecycle judgments require real exposure and are supplied by the same-model critic",
+      "entity_tag_contract": "enemy tags are a critic-approved replaceable classifier cache exposed in every reflection prompt; a complete replacement set or an empty set can repair or clear earlier model labels",
+      "max_prompt_chars": 16000,
+      "max_reflection_prompt_chars": 3000000,
+      "max_reflection_transitions": 0,
+      "reflection_output_limit": 64,
+      "reflection_json_response_format": 1,
+      "reflection_format_retries": 1,
+      "critic_pass": 1,
+      "include_pending": 1,
+      "abort_on_reflection_error": 1,
+      "reflection_capacity_contract": "lossless generator and critic prompts are preflighted against a 3000000-character provider envelope; overflow fails explicitly and never truncates evidence",
+      "audit": "complete_evidence_generator_and_critic_raw_provider_responses_candidate_dispositions_transactions_retrieval_final_payload_hash_and_actual_injection"
+    },
+    "freeze": {
+      "baseline_files": {
+        "sts2_bench/agents.py": "289C37E69D3AE4D4E0AB757414AFA1F3A013F96088797CAB238FCAC8F1B45CD0",
+        "sts2_bench/requirements.txt": "4C0887934D80D16ADDA4F540F4996B1B729F0629D2C0E2BA5777AFD2F6901334"
+      },
+      "intervention_files": {
+        "sts2_bench/layered_experience.py": "9502C5EB007DA781E08CBA75E33102508C9BD2B791B505C83AA70316A51FA87D",
+        "sts2_bench/full_reflection_pairs.py": "C8C4F4F664E995C598FCB5CA453CA0799D68F81AF2E1734E3181F3C282571612"
+      }
+    }
+  }
+}

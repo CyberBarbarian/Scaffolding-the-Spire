@@ -1,0 +1,64 @@
+{
+  "schema_version": 2,
+  "experiment_id": "direct-cli-rules-v2-active-defect-r1-20260723",
+  "purpose": "Paper Direct CLI rules-v2 Defect run from the active worktree under the same source, model, rules, context, and seed protocol as the validated Ironclad run.",
+  "retry_correction_scope": "interface_specific_same_state",
+  "cost_accounting": "aggregate_all_provider_attempts",
+  "prompt_contract_required": true,
+  "output_root": "results/direct_cli_rules_v2_active_defect_r1_20260723",
+  "game_rules": {
+    "ruleset_id": "sts2-official-rules-v2",
+    "ruleset_sha256": "d462fa843517490c2aa324151b2ab68b9cddc65f32486fdc338dbb7c8de453ba",
+    "module_ids": [
+      "core_run",
+      "persistent_resources",
+      "combat_cycle",
+      "map_navigation",
+      "room_glossary",
+      "act_transition",
+      "post_combat_rewards",
+      "treasure",
+      "deckbuilding_choice",
+      "rest_site",
+      "merchant",
+      "event",
+      "crystal_sphere"
+    ],
+    "delivery": "static_full_system_prompt",
+    "source": "sts2_bench/game_rules.py"
+  },
+  "model": "deepseek-v4-flash",
+  "base_url": "https://zgc.apihy.com/v1",
+  "seeds": [
+    "ironclad_a0_3407",
+    "ironclad_a0_1007",
+    "ironclad_a0_2407"
+  ],
+  "repeats_per_seed": 5,
+  "workers": 3,
+  "character": "Defect",
+  "ascension": 0,
+  "lang": "en",
+  "temperature": 0.0,
+  "history_chars": 24000,
+  "max_tokens": null,
+  "request_retries": 1,
+  "preflight_evidence": {
+    "selection_plan_path": "experiments/direct_cli_v5_preflight_selection_plan_v3_20260723.json",
+    "selection_plan_sha256": "04cc5c9cd4513b766ad448bccb00fb25665f5b43cd818e7855f92634c878b358",
+    "manifest_path": "results/direct_cli_v5_preflight_v8_20260723/manifest.json",
+    "manifest_sha256": "f0d0a1d5d840255cdc0c3e3d0f6d4212880cd5ffcde04174a261a80e965434a8",
+    "required_artifact_count": 18,
+    "required_historical_failure_contexts": [
+      "defect_3407_d2",
+      "regent_1007_d11",
+      "regent_2407_d23"
+    ],
+    "historical_failure_max_tokens": 4096,
+    "required_source_protocol_disposition": "invalidated_do_not_resume_or_count_for_paper"
+  },
+  "request_timeout_sec": 180,
+  "max_decisions": 5000,
+  "run_timeout_sec": 7200,
+  "max_attempts_per_invocation": 3
+}

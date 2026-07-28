@@ -1,0 +1,202 @@
+{
+  "schema_version": 1,
+  "experiment_id": "nightly-formal-qwen-matrix-r1-20260726",
+  "purpose": "Paper formal matrix using Qwen 3.6 Flash after zero-API system repair and source-lock review.",
+  "output_root": "C:/WorkSpace/BG-Agent/sts2-agent-bench/results/nightly_formal_qwen_matrix_r1_20260726",
+  "model": "qwen3.6-flash",
+  "base_url": "https://zgc.apihy.com/v1",
+  "global_model_lane_cap": 10,
+  "tokens": [
+    {
+      "id": "qwen-route-a",
+      "env_file": "C:/Users/alltr/AppData/Local/Temp/bg_agent_qwen_nightly_20260726.env"
+    },
+    {
+      "id": "qwen-route-b",
+      "env_file": "C:/Users/alltr/AppData/Local/Temp/bg_agent_extra_nightly_20260726.env"
+    }
+  ],
+  "retry": {
+    "max_cycles": 3,
+    "backoff_initial_sec": 15,
+    "backoff_cap_sec": 180
+  },
+  "protocols": [
+    {
+      "condition": "b0_direct_cli",
+      "character": "Ironclad",
+      "runner": "direct_cli",
+      "template": "direct_cli_baseline_rules_v2_defect_active_r5.json"
+    },
+    {
+      "condition": "b0_direct_cli",
+      "character": "Silent",
+      "runner": "direct_cli",
+      "template": "direct_cli_baseline_rules_v2_defect_active_r5.json"
+    },
+    {
+      "condition": "b0_direct_cli",
+      "character": "Defect",
+      "runner": "direct_cli",
+      "template": "direct_cli_baseline_rules_v2_defect_active_r5.json"
+    },
+    {
+      "condition": "b0_direct_cli",
+      "character": "Regent",
+      "runner": "direct_cli",
+      "template": "direct_cli_baseline_rules_v2_defect_active_r5.json"
+    },
+    {
+      "condition": "b0_direct_cli",
+      "character": "Necrobinder",
+      "runner": "direct_cli",
+      "template": "direct_cli_baseline_rules_v2_defect_active_r5.json"
+    },
+    {
+      "condition": "b1_formal_generalist",
+      "character": "Ironclad",
+      "runner": "agent",
+      "template": "formal_generalist_defect_template_20260726.json"
+    },
+    {
+      "condition": "b1_formal_generalist",
+      "character": "Silent",
+      "runner": "agent",
+      "template": "formal_generalist_defect_template_20260726.json"
+    },
+    {
+      "condition": "b1_formal_generalist",
+      "character": "Defect",
+      "runner": "agent",
+      "template": "formal_generalist_defect_template_20260726.json"
+    },
+    {
+      "condition": "b1_formal_generalist",
+      "character": "Regent",
+      "runner": "agent",
+      "template": "formal_generalist_defect_template_20260726.json"
+    },
+    {
+      "condition": "b1_formal_generalist",
+      "character": "Necrobinder",
+      "runner": "agent",
+      "template": "formal_generalist_defect_template_20260726.json"
+    },
+    {
+      "condition": "b2_full_bg_agent",
+      "character": "Ironclad",
+      "runner": "agent",
+      "template": "ablation_combat_state_only_defect_template_20260726.json",
+      "switches": {
+        "context_mode": "combat_mdp_state",
+        "route_plan": true,
+        "reward_posterior_evaluator": true
+      }
+    },
+    {
+      "condition": "b2_full_bg_agent",
+      "character": "Silent",
+      "runner": "agent",
+      "template": "ablation_combat_state_only_defect_template_20260726.json",
+      "switches": {
+        "context_mode": "combat_mdp_state",
+        "route_plan": true,
+        "reward_posterior_evaluator": true
+      }
+    },
+    {
+      "condition": "b2_full_bg_agent",
+      "character": "Defect",
+      "runner": "agent",
+      "template": "ablation_combat_state_only_defect_template_20260726.json",
+      "switches": {
+        "context_mode": "combat_mdp_state",
+        "route_plan": true,
+        "reward_posterior_evaluator": true
+      }
+    },
+    {
+      "condition": "b2_full_bg_agent",
+      "character": "Regent",
+      "runner": "agent",
+      "template": "ablation_combat_state_only_defect_template_20260726.json",
+      "switches": {
+        "context_mode": "combat_mdp_state",
+        "route_plan": true,
+        "reward_posterior_evaluator": true
+      }
+    },
+    {
+      "condition": "b2_full_bg_agent",
+      "character": "Necrobinder",
+      "runner": "agent",
+      "template": "ablation_combat_state_only_defect_template_20260726.json",
+      "switches": {
+        "context_mode": "combat_mdp_state",
+        "route_plan": true,
+        "reward_posterior_evaluator": true
+      }
+    },
+    {
+      "condition": "a1_no_route_plan",
+      "character": "Defect",
+      "runner": "agent",
+      "template": "ablation_combat_state_only_defect_template_20260726.json",
+      "switches": {
+        "context_mode": "combat_mdp_state",
+        "route_plan": false,
+        "reward_posterior_evaluator": true
+      }
+    },
+    {
+      "condition": "a2_combat_state_only",
+      "character": "Defect",
+      "runner": "agent",
+      "template": "ablation_combat_state_only_defect_template_20260726.json"
+    },
+    {
+      "condition": "a3_combat_dialogue",
+      "character": "Defect",
+      "runner": "agent",
+      "template": "ablation_combat_dialogue_defect_template_20260726.json"
+    },
+    {
+      "condition": "a4_no_reward_posterior",
+      "character": "Defect",
+      "runner": "agent",
+      "template": "ablation_combat_state_only_defect_template_20260726.json",
+      "switches": {
+        "context_mode": "combat_mdp_state",
+        "route_plan": true,
+        "reward_posterior_evaluator": false
+      }
+    }
+  ],
+  "paired_scene_plan": {
+    "condition": "a5_no_rule_projection_recent_changes",
+    "source_condition": "b2_full_bg_agent",
+    "character": "Defect",
+    "matched_seeds": [
+      "ironclad_a0_3407",
+      "ironclad_a0_1007",
+      "ironclad_a0_2407"
+    ],
+    "paired_choices_per_seed": 5,
+    "control": {
+      "rule_projection_and_recent_changes": true
+    },
+    "treatment": {
+      "rule_projection_and_recent_changes": false
+    },
+    "matching_contract": [
+      "snapshot",
+      "authoritative_state",
+      "legal_actions",
+      "model",
+      "temperature",
+      "provider_route"
+    ],
+    "launch_after_b2_snapshots_exist": true,
+    "full_game_runs": 0
+  }
+}

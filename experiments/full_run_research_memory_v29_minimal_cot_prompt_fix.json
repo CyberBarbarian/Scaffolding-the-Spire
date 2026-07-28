@@ -1,0 +1,30 @@
+{
+  "schema_version": 2,
+  "extends": "full_run_research_memory_v28_minimal_cot_ablation.json",
+  "extends_sha256": "84B635623DA6FE1F85094573979D7406F6EF10EE510256E3096F56E3482C699B",
+  "overrides": {
+    "experiment_id": "full-run-research-memory-v29-minimal-cot-prompt-fix",
+    "purpose": "Corrected rerun of the V28 fixed-corpus 2x2 minimal structured CoT ablation. V28 exposed a representation bug: the shared JSON example literally used 'stage-specific value' for candidate_audits.decision, which conflicted with the prose and caused models to copy an invalid value. V29 changes only that example to generator=propose and critic=retain|revise|remove, preserves all semantic admission rules, evidence, model, temperature, tag schema, call counts, independent empty stores, and blinding, and uses a Mini-scoped execution freeze so concurrent unrelated fullgame edits cannot invalidate this experiment.",
+    "minimal_cot_ablation": {
+      "protocol_version": 2,
+      "prompt_fix": "Replace the invalid literal decision example 'stage-specific value' with the actual stage-specific enum. No semantic rule or validator is relaxed.",
+      "execution_freeze_scope": "Only files directly used by the Mini reflection generation, criticism, provider call, validation, and aggregation chain are prospectively hash checked. Every loaded sts2_bench Python source is additionally recorded at process start.",
+      "execution_freeze_files": {
+        "sts2_bench/actions.py": "4C075DE4CE6BD41715665434C8AEDD9DB53C8C86F299C995BA9A9ADBFB622726",
+        "sts2_bench/agents.py": "558DBE6D264F9F8FF6CBC6C530B1ED0DFC4D095158ABAFAEA1DFCBA1668562EC",
+        "sts2_bench/reflection_probe.py": "406AAE3B5D303B60F25BD9FC6E5CC7A817A0C44CED274E5D6E35936F1013C6A0",
+        "sts2_bench/experiment_identity.py": "851F6F8E9860D28B55D7B0BE823D75BEED5EBB230D6AFC6FFF324DB5BD737A68",
+        "sts2_bench/layered_experience.py": "2364E4BB26FDDA3E3F1AA9C6291BA8A61377E3AEAE46BB850BFFADE227074ECD",
+        "sts2_bench/full_reflection_pairs.py": "5370235AB2851F7FB0C73E52FAD8C4C823EB88ABEA2CE658D4396B709A9DA73A",
+        "scripts/run_minimal_cot_ablation.py": "7967C80F09E7C607320132EEE9A38EE36DD98F9BEA59A7C1DD7E175226355491"
+      }
+    },
+    "freeze": {
+      "intervention_files": {
+        "sts2_bench/layered_experience.py": "2364E4BB26FDDA3E3F1AA9C6291BA8A61377E3AEAE46BB850BFFADE227074ECD",
+        "sts2_bench/full_reflection_pairs.py": "5370235AB2851F7FB0C73E52FAD8C4C823EB88ABEA2CE658D4396B709A9DA73A",
+        "scripts/run_minimal_cot_ablation.py": "7967C80F09E7C607320132EEE9A38EE36DD98F9BEA59A7C1DD7E175226355491"
+      }
+    }
+  }
+}

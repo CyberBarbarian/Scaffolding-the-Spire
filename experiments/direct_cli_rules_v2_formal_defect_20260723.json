@@ -1,0 +1,29 @@
+{
+  "schema_version": 2,
+  "experiment_id": "direct-cli-rules-v2-formal-defect-20260723",
+  "purpose": "Paper direct-CLI cross-character baseline with the complete neutral rules-v2 block for Defect.",
+  "output_root": "results/direct_cli_rules_v2_formal_defect_20260723",
+  "game_rules": {
+    "ruleset_id": "sts2-official-rules-v2",
+    "ruleset_sha256": "d462fa843517490c2aa324151b2ab68b9cddc65f32486fdc338dbb7c8de453ba",
+    "module_ids": ["core_run", "persistent_resources", "combat_cycle", "map_navigation", "room_glossary", "act_transition", "post_combat_rewards", "treasure", "deckbuilding_choice", "rest_site", "merchant", "event", "crystal_sphere"],
+    "delivery": "static_full_system_prompt",
+    "source": "sts2_bench/game_rules.py"
+  },
+  "model": "deepseek-v4-flash",
+  "base_url": "https://zgc.apihy.com/v1",
+  "seeds": ["ironclad_a0_3407", "ironclad_a0_1007", "ironclad_a0_2407"],
+  "repeats_per_seed": 5,
+  "workers": 3,
+  "character": "Defect",
+  "ascension": 0,
+  "lang": "en",
+  "temperature": 0.0,
+  "history_chars": 24000,
+  "max_tokens": 64,
+  "request_timeout_sec": 180,
+  "transport_retries": 3,
+  "max_decisions": 5000,
+  "run_timeout_sec": 7200,
+  "max_attempts_per_invocation": 3
+}

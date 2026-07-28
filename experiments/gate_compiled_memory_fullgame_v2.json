@@ -1,0 +1,73 @@
+{
+  "schema_version": 1,
+  "experiment_id": "gate-compiled-memory-fullgame-v2-segmented-reflection-seed2407-five-pairs",
+  "purpose": "Losslessly segment one immutable seed1007 full trajectory into decision-local reflection batches, retain the complete card catalog and complete local evidence in every batch, keep every raw candidate in an audit ledger, compile all active experiences sharing the same executable gate, and evaluate one frozen canonical memory in five synchronized B0/R1 fullgame pairs on seed2407 without changing the V21 baseline.",
+  "baseline_experiment": "experiments/full_run_layered_reflection_v21.json",
+  "source_evidence": {
+    "seed": "ironclad_a0_1007",
+    "trace": "results/full_run_layered_reflection_v18_20260716_round1/r1/seeds/ironclad_a0_1007/trace.jsonl",
+    "trace_sha256": "4709468D1C47EC194458F93BFB0CC5A7D4A42D379F0BBB75028BC52E565FF1E9",
+    "audit": "results/minimal_structured_memory_v1_20260719_retry1/memory_generation.audit.jsonl",
+    "audit_sha256": "DEDDE8DD53A6F254572D5FE9E7AC5562F872C1DECDE828CE091B6DE11D4CB63D"
+  },
+  "segmentation": {
+    "combat_exact_batch_size": 1,
+    "card_choice_batch_size": 2,
+    "route_batch_size": 5,
+    "shard_count": 4,
+    "generalization_output_limit": 6
+  },
+  "reflection_deadline_sec": 600,
+  "reflection_memory": {
+    "global_combat_limit": 0,
+    "exact_enemy_limit": 1,
+    "enemy_tag_limit": 1,
+    "combat_card_limit": 1,
+    "card_choice_limit": 4,
+    "route_limit": 4,
+    "max_prompt_chars": 2400,
+    "max_reflection_transitions": 80,
+    "reflection_output_limit": 3,
+    "reflection_json_response_format": 1,
+    "reflection_format_retries": 1,
+    "new_candidates_start_pending": 1
+  },
+  "evaluation": {
+    "target_seed": "ironclad_a0_2407",
+    "repetitions": 5,
+    "max_incomplete_pair_attempts": 2,
+    "historical_b0_trace": "results/full_run_layered_reflection_v18_20260716_round1/b0/seeds/ironclad_a0_2407/trace.jsonl",
+    "historical_b0_trace_sha256": "401242FE6E4C582573EAFC7A57EC2CF055350421DD2E77184071CF246F38DE77",
+    "historical_r1_trace": "results/full_run_layered_reflection_v18_20260716_round1/r1/seeds/ironclad_a0_2407/trace.jsonl",
+    "historical_r1_trace_sha256": "B4EBD8CB8A2AB130FBC194C9CAA5ACB1C655A31E95FCE130D708394BEB8961EA",
+    "pair_scheduler": "causal_serial_replicates_with_two_arm_same_seed_start_barrier",
+    "policy_memory": "frozen_independent_copy_per_replicate",
+    "activation_policy": "evaluation_only_structurally_valid_and_historically_exposed_not_knowledge_validation",
+    "minimum_active_experiences": 4,
+    "minimum_active_domains": 2,
+    "minimum_active_compiled_gates": 3,
+    "minimum_committed_injections_per_pair": 3,
+    "minimum_historical_matched_decisions": 5
+  },
+  "pre_fullgame_source_snapshot": {
+    "minimal_gated_experience_sha256": "C3645F5EB98AE59F5BA31767F0A001B72227FFDDB78BA605619153BE4C8868BE",
+    "minimal_gated_experience_git_blob": "e0eba2e38e4551caa0b5899d9cb0f4645f0095eb"
+  },
+  "pre_final_review_source_snapshots": {
+    "sts2_bench/repeated_gated_fullgame.py": {
+      "sha256": "1B86CB27B37DC798C14D4173CFB1F79F0C295C90B44EA9381A9DA293A0CC37A3",
+      "git_blob": "a4a80fb2fc38eee12a2c4ab61bc6b6ea2876b8b9"
+    },
+    "sts2_bench/segmented_experience_extract.py": {
+      "sha256": "7F064E66B1620540B7F633007E814A336CBB605C998796F9D562A7F68A253AA9",
+      "git_blob": "1d49f8e37ca57868cf5ecdaa22c31f962d229143"
+    }
+  },
+  "active_code_freeze": {
+    "sts2_bench/minimal_gated_experience.py": "3B11051BB195DA8A52B052F8B7AE71163696697F990F7A69479C9527B1A8EC2A",
+    "sts2_bench/segmented_experience_extract.py": "8734757E068D374F589984D1A7FFE9B4921EABAFF72E077DB2E016A49114BE8B",
+    "sts2_bench/repeated_gated_fullgame.py": "D3B8CBEB4B6B58DC2AC82828AA246301A0A7E27D63B83D370928772D52F1199F",
+    "sts2_bench/gated_memory_experiment.py": "709D9C46FEDA539ECF58F306F77EE0B478299E21AEE89EBF22A241B6AFD16F03"
+  },
+  "output_root": "results/gate_compiled_memory_fullgame_v2_20260720"
+}

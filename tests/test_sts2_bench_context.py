@@ -1,4 +1,22 @@
-from sts2_bench.context import build_last_action_result, combat_skill_hints, compact_state, render_full_map, render_state_text
+from sts2_bench.context import build_last_action_result, combat_facts, combat_skill_hints, compact_state, render_full_map, render_state_text
+
+
+def test_combat_facts_never_export_attack_only_hp_projection():
+    state = {
+        "decision": "combat_play",
+        "player": {"hp": 18, "max_hp": 80, "block": 3},
+        "enemies": [
+            {
+                "index": 0,
+                "name": "Test Enemy",
+                "intents": [{"type": "Attack", "damage": 7, "hits": 2}],
+            }
+        ],
+        "hand": [],
+    }
+
+    assert "hp_if_end_turn_now" not in combat_facts(state)
+    assert "hp_if_end_turn_now" not in render_state_text(state)
 
 
 def test_view_deck_uses_full_card_rendering():
@@ -53,6 +71,67 @@ def test_view_deck_uses_full_card_rendering():
     assert "upgrade: damage 6 -> 9" in text
     assert "upgrade_description: Deal 9 damage." in text
     assert "tip: Attack: Attacks are played against enemies." in text
+
+
+def test_combat_card_select_restates_current_hand_and_character_mechanics():
+    state = {
+        "decision": "card_select",
+        "context": {"act": 1, "floor": 2, "room_type": "Monster"},
+        "player": {
+            "hp": 70,
+            "max_hp": 80,
+            "gold": 0,
+            "deck_size": 10,
+            "potions": [{"index": 0, "name": "Fire Potion", "description": "Deal 20 damage."}],
+        },
+        "min_select": 1,
+        "max_select": 1,
+        "can_skip": False,
+        "prompt": "Choose a card.",
+        "cards": [{"index": 0, "name": "Candidate", "description": "Selectable card."}],
+        "combat": {
+            "round": 1,
+            "energy": 2,
+            "max_energy": 3,
+            "draw_pile_count": 4,
+            "discard_pile_count": 1,
+            "exhaust_pile_count": 0,
+            "player_powers": [{"name": "Strength", "amount": 2, "description": "Power mechanic."}],
+            "hand": [
+                {
+                    "index": 0,
+                    "name": "Current Hand Card",
+                    "description": "Current hand mechanic.",
+                    "after_upgrade": {"description": "Current hand upgraded mechanic."},
+                }
+            ],
+            "enemies": [],
+            "orbs": [],
+            "orb_slots": 3,
+            "stars": 1,
+            "osty": {
+                "name": "Osty",
+                "hp": 12,
+                "max_hp": 20,
+                "block": 2,
+                "alive": True,
+                "powers": [{"name": "Osty Power", "description": "Osty mechanic."}],
+            },
+        },
+    }
+
+    text = render_state_text(state)
+
+    assert "description: Deal 20 damage." in text
+    assert "Strength(2): Power mechanic." in text
+    assert "Current combat hand (1):" in text
+    assert "description: Current hand mechanic." in text
+    assert "upgrade_description: Current hand upgraded mechanic." in text
+    assert "Orbs: none" in text
+    assert "Orb slots: 3" in text
+    assert "Stars: 1" in text
+    assert "Osty powers (1):" in text
+    assert "Osty Power: Osty mechanic." in text
 
 
 def test_combat_skill_hints_are_state_triggered_and_rendered():
@@ -322,6 +401,144 @@ def test_bundle_select_renders_visible_card_pack_details():
     assert "description: Gain 8 Block. Draw 1 card." in text
 
 
+def test_combat_text_renders_all_public_character_mechanics():
+    state = {
+        "decision": "combat_play",
+        "context": {"act": 1, "floor": 2, "room_type": "Monster"},
+        "player": {"hp": 70, "max_hp": 80, "block": 0, "gold": 0, "deck_size": 10},
+        "round": 1,
+        "energy": 3,
+        "max_energy": 3,
+        "draw_pile_count": 5,
+        "discard_pile_count": 0,
+        "exhaust_pile_count": 0,
+        "hand": [],
+        "enemies": [],
+        "orbs": [
+            {
+                "index": 0,
+                "name": "Lightning",
+                "passive": 3,
+                "evoke": 8,
+                "position_label": "rightmost",
+            }
+        ],
+        "orb_slots": 3,
+        "stars": 2,
+        "osty": {
+            "name": "Osty",
+            "hp": 18,
+            "max_hp": 24,
+            "block": 4,
+            "alive": True,
+        },
+    }
+
+    text = render_state_text(state)
+
+    assert "Orb slots: 3" in text
+    assert "position=rightmost" in text
+    assert "Stars: 2" in text
+    assert "Osty: Osty hp=18/24 block=4 alive=True" in text
+
+
+def test_event_choice_text_preserves_event_vars_and_structured_option_identity():
+    state = {
+        "decision": "event_choice",
+        "context": {"act": 1, "floor": 4, "room_type": "Event"},
+        "player": {"hp": 70, "max_hp": 80, "gold": 20, "deck_size": 10},
+        "event_name": "Relic Trader",
+        "description": "Trade one relic for another.",
+        "vars": {"gold_cost": 20},
+        "options": [
+            {
+                "index": 0,
+                "title": "Trade",
+                "description": "Lose Anchor. Gain Lantern.",
+                "text_key": "RELIC_TRADE",
+                "relic_trade": {
+                    "lose": {"id": "RELIC.ANCHOR", "name": "Anchor"},
+                    "gain": {"id": "RELIC.LANTERN", "name": "Lantern"},
+                },
+            }
+        ],
+    }
+
+    text = render_state_text(state)
+
+    assert 'Event vars: {"gold_cost":20}' in text
+    assert "text_key=RELIC_TRADE" in text
+    assert 'relic_trade={"gain":{"id":"RELIC.LANTERN","name":"Lantern"},"lose":{"id":"RELIC.ANCHOR","name":"Anchor"}}' in text
+
+
+def test_fake_merchant_text_preserves_event_context_and_foul_potion_availability():
+    state = {
+        "decision": "fake_merchant_shop",
+        "context": {"act": 1, "floor": 5, "room_type": "Event"},
+        "player": {"hp": 70, "max_hp": 80, "gold": 100, "deck_size": 10},
+        "event_name": "Fake Merchant",
+        "description": "The merchant's wares look suspicious.",
+        "vars": {"discount": 25},
+        "relics": [],
+        "can_leave": True,
+        "can_throw_foul_potion": True,
+        "foul_potion_action": {"action": "use_potion", "potion_index": 2},
+    }
+
+    text = render_state_text(state)
+
+    assert "Fake merchant event: Fake Merchant" in text
+    assert "Description: The merchant's wares look suspicious." in text
+    assert 'Event vars: {"discount":25}' in text
+    assert "can_throw_foul_potion=True" in text
+    assert '"potion_index":2' in text
+
+
+def test_standard_shop_text_preserves_engine_affordances():
+    state = {
+        "decision": "shop",
+        "player": {"hp": 70, "max_hp": 80, "gold": 100, "deck_size": 10},
+        "cards": [
+            {"index": 0, "name": "Card", "price": 50, "is_stocked": True, "can_buy": True},
+        ],
+        "relics": [
+            {"index": 1, "name": "Relic", "cost": 120, "is_stocked": True, "can_buy": False},
+        ],
+        "potions": [
+            {
+                "index": 2,
+                "name": "Potion",
+                "cost": 50,
+                "is_stocked": True,
+                "can_buy": False,
+                "target_type": "None",
+            },
+        ],
+        "card_removal_cost": 75,
+        "can_remove_card": True,
+    }
+
+    text = render_state_text(state)
+
+    assert "[0] Card price=50 is_stocked=True can_buy=True" in text
+    assert "[1] Relic cost=120 is_stocked=True can_buy=False" in text
+    assert "[2] Potion cost=50 is_stocked=True can_buy=False" in text
+    assert "Card removal cost: 75 can_remove_card=True" in text
+
+
+def test_card_reward_text_does_not_invent_missing_skip_affordance():
+    text = render_state_text(
+        {
+            "decision": "card_reward",
+            "player": {"hp": 70, "max_hp": 80, "gold": 100, "deck_size": 10},
+            "cards": [{"index": 0, "name": "Strike"}],
+        }
+    )
+
+    assert "Can skip: None" in text
+    assert "Can skip: True" not in text
+
+
 def test_view_discard_pile_with_hidden_details_matches_cli_message():
     state = {
         "decision": "map_select",
@@ -436,3 +653,187 @@ def test_last_action_result_is_rendered_as_transition_diff():
     assert "exhaust_pile: 0 -> 1" in text
     assert "hand_count: 1 -> 0" in text
     assert "enemy Jaw Worm[0]: hp 20/40 -> 14/40" in text
+
+
+def test_last_action_result_tracks_surviving_enemy_by_instance_id_after_reindex():
+    old_state = {
+        "decision": "combat_play",
+        "round": 4,
+        "energy": 1,
+        "max_energy": 3,
+        "player": {"hp": 2, "max_hp": 80},
+        "hand": [{"index": 0, "name": "Strike"}],
+        "enemies": [
+            {
+                "index": 0,
+                "combat_index": 0,
+                "instance_id": 14,
+                "name": "Leaf Slime (M)",
+                "hp": 1,
+                "max_hp": 32,
+                "block": 0,
+            },
+            {
+                "index": 1,
+                "combat_index": 1,
+                "instance_id": 15,
+                "name": "Flyconid",
+                "hp": 26,
+                "max_hp": 47,
+                "block": 0,
+            },
+        ],
+    }
+    new_state = {
+        "decision": "combat_play",
+        "round": 4,
+        "energy": 0,
+        "max_energy": 3,
+        "player": {"hp": 2, "max_hp": 80},
+        "hand": [],
+        "enemies": [
+            {
+                "index": 0,
+                "combat_index": 0,
+                "instance_id": 15,
+                "name": "Flyconid",
+                "hp": 20,
+                "max_hp": 47,
+                "block": 0,
+            }
+        ],
+    }
+
+    result = build_last_action_result(
+        old_state,
+        new_state,
+        action_label="play card 0: Strike on enemy 0: Leaf Slime (M)",
+        action_kind="combat_play_card",
+    )
+
+    assert "enemy Leaf Slime (M)[0]: defeated" in result["changes"]
+    assert "enemy Flyconid[1]: defeated" not in result["changes"]
+    assert "enemy Flyconid[1]: hp 26/47 -> 20/47" in result["changes"]
+
+
+def test_last_action_result_distinguishes_same_named_enemies_by_instance_id():
+    old_state = {
+        "decision": "combat_play",
+        "round": 2,
+        "energy": 1,
+        "max_energy": 3,
+        "player": {"hp": 20, "max_hp": 80},
+        "hand": [{"index": 0, "name": "Strike"}],
+        "enemies": [
+            {
+                "index": 0,
+                "instance_id": 21,
+                "name": "Wriggler",
+                "hp": 1,
+                "max_hp": 18,
+                "block": 0,
+            },
+            {
+                "index": 1,
+                "instance_id": 22,
+                "name": "Wriggler",
+                "hp": 14,
+                "max_hp": 18,
+                "block": 0,
+            },
+        ],
+    }
+    new_state = {
+        "decision": "combat_play",
+        "round": 2,
+        "energy": 0,
+        "max_energy": 3,
+        "player": {"hp": 20, "max_hp": 80},
+        "hand": [],
+        "enemies": [
+            {
+                "index": 0,
+                "instance_id": 22,
+                "name": "Wriggler",
+                "hp": 14,
+                "max_hp": 18,
+                "block": 0,
+            }
+        ],
+    }
+
+    result = build_last_action_result(
+        old_state,
+        new_state,
+        action_label="play card 0: Strike on enemy 0: Wriggler",
+        action_kind="combat_play_card",
+    )
+
+    assert result["changes"].count("enemy Wriggler[0]: defeated") == 1
+    assert "enemy Wriggler[1]: defeated" not in result["changes"]
+
+
+def test_map_legend_treats_question_mark_as_unknown():
+    full_map = {
+        "type": "map",
+        "current_coord": {"col": 0, "row": 0},
+        "rows": [[{"col": 0, "row": 0, "type": "Unknown", "children": []}]],
+        "boss": {"col": 0, "row": 0, "type": "Boss"},
+    }
+
+    text = "\n".join(render_full_map(full_map, []))
+
+    assert "?=Unknown" in text
+    assert "?=Event" not in text
+
+
+def test_crystal_sphere_preserves_all_authoritative_decision_fields():
+    state = {
+        "decision": "crystal_sphere",
+        "context": {"act": 1, "floor": 4, "room_type": "Event"},
+        "player": {"hp": 70, "max_hp": 80, "gold": 20, "deck_size": 11},
+        "event_name": "Crystal Sphere",
+        "grid_width": 3,
+        "grid_height": 2,
+        "divinations_remaining": 2,
+        "tool": "small",
+        "can_use_big_tool": True,
+        "can_use_small_tool": False,
+        "can_proceed": False,
+        "cells": [{"x": 0, "y": 0, "hidden": False}],
+        "clickable_cells": [{"x": 1, "y": 0}],
+        "visible_items": [{"x": 0, "y": 0, "kind": "gem"}],
+        "revealed_items": [],
+    }
+
+    text = render_state_text(state)
+
+    assert "width=3 height=2 divinations_remaining=2 tool=small" in text
+    assert "can_use_big_tool=True can_use_small_tool=False can_proceed=False" in text
+    assert 'Crystal Sphere cells: [{"hidden":false,"x":0,"y":0}]' in text
+    assert 'Crystal Sphere clickable_cells: [{"x":1,"y":0}]' in text
+    assert 'Crystal Sphere visible_items: [{"kind":"gem","x":0,"y":0}]' in text
+    assert "Crystal Sphere revealed_items: []" in text
+
+
+def test_event_result_preserves_identity_result_and_proceed_state():
+    state = {
+        "decision": "event_result",
+        "context": {"act": 1, "floor": 4, "room_type": "Event"},
+        "player": {"hp": 70, "max_hp": 80, "gold": 20, "deck_size": 11},
+        "event_id": "TEST_EVENT",
+        "event_name": "Test Event",
+        "description": "The event is complete.",
+        "vars": {"gold": 20},
+        "options": [{"index": 0, "title": "Proceed"}],
+        "can_proceed": True,
+    }
+
+    text = render_state_text(state)
+
+    assert "Event result: Test Event" in text
+    assert "Event id: TEST_EVENT" in text
+    assert "Description: The event is complete." in text
+    assert 'Event vars: {"gold":20}' in text
+    assert 'Event result options: [{"index":0,"title":"Proceed"}]' in text
+    assert "Can proceed: True" in text

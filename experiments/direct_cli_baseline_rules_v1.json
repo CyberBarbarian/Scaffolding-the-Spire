@@ -1,0 +1,46 @@
+{
+  "schema_version": 2,
+  "experiment_id": "direct-cli-baseline-rules-v1",
+  "purpose": "Paper baseline: a language model plays the human-facing text terminal with a bounded FIFO transcript and the same neutral official game-rule facts used by Default-v1.",
+  "output_root": "results/direct_cli_baseline_rules_v1_20260722",
+  "game_rules": {
+    "ruleset_id": "sts2-official-rules-v1",
+    "ruleset_sha256": "161a83a7b7cf2adc7b91a008079fceb3429f1b90d2dd4dc97d7a9e20ccf2ccb4",
+    "module_ids": [
+      "core_run",
+      "persistent_resources",
+      "combat_cycle",
+      "map_navigation",
+      "room_glossary",
+      "act_transition",
+      "post_combat_rewards",
+      "deckbuilding_choice",
+      "rest_site",
+      "merchant",
+      "event",
+      "crystal_sphere"
+    ],
+    "delivery": "static_full_system_prompt",
+    "source": "sts2_bench/game_rules.py"
+  },
+  "model": "deepseek-v4-flash",
+  "base_url": "https://zgc.apihy.com/v1",
+  "seeds": [
+    "ironclad_a0_3407",
+    "ironclad_a0_1007",
+    "ironclad_a0_2407"
+  ],
+  "repeats_per_seed": 5,
+  "workers": 3,
+  "character": "Ironclad",
+  "ascension": 0,
+  "lang": "en",
+  "temperature": 0.0,
+  "history_chars": 24000,
+  "max_tokens": 64,
+  "request_timeout_sec": 180,
+  "transport_retries": 3,
+  "max_decisions": 5000,
+  "run_timeout_sec": 7200,
+  "max_attempts_per_invocation": 3
+}

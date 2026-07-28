@@ -1,10 +1,17 @@
+import hashlib
+import itertools
+import http.server
 import json
 import os
+import threading
+import time
 import urllib.error
+import urllib.request
 
 import pytest
+import sts2_bench.agents as agents_module
 
-from sts2_bench.actions import build_legal_actions
+from sts2_bench.actions import UnsupportedDecisionError, build_legal_actions
 from sts2_bench.agents import (
     ModelActionError,
     OpenAICompatAgent,
@@ -14,11 +21,183 @@ from sts2_bench.agents import (
     build_prompt_contract,
     parse_json_object,
 )
-from sts2_bench.multi_agent import CoordinatorAgent
+from sts2_bench.multi_agent import CoordinatorAgent, OutOfCombatContextAgent
 from sts2_bench.run_benchmark import _redact_argv, load_benchmark_config
-from sts2_bench.runner import JsonlLogger, _custom_sequence_feedback, _decision_log_entry, agent_from_args, run_one
+from sts2_bench.runner import (
+    JsonlLogger,
+    RunResult,
+    _custom_sequence_feedback,
+    _decision_log_entry,
+    agent_from_args,
+    run_one,
+    summarize,
+)
 from sts2_bench.sequences import normalize_card_sequence_payload
+
+
+@pytest.mark.parametrize(
+    ("state", "expected_action_names"),
+    [
+        (
+            {"decision": "map_select", "choices": [{"col": 0, "row": 1, "type": "Monster"}]},
+            {"select_map_node"},
+        ),
+        (
+            {
+                "decision": "combat_play",
+                "energy": 3,
+                "hand": [{"index": 0, "name": "Strike", "cost": 1, "can_play": True}],
+                "enemies": [],
+                "player": {"potions": []},
+            },
+            {"play_card", "end_turn"},
+        ),
+        (
+            {
+                "decision": "combat_reward",
+                "rewards": [{"index": 0, "kind": "potion", "can_claim": True, "can_skip": True}],
+                "player": {"potions": []},
+            },
+            {"claim_reward", "skip_reward"},
+        ),
+        (
+            {"decision": "card_reward", "cards": [{"index": 0, "name": "Card"}], "can_skip": True},
+            {"select_card_reward", "skip_card_reward"},
+        ),
+        (
+            {
+                "decision": "card_select",
+                "cards": [{"index": 0, "name": "Card"}],
+                "min_select": 0,
+                "max_select": 1,
+                "can_skip": True,
+            },
+            {"select_cards", "skip_select"},
+        ),
+        (
+            {"decision": "bundle_select", "bundles": [{"index": 4, "cards": []}]},
+            {"select_bundle"},
+        ),
+        (
+            {
+                "decision": "event_choice",
+                "options": [
+                    {"index": 0, "title": "Open", "is_locked": False},
+                    {"index": 1, "title": "Locked", "is_locked": True},
+                ],
+                "can_leave": True,
+            },
+            {"choose_option", "leave_room"},
+        ),
+        (
+            {
+                "decision": "rest_site",
+                "options": [
+                    {"index": 0, "title": "Enabled", "is_enabled": True},
+                    {"index": 1, "title": "Disabled", "is_enabled": False},
+                ],
+            },
+            {"choose_option"},
+        ),
+        (
+            {
+                "decision": "shop",
+                "cards": [{"index": 0, "name": "Card", "is_stocked": True, "can_buy": True}],
+                "relics": [{"index": 0, "name": "Relic", "is_stocked": True, "can_buy": True}],
+                "potions": [{"index": 0, "name": "Potion", "is_stocked": True, "can_buy": True}],
+                "card_removal_cost": 50,
+                "can_remove_card": True,
+            },
+            {"buy_card", "buy_relic", "buy_potion", "remove_card", "leave_room"},
+        ),
+        (
+            {
+                "decision": "fake_merchant_shop",
+                "relics": [{"index": 0, "name": "Relic", "is_stocked": True, "can_buy": True}],
+                "can_throw_foul_potion": True,
+                "foul_potion_action": {"action": "use_potion", "potion_index": 0},
+                "can_leave": True,
+            },
+            {"buy_relic", "use_potion", "leave_room"},
+        ),
+        (
+            {"decision": "treasure", "relics": [{"index": 0, "name": "Relic"}]},
+            {"claim_relic"},
+        ),
+        (
+            {"decision": "treasure", "relics": [], "can_proceed": True},
+            {"proceed"},
+        ),
+        (
+            {
+                "decision": "crystal_sphere",
+                "can_proceed": False,
+                "can_use_big_tool": True,
+                "can_use_small_tool": True,
+                "clickable_cells": [{"x": 1, "y": 2}],
+            },
+            {"crystal_sphere_set_tool", "crystal_sphere_click_cell"},
+        ),
+        (
+            {"decision": "event_result", "can_proceed": True},
+            {"proceed"},
+        ),
+        (
+            {"decision": "game_over"},
+            set(),
+        ),
+    ],
+)
+def test_complete_decision_action_contract_matrix(state, expected_action_names):
+    actions = build_legal_actions(state, allow_card_sequences=False)
+    action_names = {
+        action.command.get("action")
+        for action in actions
+        if action.command.get("cmd") == "action"
+    }
+    assert action_names == expected_action_names
+
+
+@pytest.mark.parametrize(
+    "decision",
+    ["event_blocked", "unrecognized_state", "unknown", "treasure_empty"],
+)
+def test_defensive_decision_states_have_no_implicit_actions(decision):
+    with pytest.raises(UnsupportedDecisionError):
+        build_legal_actions({"decision": decision})
 from sts2_bench.sequence_validation import validate_custom_sequence
+
+
+def test_event_result_has_explicit_proceed_action():
+    actions = build_legal_actions(
+        {
+            "decision": "event_result",
+            "can_proceed": True,
+            "context": {"room_type": "Event"},
+        }
+    )
+
+    assert any(action.kind == "event_result_proceed" for action in actions)
+
+
+@pytest.mark.parametrize(
+    "decision",
+    ["unrecognized_state", "unknown", "event_blocked", "future_unhandled_decision"],
+)
+def test_unhandled_headless_decision_refuses_implicit_proceed(decision):
+    with pytest.raises(UnsupportedDecisionError, match="refusing implicit proceed"):
+        build_legal_actions({"decision": decision, "context": {"room_type": "Unknown"}})
+
+
+def test_unknown_map_node_remains_a_legal_map_choice():
+    actions = build_legal_actions(
+        {
+            "decision": "map_select",
+            "choices": [{"type": "Unknown", "col": 2, "row": 4}],
+        }
+    )
+
+    assert any(action.kind == "map" and "Unknown" in action.label for action in actions)
 
 
 def test_parse_json_object_accepts_trailing_text_after_first_object():
@@ -33,6 +212,372 @@ def test_parse_json_object_accepts_intro_and_fenced_object():
     )
 
     assert parsed == {"action_id": 1, "reason": "route"}
+
+
+def test_openai_http_backends_send_byte_identical_model_request(monkeypatch):
+    response_payload = {"choices": [{"message": {"content": "{}"}}]}
+    response_bytes = json.dumps(response_payload).encode("utf-8")
+    urllib_seen = {}
+    session_seen = {}
+    messages = [
+        {"role": "system", "content": "完整上下文"},
+        {"role": "user", "content": "Choose from every legal action."},
+    ]
+    original_messages = json.loads(json.dumps(messages, ensure_ascii=False))
+
+    class UrlopenResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return response_bytes
+
+    def fake_urlopen(request, timeout):
+        urllib_seen.update(
+            {
+                "url": request.full_url,
+                "body": request.data,
+                "headers": {key.lower(): value for key, value in request.header_items()},
+                "timeout": timeout,
+            }
+        )
+        return UrlopenResponse()
+
+    class SessionResponse:
+        status_code = 200
+        content = response_bytes
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    class FakeSession:
+        def post(self, url, *, data, headers, timeout):
+            session_seen.update(
+                {
+                    "url": url,
+                    "body": data,
+                    "headers": {key.lower(): value for key, value in headers.items()},
+                    "timeout": timeout,
+                }
+            )
+            return SessionResponse()
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    urllib_agent = OpenAICompatAgent(
+        base_url="https://example.invalid/v1",
+        model="same-model",
+        api_key="same-key",
+        temperature=0.0,
+        json_response_format=True,
+    )
+    session_agent = OpenAICompatAgent(
+        base_url="https://example.invalid/v1",
+        model="same-model",
+        api_key="same-key",
+        temperature=0.0,
+        json_response_format=True,
+        http_backend="requests_session",
+    )
+    session_agent._http_session = FakeSession()
+
+    urllib_result = urllib_agent._chat(messages, timeout_override=17.0)
+    session_result = session_agent._chat(messages, timeout_override=17.0)
+
+    assert urllib_result == session_result == response_payload
+    assert messages == original_messages
+    assert urllib_seen["url"] == session_seen["url"]
+    assert urllib_seen["body"] == session_seen["body"]
+    assert urllib_seen["headers"] == session_seen["headers"]
+    assert urllib_seen["headers"]["user-agent"] == "Mozilla/5.0 (compatible; sts2-agent-bench/1.0)"
+    assert urllib_seen["timeout"] == 17.0
+    decoded = json.loads(urllib_seen["body"].decode("utf-8"))
+    assert decoded == {
+        "model": "same-model",
+        "messages": messages,
+        "temperature": 0.0,
+        "response_format": {"type": "json_object"},
+    }
+
+
+def test_requests_session_backend_reuses_one_http_connection(monkeypatch):
+    client_ports = []
+    response_body = json.dumps({"choices": [{"message": {"content": "{}"}}]}).encode("utf-8")
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def do_POST(self):
+            content_length = int(self.headers["Content-Length"])
+            self.rfile.read(content_length)
+            client_ports.append(self.client_address[1])
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(response_body)))
+            self.end_headers()
+            self.wfile.write(response_body)
+
+        def log_message(self, _format, *_args):
+            return None
+
+    monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    agent = OpenAICompatAgent(
+        base_url=f"http://127.0.0.1:{server.server_port}/v1",
+        model="test",
+        http_backend="requests_session",
+    )
+    try:
+        messages = [{"role": "user", "content": "same payload"}]
+        agent._chat(messages)
+        agent._chat(messages)
+    finally:
+        agent.close_http_transport()
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+    assert len(client_ports) == 2
+    assert len(set(client_ports)) == 1
+
+
+def test_requests_session_worker_reuses_connection_and_preserves_exact_body(monkeypatch):
+    client_ports = []
+    request_bodies = []
+    response_body = json.dumps({"choices": [{"message": {"content": "{}"}}]}).encode("utf-8")
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def do_POST(self):
+            content_length = int(self.headers["Content-Length"])
+            request_bodies.append(self.rfile.read(content_length))
+            client_ports.append(self.client_address[1])
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(response_body)))
+            self.end_headers()
+            self.wfile.write(response_body)
+
+        def log_message(self, _format, *_args):
+            return None
+
+    monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    agent = OpenAICompatAgent(
+        base_url=f"http://127.0.0.1:{server.server_port}/v1",
+        model="test",
+        api_key="secret",
+        temperature=0.0,
+        json_response_format=True,
+        http_backend="requests_session_worker",
+    )
+    messages = [{"role": "system", "content": "完整卡牌信息"}, {"role": "user", "content": "全部合法动作"}]
+    original_messages = json.loads(json.dumps(messages, ensure_ascii=False))
+    expected_body = agent._chat_request_parts(messages)[1]
+    try:
+        agent._chat(messages, timeout_override=10.0)
+        agent._chat(messages, timeout_override=10.0)
+    finally:
+        agent.close_http_transport()
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+    assert messages == original_messages
+    assert request_bodies == [expected_body, expected_body]
+    assert len(client_ports) == 2
+    assert len(set(client_ports)) == 1
+
+
+def test_requests_session_worker_enforces_hard_wall_clock_on_slow_trickle(monkeypatch):
+    response_body = json.dumps({"choices": [{"message": {"content": "{}"}}]}).encode("utf-8")
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def do_POST(self):
+            self.close_connection = True
+            content_length = int(self.headers["Content-Length"])
+            self.rfile.read(content_length)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(response_body)))
+            self.end_headers()
+            try:
+                for byte in response_body:
+                    self.wfile.write(bytes([byte]))
+                    self.wfile.flush()
+                    time.sleep(0.2)
+            except (BrokenPipeError, ConnectionResetError):
+                return
+
+        def log_message(self, _format, *_args):
+            return None
+
+    monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server.daemon_threads = False
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    agent = OpenAICompatAgent(
+        base_url=f"http://127.0.0.1:{server.server_port}/v1",
+        model="test",
+        http_backend="requests_session_worker",
+    )
+    started = time.monotonic()
+    try:
+        with pytest.raises(TimeoutError, match="hard wall-clock timeout"):
+            agent._chat([{"role": "user", "content": "slow"}], timeout_override=1.0)
+    finally:
+        elapsed = time.monotonic() - started
+        agent.close_http_transport()
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+    assert 0.7 <= elapsed < 1.3
+
+
+def test_requests_session_worker_deadline_includes_blocked_ipc_dispatch(monkeypatch):
+    release = threading.Event()
+
+    class FakeProcess:
+        def terminate(self):
+            release.set()
+
+        def join(self, timeout=None):
+            return None
+
+        def is_alive(self):
+            return False
+
+        def close(self):
+            return None
+
+    class BlockingConnection:
+        def send(self, _value):
+            release.wait(timeout=5.0)
+            raise BrokenPipeError("closed at deadline")
+
+        def close(self):
+            release.set()
+
+    process = FakeProcess()
+    connection = BlockingConnection()
+    agent = OpenAICompatAgent(
+        base_url="http://127.0.0.1:1/v1",
+        model="test",
+        http_backend="requests_session_worker",
+    )
+
+    def fake_ensure():
+        agent._http_worker_process = process
+        agent._http_worker_connection = connection
+        return process, connection, agent._http_worker_epoch
+
+    monkeypatch.setattr(agent, "_ensure_http_worker", fake_ensure)
+    started = time.monotonic()
+
+    with pytest.raises(TimeoutError, match="hard wall-clock timeout"):
+        agent._chat([{"role": "user", "content": "large request"}], timeout_override=0.1)
+
+    assert time.monotonic() - started < 0.3
+    assert release.is_set()
+
+
+def test_http_worker_epoch_prevents_timed_out_startup_from_overwriting_retry(monkeypatch):
+    release_first_start = threading.Event()
+    first_start_entered = threading.Event()
+    processes = []
+
+    class FakeConnection:
+        def __init__(self):
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+
+    class FakeProcess:
+        def __init__(self, index):
+            self.index = index
+            self.alive = False
+            self.terminated = False
+            self.closed = False
+
+        def start(self):
+            if self.index == 0:
+                first_start_entered.set()
+                release_first_start.wait(timeout=2.0)
+            self.alive = True
+
+        def is_alive(self):
+            return self.alive
+
+        def terminate(self):
+            self.terminated = True
+            self.alive = False
+
+        def kill(self):
+            self.terminate()
+
+        def join(self, timeout=None):
+            return None
+
+        def close(self):
+            self.closed = True
+
+    class FakeContext:
+        def Pipe(self, duplex=True):
+            return FakeConnection(), FakeConnection()
+
+        def Process(self, **_kwargs):
+            process = FakeProcess(len(processes))
+            processes.append(process)
+            return process
+
+    monkeypatch.setattr(agents_module.multiprocessing, "get_context", lambda _mode: FakeContext())
+    agent = OpenAICompatAgent(
+        base_url="http://127.0.0.1:1/v1",
+        model="test",
+        http_backend="requests_session_worker",
+    )
+    first_result = {}
+
+    def start_first_generation():
+        try:
+            first_result["value"] = agent._ensure_http_worker()
+        except Exception as exc:
+            first_result["error"] = exc
+
+    first_thread = threading.Thread(target=start_first_generation)
+    first_thread.start()
+    assert first_start_entered.wait(timeout=1.0)
+    agent._force_abort_http_worker()
+    second_process, second_connection, second_epoch = agent._ensure_http_worker()
+    release_first_start.set()
+    first_thread.join(timeout=2.0)
+
+    assert isinstance(first_result.get("error"), urllib.error.URLError)
+    assert processes[0].terminated is True
+    assert second_process is processes[1]
+    assert second_process.terminated is False
+    assert agent._http_worker_process is second_process
+    assert agent._http_worker_connection is second_connection
+    assert agent._http_worker_epoch == second_epoch
+    agent._force_abort_http_worker(second_process, second_connection, second_epoch)
 
 
 def _json_after(prompt: str, marker: str):
@@ -279,6 +824,51 @@ def test_event_choice_exposes_leave_when_available():
     assert leave.command == {"cmd": "action", "action": "leave_room"}
 
 
+def test_standard_shop_uses_only_engine_exported_affordances():
+    state = {
+        "decision": "shop",
+        "cards": [
+            {"index": 0, "name": "Too Expensive", "price": 101, "is_stocked": True, "can_buy": False},
+            {"index": 2, "name": "Available", "price": 50, "is_stocked": True, "can_buy": True},
+        ],
+        "relics": [
+            {"index": 0, "name": "Missing Affordance", "cost": 10, "is_stocked": True},
+        ],
+        "potions": [
+            {"index": 0, "name": "Full Slots", "cost": 25, "is_stocked": True, "can_buy": False},
+        ],
+        "card_removal_cost": 50,
+        "can_remove_card": False,
+        "player": {"gold": 999},
+    }
+
+    actions = build_legal_actions(state)
+
+    shop_actions = [action for action in actions if action.kind.startswith("shop_")]
+    assert {action.kind for action in shop_actions} == {"shop_buy_card", "shop_leave"}
+    buy = next(action for action in actions if action.kind == "shop_buy_card")
+    assert buy.command["args"] == {"card_index": 2}
+
+
+def test_reward_actions_fail_closed_when_engine_affordance_fields_are_missing():
+    combat_actions = build_legal_actions(
+        {
+            "decision": "combat_reward",
+            "rewards": [{"index": 0, "kind": "gold"}],
+            "player": {"potions": []},
+        }
+    )
+    card_actions = build_legal_actions(
+        {
+            "decision": "card_reward",
+            "cards": [{"index": 0, "name": "Strike"}],
+        }
+    )
+
+    assert not any(action.kind in {"combat_reward", "combat_reward_skip"} for action in combat_actions)
+    assert not any(action.kind == "card_reward_skip" for action in card_actions)
+
+
 def test_fake_merchant_shop_exposes_relic_purchase_and_leave_actions():
     state = {
         "decision": "fake_merchant_shop",
@@ -324,10 +914,61 @@ def test_fake_merchant_shop_exposes_foul_potion_action_when_available():
     }
 
 
+def test_fake_merchant_prompt_preserves_relic_effects_and_foul_potion_facts():
+    state = {
+        "decision": "fake_merchant_shop",
+        "context": {"act": 1, "floor": 5, "room_type": "Shop"},
+        "can_leave": True,
+        "can_throw_foul_potion": True,
+        "foul_potion_action": {"action": "use_potion", "potion_index": 2},
+        "relics": [
+            {
+                "index": 0,
+                "id": "RELIC.BAG_OF_MARBLES",
+                "name": "Bag of Marbles",
+                "cost": 95,
+                "is_stocked": True,
+                "can_buy": True,
+                "description": "At the start of each combat, apply 1 Vulnerable to all enemies.",
+                "hover_tips": [
+                    {"name": "Vulnerable", "description": "Take 50% more Attack damage."}
+                ],
+            }
+        ],
+        "player": {
+            "hp": 70,
+            "max_hp": 80,
+            "gold": 100,
+            "deck": [],
+            "deck_size": 0,
+            "potions": [
+                {
+                    "index": 2,
+                    "name": "Foul Potion",
+                    "description": "Can be thrown at the fake merchant.",
+                    "target_type": "None",
+                }
+            ],
+        },
+    }
+    agent = OpenAICompatAgent(base_url="http://127.0.0.1:1", model="test")
+
+    prompt = agent.build_prompt(state, build_legal_actions(state))
+
+    assert "Fake merchant relics (1):" in prompt
+    assert "At the start of each combat, apply 1 Vulnerable to all enemies." in prompt
+    assert "tip: Vulnerable: Take 50% more Attack damage." in prompt
+    assert "can_throw_foul_potion=True" in prompt
+    assert '"action":"use_potion"' in prompt
+    assert '"potion_index":2' in prompt
+
+
 def test_crystal_sphere_exposes_tool_and_cell_actions():
     state = {
         "decision": "crystal_sphere",
         "can_proceed": False,
+        "can_use_big_tool": True,
+        "can_use_small_tool": True,
         "clickable_cells": [{"x": 1, "y": 2}, {"x": 3, "y": 4}],
     }
 
@@ -369,7 +1010,20 @@ class _RaisingAgent:
         return ""
 
     def choose(self, state, legal_actions, *, prompt=None):
-        raise ModelActionError("LLM failed after 1 attempt(s): action_id out of range: 99")
+        messages = [{"role": "user", "content": str(prompt or "") }]
+        payload = json.dumps(messages, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        raise ModelActionError(
+            "LLM failed after 1 attempt(s): action_id out of range: 99",
+            audit_meta={
+                "model_request_audits": [
+                    {
+                        "request_index": 0,
+                        "messages": messages,
+                        "messages_sha256": hashlib.sha256(payload).hexdigest(),
+                    }
+                ]
+            },
+        )
 
 
 class _ErrorProcess:
@@ -388,6 +1042,47 @@ class _ErrorProcess:
 
     def send(self, command):
         return {"type": "error", "message": "forced engine error"}
+
+    def close(self):
+        pass
+
+
+class _TaggedEngineErrorProcess:
+    def __init__(self, *, immediate: bool):
+        self.immediate = immediate
+        self.sent_commands = []
+
+    def start(self):
+        pass
+
+    def start_run(self, **kwargs):
+        if self.immediate:
+            return {
+                "decision": "game_over",
+                "victory": False,
+                "engine_error": True,
+                "engine_error_reason": "initial terminal export failed",
+                "context": {"act": 1, "floor": 7},
+                "player": {"hp": 0, "max_hp": 80},
+            }
+        return {
+            "decision": "combat_play",
+            "context": {"act": 1, "floor": 1},
+            "player": {"hp": 80, "max_hp": 80, "gold": 0, "deck_size": 10},
+            "energy": 0,
+            "hand": [],
+            "enemies": [],
+        }
+
+    def send(self, command):
+        self.sent_commands.append(command)
+        return {
+            "decision": "combat_reward",
+            "error": "engine_error",
+            "engine_error_reason": "reward export failed",
+            "context": {"act": 1, "floor": 1},
+            "player": {"hp": 80, "max_hp": 80},
+        }
 
     def close(self):
         pass
@@ -424,6 +1119,76 @@ class _NonTerminalEndTurnProcess:
         pass
 
 
+class _ImmediateTerminalProcess:
+    def start(self):
+        pass
+
+    def start_run(self, **kwargs):
+        return {
+            "decision": "game_over",
+            "victory": False,
+            "context": {"act": 1, "floor": 7, "room_type": "Monster"},
+            "player": {
+                "hp": 0,
+                "max_hp": 80,
+                "gold": 42,
+                "deck_size": 2,
+                "deck": [
+                    {"id": "strike", "name": "Strike", "upgrade_level": 0},
+                    {"id": "bash", "name": "Bash", "upgrade_level": 1},
+                ],
+                "relics": [{"id": "burning_blood", "name": "Burning Blood"}],
+                "potions": [],
+            },
+        }
+
+    def close(self):
+        pass
+
+
+class _UnsupportedDecisionProcess:
+    def __init__(self, decision="unrecognized_state"):
+        self.decision = decision
+        self.sent_commands = []
+
+    def start(self):
+        pass
+
+    def start_run(self, **kwargs):
+        return {
+            "decision": self.decision,
+            "context": {"act": 1, "floor": 1, "room_type": "Unknown"},
+            "player": {"hp": 80, "max_hp": 80},
+        }
+
+    def send(self, command):
+        self.sent_commands.append(command)
+        raise AssertionError("unsupported decisions must stop before sending a command")
+
+    def close(self):
+        pass
+
+
+class _EmptyRecognizedDecisionProcess(_UnsupportedDecisionProcess):
+    def __init__(self):
+        super().__init__(decision="event_result")
+
+    def start_run(self, **kwargs):
+        state = super().start_run(**kwargs)
+        state["context"]["room_type"] = "Event"
+        state["can_proceed"] = False
+        state.update(
+            {
+                "view_deck": True,
+                "view_map": True,
+                "view_draw_pile": True,
+                "view_discard_pile": True,
+                "view_exhaust_pile": True,
+            }
+        )
+        return state
+
+
 def test_runner_stops_after_engine_error_state():
     result = run_one(
         agent=_ChooseEndTurnAgent(),
@@ -436,6 +1201,179 @@ def test_runner_stops_after_engine_error_state():
     assert result.invalid_states == 1
     assert result.steps == 1
     assert not result.truncated
+
+
+def test_runner_rejects_engine_error_marker_before_accepting_game_over():
+    process = _TaggedEngineErrorProcess(immediate=True)
+
+    result = run_one(
+        agent=_ChooseEndTurnAgent(),
+        seed="tagged-initial",
+        process=process,
+        max_steps=20,
+    )
+
+    assert result.error == "initial terminal export failed"
+    assert result.invalid_states == 1
+    assert result.decision == "game_over"
+    assert process.sent_commands == []
+
+
+def test_runner_rejects_engine_error_marker_after_action():
+    process = _TaggedEngineErrorProcess(immediate=False)
+
+    result = run_one(
+        agent=_ChooseEndTurnAgent(),
+        seed="tagged-after-action",
+        process=process,
+        max_steps=20,
+        log_level="full",
+    )
+
+    assert result.error == "reward export failed"
+    assert result.invalid_states == 1
+    assert result.decision == "combat_reward"
+    assert result.steps == 1
+    assert len(process.sent_commands) == 1
+    assert result.extra["last_observed_state"]["error"] == "engine_error"
+
+
+def test_runner_logs_unsupported_decision_before_stopping(tmp_path):
+    trace_path = tmp_path / "trace.jsonl"
+    process = _UnsupportedDecisionProcess()
+    logger = JsonlLogger(trace_path)
+    try:
+        result = run_one(
+            agent=_ChooseEndTurnAgent(),
+            seed="unsupported",
+            process=process,
+            logger=logger,
+            log_level="full",
+        )
+    finally:
+        logger.close()
+
+    assert "unsupported decision" in result.error
+    assert result.invalid_states == 1
+    assert process.sent_commands == []
+    rows = [json.loads(line) for line in trace_path.read_text(encoding="utf-8").splitlines()]
+    decision = next(row for row in rows if row.get("type") == "decision")
+    assert decision["decision"] == "unrecognized_state"
+    assert decision["report_required"] is True
+    assert "refusing implicit proceed" in decision["decision_error"]
+    assert decision["authoritative_state"]["decision"] == "unrecognized_state"
+
+
+def test_runner_refuses_implicit_proceed_for_recognized_empty_action_state(tmp_path):
+    trace_path = tmp_path / "trace.jsonl"
+    process = _EmptyRecognizedDecisionProcess()
+    logger = JsonlLogger(trace_path)
+    try:
+        result = run_one(
+            agent=_ChooseEndTurnAgent(),
+            seed="empty-actions",
+            process=process,
+            logger=logger,
+            log_level="full",
+        )
+    finally:
+        logger.close()
+
+    assert result.error == (
+        "recognized decision 'event_result' exposed no legal actions; refusing implicit proceed"
+    )
+    assert result.invalid_states == 1
+    assert result.game_action_count == 0
+    assert process.sent_commands == []
+    rows = [json.loads(line) for line in trace_path.read_text(encoding="utf-8").splitlines()]
+    assert any(row.get("type") == "decision" and row.get("decision") == "event_result" for row in rows)
+    error = next(row for row in rows if row.get("type") == "decision_error")
+    assert error["report_required"] is True
+
+
+def test_full_log_preserves_authoritative_terminal_state(tmp_path):
+    trace_path = tmp_path / "trace.jsonl"
+    logger = JsonlLogger(trace_path)
+    try:
+        result = run_one(
+            agent=_ChooseEndTurnAgent(),
+            seed="terminal",
+            process=_ImmediateTerminalProcess(),
+            logger=logger,
+            log_level="full",
+        )
+    finally:
+        logger.close()
+
+    terminal = result.extra["authoritative_terminal_state"]
+    assert terminal["player"]["deck"][1]["upgrade_level"] == 1
+    assert terminal["player"]["relics"][0]["id"] == "burning_blood"
+    rows = [json.loads(line) for line in trace_path.read_text(encoding="utf-8").splitlines()]
+    assert rows[-1]["result"]["extra"]["authoritative_terminal_state"] == terminal
+
+
+def test_full_log_preserves_authoritative_post_action_state(tmp_path):
+    trace_path = tmp_path / "trace.jsonl"
+    logger = JsonlLogger(trace_path)
+    try:
+        run_one(
+            agent=_ChooseEndTurnAgent(),
+            seed="post-action",
+            process=_SafeCustomSequenceValidationProcess(),
+            logger=logger,
+            log_level="full",
+            max_steps=2,
+        )
+    finally:
+        logger.close()
+
+    rows = [json.loads(line) for line in trace_path.read_text(encoding="utf-8").splitlines()]
+    action = next(row for row in rows if row.get("type") == "action")
+    assert action["state_after"]["decision"] == "game_over"
+    assert action["state_after"]["player"] == {"hp": 78, "max_hp": 80}
+
+
+def test_summary_excludes_truncated_and_error_attempts_from_outcomes():
+    completed = RunResult(
+        seed="complete",
+        character="Ironclad",
+        ascension=0,
+        decision="game_over",
+        victory=True,
+        floor=51,
+        steps=100,
+    )
+    truncated = RunResult(
+        seed="truncated",
+        character="Ironclad",
+        ascension=0,
+        decision="combat_play",
+        floor=99,
+        steps=2000,
+        truncated=True,
+        extra={"truncation_reason": "max_game_actions exceeded (48)"},
+    )
+    failed = RunResult(
+        seed="failed",
+        character="Ironclad",
+        ascension=0,
+        decision="unrecognized_state",
+        floor=88,
+        error="unsupported decision",
+    )
+
+    summary = summarize([completed, truncated, failed])
+
+    assert summary["runs"] == 3
+    assert summary["completed"] == 1
+    assert summary["victories"] == 1
+    assert summary["deaths"] == 0
+    assert summary["win_rate"] == 1.0
+    assert summary["avg_floor"] == 51.0
+    assert summary["truncated"] == 1
+    assert summary["errors"] == 1
+    assert summary["truncation_reasons"] == ["max_game_actions exceeded (48)"]
+    assert "max_steps" not in summary["warning"]
 
 
 def test_runner_max_game_actions_does_not_count_view_actions():
@@ -454,13 +1392,18 @@ def test_runner_max_game_actions_does_not_count_view_actions():
     assert result.extra["truncation_reason"] == "max_game_actions exceeded (1)"
 
 
-def test_runner_stops_without_action_and_keeps_state_when_agent_decision_fails():
+def test_runner_stops_without_action_and_keeps_state_when_agent_decision_fails(tmp_path):
+    trace_path = tmp_path / "trace.jsonl"
+    logger = JsonlLogger(trace_path)
     result = run_one(
         agent=_RaisingAgent(),
         seed="test",
         process=_NonTerminalEndTurnProcess(),
         max_steps=20,
+        logger=logger,
+        log_level="full",
     )
+    logger.close()
 
     assert "action_id out of range: 99" in result.error
     assert result.steps == 0
@@ -468,14 +1411,19 @@ def test_runner_stops_without_action_and_keeps_state_when_agent_decision_fails()
     assert result.floor == 1
     assert result.hp == 80
     assert not result.truncated
+    rows = [json.loads(line) for line in trace_path.read_text(encoding="utf-8").splitlines()]
+    model_error = next(row for row in rows if row.get("type") == "model_error")
+    assert model_error["step"] == 0
+    assert model_error["decision"] == "combat_play"
+    assert model_error["agent_meta"]["model_request_audits"][0]["request_index"] == 0
 
 
 def test_openai_compat_agent_prompt_includes_short_term_memory():
     agent = OpenAICompatAgent(
         base_url="http://127.0.0.1:1",
         model="test",
-        memory_enabled=True,
-        memory_window=2,
+        short_term_memory_enabled=True,
+        short_term_memory_window=2,
     )
     state = {
         "decision": "map_select",
@@ -551,12 +1499,13 @@ def test_openai_compat_agent_prompt_includes_rule_based_run_summary():
     prompt = agent.build_prompt(state, build_legal_actions(state))
 
     assert "Run summary:" in prompt
-    assert "For combat, write a concise COMBAT_EVALUATION using current Combat facts and any Combat skills shown." in prompt
+    assert "Write a concise COMBAT_EVALUATION using the current visible combat state and any Combat facts shown." in prompt
     assert "Combat facts:" in prompt
     assert "Combat skills:" in prompt
     assert "order: lethal > survival > reduce actions > damage/setup; one action" in prompt
     assert "no_attack: skip pure block; use damage/draw/scaling" in prompt
-    assert "incoming_attack_total=0 current_block=0 hp_if_end_turn_now=18" in prompt
+    assert "incoming_attack_total=0 current_block=0" in prompt
+    assert "hp_if_end_turn_now" not in prompt
     assert "future_risk_check_reasons=boss_or_elite,low_hp,no_current_attack,non_attack_intent" in prompt
     assert "- position: act=1 floor=17 room=Boss boss=Lagavulin Matriarch" in prompt
     assert "- resources: hp=18/85 gold=66 deck_size=22 potions=0/4 relic_count=2" in prompt
@@ -608,9 +1557,10 @@ def test_prompt_contract_is_derived_from_current_decision_and_legal_capabilities
     )
 
     assert combat_contract == PromptContract(
+        decision_type="combat_play",
         route_plan_enabled=False,
         combat_custom_sequence_enabled=False,
-        context_patch_fields_enabled=True,
+        context_patch_fields_enabled=False,
         turn_check_enabled=True,
     )
 
@@ -624,9 +1574,10 @@ def test_prompt_contract_is_derived_from_current_decision_and_legal_capabilities
     )
 
     assert custom_contract == PromptContract(
+        decision_type="combat_play",
         route_plan_enabled=False,
         combat_custom_sequence_enabled=True,
-        context_patch_fields_enabled=True,
+        context_patch_fields_enabled=False,
         turn_check_enabled=True,
     )
 
@@ -645,11 +1596,62 @@ def test_prompt_contract_is_derived_from_current_decision_and_legal_capabilities
     )
 
     assert map_contract == PromptContract(
+        decision_type="map_select",
         route_plan_enabled=True,
         combat_custom_sequence_enabled=False,
         context_patch_fields_enabled=True,
         turn_check_enabled=False,
     )
+
+
+def test_route_plan_off_prompt_keeps_map_but_omits_plan_contract_and_empty_combat_schema():
+    state = {
+        "decision": "map_select",
+        "context": {"act": 1, "floor": 1, "room_type": "Map"},
+        "player": {
+            "hp": 70,
+            "max_hp": 80,
+            "gold": 99,
+            "deck_size": 1,
+            "deck": [
+                {
+                    "name": "Defend",
+                    "description": "Gain 5 Block.",
+                    "hover_tips": [
+                        {"name": "Block", "description": "Prevents damage."},
+                        {"title": "Block", "description": "Prevents damage."},
+                    ],
+                }
+            ],
+        },
+        "choices": [{"col": 1, "row": 1, "type": "Monster"}],
+        "full_map": {
+            "type": "map",
+            "current_coord": {"col": 0, "row": 0},
+            "rows": [
+                [{"col": 0, "row": 0, "type": "Ancient", "children": [{"col": 1, "row": 1}]}],
+                [{"col": 1, "row": 1, "type": "Monster", "children": []}],
+            ],
+        },
+    }
+    agent = OpenAICompatAgent(
+        base_url="http://127.0.0.1:1",
+        model="test",
+        route_plan_enabled=False,
+        run_summary_enabled=False,
+    )
+
+    prompt = agent.build_prompt(state, build_legal_actions(state))
+    route_map = _json_after(prompt, "Canonical route map JSON:\n")
+    route_state = _json_after(prompt, "Route decision state JSON:\n")
+
+    assert "ordered_plan_required" not in route_map["constraints"]
+    assert "complete_visible_route_required" not in route_map["constraints"]
+    assert len(route_state["player"]["deck"][0]["hover_tips"]) == 1
+    assert "Active route plan" not in prompt
+    assert "route_plan_event" not in prompt
+    assert "combat_notes" not in prompt
+    assert "COMBAT_EVALUATION" not in prompt
 
 
 def test_prompt_context_matrix_keeps_contract_fragments_decision_scoped_and_bounded():
@@ -847,6 +1849,68 @@ def test_combat_mdp_state_prompt_omits_precomputed_sequence_kind():
     assert "engine-side queued card sequence" not in prompt
 
 
+def test_combat_mdp_state_prompt_omits_combat_skill_hints_by_default():
+    state = _combat_turn_state()
+    agent = OpenAICompatAgent(
+        base_url="http://127.0.0.1:1",
+        model="test",
+        conversation_mode="combat_mdp_state",
+    )
+
+    prompt = agent.build_prompt(state, build_legal_actions(state))
+    mdp_state = _json_after(prompt, "Combat MDP state JSON:\n")
+
+    assert "combat_guidance" not in mdp_state
+
+
+def test_combat_mdp_state_prompt_can_include_structured_combat_skill_hints():
+    state = _combat_turn_state()
+    agent = OpenAICompatAgent(
+        base_url="http://127.0.0.1:1",
+        model="test",
+        conversation_mode="combat_mdp_state",
+        combat_skill_hints_enabled=True,
+    )
+
+    prompt = agent.build_prompt(state, build_legal_actions(state))
+    mdp_state = _json_after(prompt, "Combat MDP state JSON:\n")
+
+    assert mdp_state["combat_guidance"]["source"] == "derived_visible_state"
+    assert mdp_state["combat_guidance"]["profile"] == "baseline"
+    assert mdp_state["combat_guidance"]["mode"] == "structured"
+    hints = mdp_state["combat_guidance"]["hints"]
+    assert hints[0]["id"] == "priority_order"
+    assert "lethal" in hints[0]["text"]
+    assert any(hint["id"] == "survival" for hint in hints)
+
+
+def test_turn_chat_prompt_includes_combat_skill_lines_by_default():
+    state = _combat_turn_state()
+    agent = OpenAICompatAgent(
+        base_url="http://127.0.0.1:1",
+        model="test",
+        conversation_mode="turn_chat",
+    )
+
+    prompt = agent.build_prompt(state, build_legal_actions(state))
+
+    assert "Combat skills:" in prompt
+
+
+def test_turn_chat_prompt_can_disable_combat_skill_lines():
+    state = _combat_turn_state()
+    agent = OpenAICompatAgent(
+        base_url="http://127.0.0.1:1",
+        model="test",
+        conversation_mode="turn_chat",
+        combat_skill_lines_enabled=False,
+    )
+
+    prompt = agent.build_prompt(state, build_legal_actions(state))
+
+    assert "Combat skills:" not in prompt
+
+
 def test_custom_sequence_feedback_warns_about_targets_removed_by_earlier_steps():
     feedback = _custom_sequence_feedback("custom sequence stopped after 1 step(s): enemy target 0 is not available")
 
@@ -881,9 +1945,9 @@ def test_openai_compat_agent_factual_memory_records_transition_diffs_not_reasons
     agent = OpenAICompatAgent(
         base_url="http://127.0.0.1:1",
         model="test",
-        memory_enabled=True,
-        memory_window=2,
-        memory_mode="factual_diff",
+        short_term_memory_enabled=True,
+        short_term_memory_window=2,
+        short_term_memory_mode="factual_diff",
     )
     old_state = {
         "decision": "combat_play",
@@ -926,7 +1990,7 @@ def test_agent_memory_resets_between_runs():
     agent = OpenAICompatAgent(
         base_url="http://127.0.0.1:1",
         model="test",
-        memory_enabled=True,
+        short_term_memory_enabled=True,
     )
     state = {
         "decision": "combat_play",
@@ -1024,7 +2088,7 @@ def _turn_chat_agent(responses, **kwargs):
         base_url="http://127.0.0.1:1",
         model="test",
         conversation_mode="turn_chat",
-        memory_enabled=False,
+        short_term_memory_enabled=False,
         max_retries=max_retries,
         **kwargs,
     )
@@ -1048,7 +2112,7 @@ def _combat_mdp_agent(responses, **kwargs):
         base_url="http://127.0.0.1:1",
         model="test",
         conversation_mode="combat_mdp_state",
-        memory_enabled=False,
+        short_term_memory_enabled=False,
         max_retries=max_retries,
         **kwargs,
     )
@@ -1106,12 +2170,78 @@ def test_openai_compat_agent_retries_invalid_action_before_strict_error():
     assert meta["previous_errors"] == ["action_id out of range: 99"]
     assert meta["previous_raw_responses"] == [json.dumps({"action_id": 99, "reason": "bad id"})]
     assert len(sent_messages) == 2
+    assert [audit["messages"] for audit in meta["model_request_audits"]] == sent_messages
+    assert [audit["request_index"] for audit in meta["model_request_audits"]] == [0, 1]
+    expected_request_hashes = [
+        hashlib.sha256(
+            json.dumps(
+                messages,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        for messages in sent_messages
+    ]
+    assert [audit["messages_sha256"] for audit in meta["model_request_audits"]] == expected_request_hashes
     retry_text = sent_messages[1][-1]["content"]
     assert "previous response was invalid" in retry_text
     assert "between 0 and" in retry_text
     assert "no combat_custom_sequence gateway is available" in retry_text
     assert "sequence included only when choosing combat_custom_sequence" not in retry_text
     assert "top-level integer card_index" not in retry_text
+
+
+def test_turn_chat_refuses_to_silently_drop_external_prompt_context():
+    state = _combat_turn_state()
+    agent, sent_messages = _turn_chat_agent(
+        [{"action_id": 5, "reason": "Strike."}],
+        fallback_mode="error",
+    )
+
+    with pytest.raises(ValueError, match="refusing to discard or flatten"):
+        agent.choose(
+            state,
+            build_legal_actions(state),
+            prompt=agent.build_prompt(state, build_legal_actions(state)) + "\nEXTERNAL MEMORY",
+        )
+
+    assert sent_messages == []
+
+
+def test_openai_compat_agent_refuses_final_prompt_without_expected_rule_block():
+    state = _combat_turn_state()
+    legal_actions = build_legal_actions(state)
+    agent, sent_messages = _single_turn_agent(
+        [{"action_id": legal_actions[0].action_id, "reason": "unused"}],
+        fallback_mode="error",
+    )
+
+    with pytest.raises(ValueError, match="expected game-rule block"):
+        agent.choose(state, legal_actions, prompt="choose an action")
+
+    assert sent_messages == []
+
+
+def test_openai_compat_agent_audits_the_actual_final_rule_prompt():
+    state = _combat_turn_state()
+    legal_actions = build_legal_actions(state)
+    selected = legal_actions[0]
+    agent, sent_messages = _single_turn_agent(
+        [{"action_id": selected.action_id, "reason": "Use the listed action."}],
+        fallback_mode="error",
+    )
+    prompt = agent.build_prompt(state, legal_actions)
+
+    action, meta = agent.choose(state, legal_actions, prompt=prompt)
+
+    assert action == selected
+    assert len(sent_messages) == 1
+    assert meta["game_rule_exposure_valid"] is True
+    assert meta["game_rule_occurrences"] == 1
+    assert meta["game_rule_expected_occurrences"] == 1
+    assert meta["game_rule_expected_block_sha256"] == meta["game_rule_render_sha256"]
+    assert len(meta["game_rule_prompt_sha256"]) == 64
 
 
 def test_openai_compat_agent_self_consistency_logs_votes_without_changing_by_default():
@@ -1147,6 +2277,8 @@ def test_openai_compat_agent_self_consistency_logs_votes_without_changing_by_def
     assert self_consistency["top_action_id"] == shrug.action_id
     assert self_consistency["top_vote_count"] == 2
     assert self_consistency["majority_vote_applied"] is False
+    assert [audit["messages"] for audit in meta["model_request_audits"]] == sent_messages
+    assert [audit["request_index"] for audit in meta["model_request_audits"]] == [0, 1, 2]
 
 
 def test_openai_compat_agent_self_consistency_majority_vote_can_change_card_reward():
@@ -1179,103 +2311,6 @@ def test_openai_compat_agent_self_consistency_majority_vote_can_change_card_rewa
     assert meta["self_consistency"]["majority_vote_applied"] is True
 
 
-def test_openai_compat_agent_reflection_diagnostic_logs_verifier_without_changing_action():
-    state = {
-        "decision": "card_reward",
-        "context": {"act": 1, "floor": 2, "room_type": "Reward"},
-        "player": {"hp": 70, "max_hp": 80, "gold": 0, "deck_size": 18},
-        "cards": [{"index": 0, "name": "Clash"}, {"index": 1, "name": "Shrug It Off"}],
-        "can_skip": True,
-    }
-    actions = build_legal_actions(state)
-    clash = next(action for action in actions if action.label == "pick card 0: Clash")
-    shrug = next(action for action in actions if action.label == "pick card 1: Shrug It Off")
-    skip = next(action for action in actions if action.label == "skip card reward")
-    agent, sent_messages = _single_turn_agent(
-        [
-            {"action_id": clash.action_id, "selected_action_label": clash.label, "reason": "Take Clash for damage."},
-            {"action_id": clash.action_id, "selected_action_label": clash.label, "reason_for": "Damage.", "main_risk": "Awkward.", "score": 3},
-            {"action_id": shrug.action_id, "selected_action_label": shrug.label, "reason_for": "Block and draw.", "main_risk": "Dilution.", "score": 8},
-            {"action_id": skip.action_id, "selected_action_label": skip.label, "reason_for": "Keep deck lean.", "main_risk": "Miss block.", "score": 4},
-            {
-                "comparison": ["Shrug solves a current shortfall."],
-                "verifier": {
-                    "selected_action_id": shrug.action_id,
-                    "selected_action_label": shrug.label,
-                    "reason": "Block and draw are currently valuable.",
-                    "risk_gate": "Worth dilution.",
-                    "confidence": 0.9,
-                    "selected_score": 8,
-                    "primary_score": 3,
-                    "best_pick_score": 8,
-                    "skip_score": 4,
-                    "score_gap": 5,
-                    "should_override": True,
-                },
-            },
-        ],
-        reflection_enabled=True,
-        reflection_decisions=("card_reward",),
-    )
-
-    action, meta = agent.choose(state, actions)
-
-    assert action.label == "pick card 0: Clash"
-    assert len(sent_messages) == 5
-    reflection = meta["reflection_verifier"]
-    assert reflection["mode"] == "diagnostic"
-    assert reflection["selected_action_id"] == shrug.action_id
-    assert reflection["verifier_vote_applied"] is False
-
-
-def test_openai_compat_agent_reflection_verifier_vote_can_change_card_reward_when_gate_passes():
-    state = {
-        "decision": "card_reward",
-        "context": {"act": 1, "floor": 2, "room_type": "Reward"},
-        "player": {"hp": 70, "max_hp": 80, "gold": 0, "deck_size": 18},
-        "cards": [{"index": 0, "name": "Clash"}, {"index": 1, "name": "Shrug It Off"}],
-        "can_skip": True,
-    }
-    actions = build_legal_actions(state)
-    clash = next(action for action in actions if action.label == "pick card 0: Clash")
-    shrug = next(action for action in actions if action.label == "pick card 1: Shrug It Off")
-    skip = next(action for action in actions if action.label == "skip card reward")
-    agent, _sent_messages = _single_turn_agent(
-        [
-            {"action_id": clash.action_id, "selected_action_label": clash.label, "reason": "Take Clash for damage.", "run_plan_patch": {"build_plan": "Take attacks."}},
-            {"action_id": clash.action_id, "selected_action_label": clash.label, "reason_for": "Damage.", "main_risk": "Awkward.", "score": 3},
-            {"action_id": shrug.action_id, "selected_action_label": shrug.label, "reason_for": "Block and draw.", "main_risk": "Dilution.", "score": 8},
-            {"action_id": skip.action_id, "selected_action_label": skip.label, "reason_for": "Keep deck lean.", "main_risk": "Miss block.", "score": 4},
-            {
-                "comparison": ["Shrug solves a current shortfall."],
-                "verifier": {
-                    "selected_action_id": shrug.action_id,
-                    "selected_action_label": shrug.label,
-                    "reason": "Block and draw are currently valuable.",
-                    "risk_gate": "Worth dilution.",
-                    "confidence": 0.9,
-                    "selected_score": 8,
-                    "primary_score": 3,
-                    "best_pick_score": 8,
-                    "skip_score": 4,
-                    "score_gap": 5,
-                    "should_override": True,
-                },
-            },
-        ],
-        reflection_enabled=True,
-        reflection_decisions=("card_reward",),
-        reflection_mode="verifier_vote",
-    )
-
-    action, meta = agent.choose(state, actions)
-
-    assert action.label == "pick card 1: Shrug It Off"
-    assert meta["parsed"]["run_plan_patch"] == {}
-    assert meta["parsed"]["run_memory_facts"] == []
-    assert meta["reflection_verifier"]["verifier_vote_applied"] is True
-
-
 def test_openai_compat_agent_single_turn_retries_transport_error_without_prompt_correction(monkeypatch):
     monkeypatch.setattr("sts2_bench.agents.time.sleep", lambda _seconds: None)
     state = _combat_turn_state()
@@ -1288,7 +2323,8 @@ def test_openai_compat_agent_single_turn_retries_transport_error_without_prompt_
         fallback_mode="error",
     )
 
-    action, meta = agent.choose(state, build_legal_actions(state), prompt="choose an action")
+    legal_actions = build_legal_actions(state)
+    action, meta = agent.choose(state, legal_actions, prompt=agent.build_prompt(state, legal_actions))
 
     assert action.action_id == 5
     assert meta["attempt"] == 1
@@ -1309,7 +2345,8 @@ def test_openai_compat_agent_single_turn_retries_llm_http_500_without_prompt_cor
         fallback_mode="error",
     )
 
-    action, meta = agent.choose(state, build_legal_actions(state), prompt="choose an action")
+    legal_actions = build_legal_actions(state)
+    action, meta = agent.choose(state, legal_actions, prompt=agent.build_prompt(state, legal_actions))
 
     assert action.action_id == 5
     assert meta["attempt"] == 1
@@ -2581,6 +3618,661 @@ def test_openai_compat_agent_combat_mdp_state_preserves_card_effect_text_and_seq
     assert "hand_change" in true_grit["must_recompute_after_play"]
 
 
+def test_combat_mdp_omits_disabled_sequence_metadata_dedupes_tips_and_empty_process():
+    state = _combat_turn_state(
+        hand=[
+            {
+                "index": 0,
+                "id": "CARD.POMMEL_STRIKE",
+                "name": "Pommel Strike",
+                "cost": 1,
+                "type": "Attack",
+                "description": "Deal 9 damage. Draw 1 card.",
+                "stats": {"damage": 9, "cards": 1},
+                "hover_tips": [
+                    {"name": "Draw", "description": "Move a card from the draw pile to the hand."},
+                    {"title": "Draw", "description": "Move a card from the draw pile to the hand."},
+                ],
+            }
+        ]
+    )
+    agent = OpenAICompatAgent(
+        base_url="http://127.0.0.1:1",
+        model="test",
+        conversation_mode="combat_mdp_state",
+        combat_card_sequences_enabled=False,
+    )
+
+    prompt = agent.build_prompt(state, build_legal_actions(state, allow_custom_sequences=False))
+    card = _json_after(prompt, "Combat MDP state JSON:\n")["hand_snapshot"][0]
+
+    assert "sequence_eligible" not in card
+    assert "sequence_block_reasons" not in card
+    assert "must_recompute_after_play" not in card
+    assert len(card["hover_tips"]) == 1
+    assert "Combat turn process JSON:" not in prompt
+
+
+def test_combat_mdp_state_preserves_visible_engine_facts_for_combat_objects():
+    state = _combat_turn_state(
+        energy=3,
+        player={
+            "hp": 70,
+            "max_hp": 80,
+            "block": 0,
+            "gold": 0,
+            "deck_size": 10,
+            "relics": [
+                {
+                    "id": "RELIC.AKABEKO",
+                    "name": "Akabeko",
+                    "description": "Your first Attack each combat deals 8 additional damage.",
+                    "counter": 1,
+                    "hover_tips": [{"name": "Attack", "description": "A card type."}],
+                }
+            ],
+            "potions": [
+                {
+                    "index": 0,
+                    "instance_id": "potion-1",
+                    "id": "POTION.VULNERABLE",
+                    "name": "Vulnerable Potion",
+                    "description": "Apply 3 Vulnerable.",
+                    "target_type": "AnyEnemy",
+                    "vars": {"amount": 3},
+                    "hover_tips": [
+                        {"name": "Vulnerable", "description": "Take more Attack damage."}
+                    ],
+                }
+            ],
+        },
+        player_powers=[
+            {
+                "instance_id": "power-1",
+                "id": "POWER.RAGE",
+                "name": "Rage",
+                "amount": 1,
+                "type": "Buff",
+                "description": "Whenever you play an Attack, gain 3 Block.",
+                "vars": {"block": 3},
+                "hover_tips": [{"name": "Block", "description": "Prevents damage."}],
+            }
+        ],
+        hand=[
+            {
+                "index": 0,
+                "instance_id": "x-card-1",
+                "id": "CARD.WHIRLWIND",
+                "name": "Whirlwind",
+                "cost": "X",
+                "energy_cost": 3,
+                "x_value": 3,
+                "type": "Attack",
+                "rarity": "Uncommon",
+                "upgrade_level": 1,
+                "target_type": "AllEnemies",
+                "can_play": True,
+                "description": "Deal 8 damage to ALL enemies X times.",
+                "vars": {"damage": 8},
+                "hover_tips": [{"name": "X", "description": "Uses all current Energy."}],
+                "stats": {"damage": 8},
+            }
+        ],
+        enemies=[
+            {
+                "index": 0,
+                "combat_index": 4,
+                "instance_id": "enemy-1",
+                "id": "ENEMY.NIBBIT",
+                "name": "Nibbit",
+                "hp": 24,
+                "max_hp": 30,
+                "block": 0,
+                "alive": True,
+                "targetable": True,
+                "intends_attack": True,
+                "move_id": "BUTT_MOVE",
+                "move_name": "Butt",
+                "intents": [
+                    {
+                        "id": "INTENT.BUTT",
+                        "type": "Attack",
+                        "damage": 7,
+                        "hits": 2,
+                        "description": "Deal 7 damage twice.",
+                        "vars": {"damage": 7, "hits": 2},
+                    }
+                ],
+                "powers": [
+                    {
+                        "id": "POWER.THORNS",
+                        "name": "Thorns",
+                        "amount": 3,
+                        "type": "Buff",
+                        "description": "Deal 3 damage when attacked.",
+                        "vars": {"damage": 3},
+                    }
+                ],
+            }
+        ],
+    )
+    agent = OpenAICompatAgent(
+        base_url="http://127.0.0.1:1",
+        model="test",
+        conversation_mode="combat_mdp_state",
+    )
+
+    prompt = agent.build_prompt(state, build_legal_actions(state, allow_custom_sequences=False))
+    mdp_state = _json_after(prompt, "Combat MDP state JSON:\n")
+
+    card = mdp_state["hand_snapshot"][0]
+    assert card["instance_id"] == "x-card-1"
+    assert card["energy_cost"] == 3
+    assert card["x_value"] == 3
+    assert card["rarity"] == "Uncommon"
+    assert card["upgrade_level"] == 1
+    assert card["vars"] == {"damage": 8}
+    assert card["hover_tips"][0]["description"] == "Uses all current Energy."
+
+    player = mdp_state["player"]
+    assert player["relics"][0]["description"].startswith("Your first Attack")
+    assert player["potions"][0]["target_type"] == "AnyEnemy"
+    assert player["potions"][0]["vars"] == {"amount": 3}
+    assert player["powers"][0]["description"].startswith("Whenever you play an Attack")
+
+    enemy = mdp_state["enemies"][0]
+    assert enemy["instance_id"] == "enemy-1"
+    assert enemy["combat_index"] == 4
+    assert enemy["targetable"] is True
+    assert enemy["move_id"] == "BUTT_MOVE"
+    assert enemy["move_name"] == "Butt"
+    assert enemy["intents"][0]["description"] == "Deal 7 damage twice."
+    assert enemy["powers"][0]["description"] == "Deal 3 damage when attacked."
+
+
+def test_combat_mdp_state_preserves_public_character_mechanics_losslessly():
+    state = _combat_turn_state(
+        orbs=[
+            {
+                "index": 0,
+                "name": {"en": "Lightning", "zh": "闪电"},
+                "type": "Lightning",
+                "passive": 3,
+                "evoke": 8,
+                "position_label": "rightmost",
+            }
+        ],
+        orb_slots=3,
+        stars=2,
+        osty={
+            "name": {"en": "Osty", "zh": "奥斯蒂"},
+            "hp": 18,
+            "max_hp": 24,
+            "block": 4,
+            "alive": True,
+        },
+    )
+    agent = OpenAICompatAgent(
+        base_url="http://127.0.0.1:1",
+        model="test",
+        conversation_mode="combat_mdp_state",
+    )
+
+    prompt = agent.build_prompt(state, build_legal_actions(state, allow_custom_sequences=False))
+    mdp_state = _json_after(prompt, "Combat MDP state JSON:\n")
+
+    assert mdp_state["orbs"] == state["orbs"]
+    assert mdp_state["orb_slots"] == 3
+    assert mdp_state["stars"] == 2
+    assert mdp_state["osty"] == state["osty"]
+
+
+def test_combat_mdp_state_exposes_viewed_card_details_only_after_view_flags():
+    deck_card = {
+        "index": 8,
+        "instance_id": "deck-card",
+        "name": "Hidden Deck Card",
+        "description": "Deck-only visible effect.",
+        "after_upgrade": {"description": "Upgraded deck-only visible effect."},
+    }
+    draw_card = {
+        "index": 9,
+        "instance_id": "draw-card",
+        "name": "Known Top Card",
+        "description": "Draw-pile-only visible effect.",
+    }
+    base = _combat_turn_state(
+        player={
+            "hp": 70,
+            "max_hp": 80,
+            "block": 0,
+            "gold": 0,
+            "deck_size": 1,
+            "deck": [deck_card],
+            "potions": [],
+            "relics": [],
+        },
+        draw_pile=[draw_card],
+        draw_pile_count=1,
+    )
+    agent = OpenAICompatAgent(
+        base_url="http://127.0.0.1:1",
+        model="test",
+        conversation_mode="combat_mdp_state",
+    )
+
+    hidden_prompt = agent.build_prompt(base, build_legal_actions(base, allow_custom_sequences=False))
+    hidden = _json_after(hidden_prompt, "Combat MDP state JSON:\n")
+    assert "viewed_information" not in hidden
+    assert "Hidden Deck Card" not in hidden_prompt
+    assert "Known Top Card" not in hidden_prompt
+
+    viewed_state = {**base, "view_deck": True, "view_draw_pile": True}
+    viewed_prompt = agent.build_prompt(
+        viewed_state,
+        build_legal_actions(viewed_state, allow_custom_sequences=False),
+    )
+    viewed = _json_after(viewed_prompt, "Combat MDP state JSON:\n")["viewed_information"]
+    assert viewed["deck"][0]["description"] == "Deck-only visible effect."
+    assert viewed["deck"][0]["after_upgrade"]["description"] == "Upgraded deck-only visible effect."
+    assert viewed["draw_pile"][0]["description"] == "Draw-pile-only visible effect."
+    assert "discard_pile" not in viewed
+    assert "exhaust_pile" not in viewed
+
+
+def test_openai_compat_agent_combat_card_select_preserves_complete_selection_context():
+    base_state = _combat_turn_state()
+    source_card = {
+        "index": 3,
+        "id": "CARD.HEADBUTT",
+        "name": "Headbutt",
+        "cost": 1,
+        "type": "Attack",
+        "description": "Deal 9 damage. Put a card from your Discard Pile on top of your Draw Pile.",
+        "keywords": ["DrawPile", "DiscardPile"],
+        "after_upgrade": {"description": "Deal 12 damage. Put a card from your Discard Pile on top of your Draw Pile."},
+    }
+    spoils_map = {
+        "index": 0,
+        "id": "CARD.SPOILS_MAP",
+        "name": "Spoils Map",
+        "cost": "Unplayable",
+        "type": "Quest",
+        "rarity": "Special",
+        "description": "Unplayable. Marks a site on the map and clogs the deck until its condition is met.",
+        "keywords": ["Unplayable", "Quest"],
+        "after_upgrade": {"description": "Unplayable. The marked site is easier to reach."},
+        "hover_tips": [{"title": "Unplayable", "body": "Cannot be played."}],
+        "engine_extension": {"must_survive_prompt_serialization": True},
+    }
+    state = {
+        "decision": "card_select",
+        "context": {"act": 1, "floor": 9, "room_type": "Monster"},
+        "player": base_state["player"],
+        "min_select": 1,
+        "max_select": 1,
+        "can_skip": False,
+        "prompt": "Choose a card from your Discard Pile to put on top of your Draw Pile.",
+        "source_card": source_card,
+        "combat": {
+            "round": 2,
+            "energy": 1,
+            "max_energy": 3,
+            "draw_pile_count": 4,
+            "discard_pile_count": 5,
+            "exhaust_pile_count": 0,
+            "enemies": base_state["enemies"],
+        },
+        "cards": [spoils_map],
+    }
+    actions = build_legal_actions(state)
+    select = next(action for action in actions if action.kind == "card_select")
+    agent, sent_messages = _combat_mdp_agent(
+        [{"action_id": select.action_id, "reason": "Select the only legal candidate."}]
+    )
+
+    agent.choose(state, actions)
+
+    prompt = sent_messages[0][1]["content"]
+    mdp_state = _json_after(prompt, "Combat MDP state JSON:\n")
+    selection = mdp_state["selection_context"]
+    assert selection["prompt"] == state["prompt"]
+    assert selection["min_select"] == 1
+    assert selection["max_select"] == 1
+    assert selection["can_skip"] is False
+    assert selection["sources"]["source_card"] == source_card
+    assert selection["candidates"] == [spoils_map]
+
+
+def test_openai_compat_agent_factors_large_card_select_without_losing_candidate_context():
+    cards = [
+        {
+            "index": index,
+            "id": f"CARD.TEST_{index}",
+            "instance_id": f"test-card-{index}",
+            "name": f"Test Card {index}",
+            "cost": index % 3,
+            "type": "Skill",
+            "rarity": "Common",
+            "description": f"Complete engine description for candidate {index}.",
+            "keywords": ["Test", f"Keyword{index}"],
+            "after_upgrade": {
+                "description": f"Complete upgraded description for candidate {index}."
+            },
+            "hover_tips": [{"title": "Test", "body": f"Complete hover tip {index}."}],
+            "engine_extension": {"candidate": index, "must_survive_prompt_serialization": True},
+        }
+        for index in range(16)
+    ]
+    state = {
+        "decision": "card_select",
+        "min_select": 4,
+        "max_select": 4,
+        "can_skip": False,
+        "prompt": "Choose exactly four cards to upgrade.",
+        "cards": cards,
+    }
+    actions = build_legal_actions(state)
+    assert len(actions) < 10
+    assert sum(action.kind == "card_select_space" for action in actions) == 1
+    agent, sent_messages = _single_turn_agent(
+        [{"selected_card_indices": [0, 3, 7, 11], "reason": "These are the intended four cards."}],
+        fallback_mode="error",
+    )
+
+    action, meta = agent.choose(state, actions)
+
+    prompt = sent_messages[0][1]["content"]
+    action_space = _json_after(prompt, "Legal actions:\n")
+    assert action_space["kind"] == "card_select"
+    assert action_space["min_select"] == 4
+    assert action_space["max_select"] == 4
+    assert action_space["can_skip"] is False
+    assert action_space["candidates"] == cards
+    assert action.command["args"]["indices"] == "0,3,7,11"
+    assert meta["parsed"]["action_id"] == action.action_id
+    assert meta["parsed"]["selected_action_label"] == action.label
+    assert len(json.dumps(action_space, ensure_ascii=False, separators=(",", ":"))) < 10_000
+
+
+def test_openai_compat_agent_card_select_empty_indices_resolve_only_to_visible_skip():
+    state = {
+        "decision": "card_select",
+        "min_select": 1,
+        "max_select": 2,
+        "can_skip": True,
+        "prompt": "Choose cards or skip.",
+        "cards": [
+            {"index": 2, "name": "Strike", "description": "Deal 6 damage."},
+            {"index": 5, "name": "Defend", "description": "Gain 5 Block."},
+        ],
+    }
+    actions = build_legal_actions(state)
+    agent, _sent_messages = _single_turn_agent(
+        [{"selected_card_indices": [], "reason": "Skip this optional selection."}],
+        fallback_mode="error",
+    )
+
+    action, meta = agent.choose(state, actions)
+
+    assert action.kind == "card_select_skip"
+    assert meta["parsed"]["selected_card_indices"] == []
+
+
+def test_card_select_min_zero_keeps_nonempty_subset_rule_separate_from_skip():
+    state = {
+        "decision": "card_select",
+        "min_select": 0,
+        "max_select": 2,
+        "can_skip": True,
+        "cards": [
+            {"index": 0, "name": "Strike", "description": "Deal 6 damage."},
+            {"index": 1, "name": "Defend", "description": "Gain 5 Block."},
+        ],
+    }
+    actions = build_legal_actions(state)
+    agent = OpenAICompatAgent(base_url="http://127.0.0.1:1", model="test")
+
+    prompt = agent.build_prompt(state, actions)
+    action_space = _json_after(prompt, "Legal actions:\n")
+
+    assert action_space["min_select"] == 0
+    assert action_space["nonempty_min_select"] == 1
+    assert action_space["can_skip"] is True
+    assert "Any non-empty set" in action_space["selection_rule"]
+    assert any(action.kind == "card_select_skip" for action in actions)
+
+
+def test_openai_compat_agent_card_select_indices_cover_every_existing_legal_subset():
+    state = {
+        "decision": "card_select",
+        "min_select": 1,
+        "max_select": 3,
+        "can_skip": False,
+        "cards": [{"index": index, "name": f"Card {index}"} for index in range(5)],
+    }
+    actions = build_legal_actions(state)
+    subsets = [
+        combo
+        for count in range(1, 4)
+        for combo in itertools.combinations(range(5), count)
+    ]
+    agent, _sent_messages = _single_turn_agent(
+        [
+            {
+                "selected_card_indices": list(reversed(combo)),
+                "reason": "Exercise the complete legal subset mapping.",
+            }
+            for combo in subsets
+        ],
+        fallback_mode="error",
+    )
+
+    resolved = []
+    for combo in subsets:
+        action, _meta = agent.choose(state, actions)
+        resolved.append(tuple(int(value) for value in action.command["args"]["indices"].split(",")))
+
+    assert resolved == subsets
+
+
+@pytest.mark.parametrize(
+    "selected_indices,error",
+    [
+        ([0, 0], "duplicate"),
+        ([True, 1], "not booleans"),
+        ([0.5, 1], "must be integers"),
+        ([99], "do not identify"),
+        ([0], "do not identify"),
+        ([0, 1, 2], "do not identify"),
+    ],
+)
+def test_openai_compat_agent_card_select_rejects_nonlegal_index_sets(selected_indices, error):
+    state = {
+        "decision": "card_select",
+        "min_select": 2,
+        "max_select": 2,
+        "can_skip": False,
+        "cards": [{"index": index, "name": f"Card {index}"} for index in range(3)],
+    }
+    agent, _sent_messages = _single_turn_agent(
+        [{"selected_card_indices": selected_indices, "reason": "Invalid test selection."}],
+        fallback_mode="error",
+    )
+
+    with pytest.raises(ModelActionError, match=error):
+        agent.choose(state, build_legal_actions(state))
+
+
+def test_openai_compat_agent_card_select_uses_indices_as_the_only_action_identity():
+    state = {
+        "decision": "card_select",
+        "min_select": 2,
+        "max_select": 2,
+        "can_skip": False,
+        "cards": [{"index": index, "name": f"Card {index}"} for index in range(3)],
+    }
+    actions = build_legal_actions(state)
+    selected = next(
+        action
+        for action in actions
+        if action.kind == "card_select" and action.command["args"]["indices"] == "0,2"
+    )
+    conflicting = next(
+        action
+        for action in actions
+        if action.kind == "card_select" and action.command["args"]["indices"] == "0,1"
+    )
+    agent, _sent_messages = _single_turn_agent(
+        [
+            {
+                "selected_card_indices": [0, 2],
+                "action_id": conflicting.action_id,
+                "selected_action_label": conflicting.label,
+                "reason": "Choose cards 0 and 2.",
+            }
+        ],
+        fallback_mode="error",
+    )
+
+    action, meta = agent.choose(state, actions)
+
+    assert action == selected
+    assert meta["parsed"]["selected_card_indices"] == [0, 2]
+    assert meta["parsed"]["action_id"] == selected.action_id
+    assert meta["parsed"]["selected_action_label"] == selected.label
+
+
+def test_card_select_format_retry_keeps_the_selected_indices_protocol():
+    state = {
+        "decision": "card_select",
+        "min_select": 2,
+        "max_select": 2,
+        "can_skip": False,
+        "cards": [{"index": index, "name": f"Card {index}"} for index in range(3)],
+    }
+    agent, sent_messages = _single_turn_agent(
+        [
+            {"selected_card_indices": [0, 0], "reason": "Invalid duplicate."},
+            {"selected_card_indices": [0, 2], "reason": "Corrected distinct selection."},
+        ],
+        max_retries=1,
+        fallback_mode="error",
+    )
+
+    action, _meta = agent.choose(state, build_legal_actions(state))
+
+    assert action.command["args"]["indices"] == "0,2"
+    correction = sent_messages[1][-1]["content"]
+    assert "selected_card_indices" in correction
+    assert "distinct current candidate index integers" in correction
+
+
+def test_card_select_factored_action_space_is_used_in_every_conversation_mode():
+    cards = [
+        {
+            "index": index,
+            "name": f"Card {index}",
+            "description": f"Complete effect {index}.",
+            "engine_extension": {"preserved": index},
+        }
+        for index in range(8)
+    ]
+    state = {
+        "decision": "card_select",
+        "min_select": 3,
+        "max_select": 3,
+        "can_skip": False,
+        "cards": cards,
+    }
+    actions = build_legal_actions(state)
+
+    for mode in ("single_turn", "turn_chat", "combat_mdp_state"):
+        agent = OpenAICompatAgent(
+            base_url="http://127.0.0.1:1",
+            model="test",
+            conversation_mode=mode,
+        )
+        prompt = agent.build_prompt(state, actions)
+        assert "select cards 0,1,2" not in prompt
+        assert '"legal_combination_count":56' in prompt
+        assert '"engine_extension":{"preserved":7}' in prompt
+
+
+def test_large_card_select_space_is_not_materialized_but_every_subset_remains_resolvable():
+    cards = [
+        {
+            "index": index,
+            "name": f"Card {index}",
+            "description": f"Complete effect {index}.",
+            "engine_extension": {"preserved": index},
+        }
+        for index in range(16)
+    ]
+    state = {
+        "decision": "card_select",
+        "min_select": 4,
+        "max_select": 4,
+        "can_skip": False,
+        "cards": cards,
+    }
+
+    actions = build_legal_actions(state)
+    selection_space = [action for action in actions if action.kind == "card_select_space"]
+    assert len(selection_space) == 1
+    assert not any(action.kind == "card_select" for action in actions)
+    assert len(actions) < 10
+
+    selected_indices = [0, 5, 10, 15]
+    agent, sent_messages = _single_turn_agent(
+        [{"selected_card_indices": selected_indices, "reason": "Choose this legal four-card subset."}],
+        fallback_mode="error",
+    )
+
+    action, meta = agent.choose(state, actions)
+
+    assert action.kind == "card_select"
+    assert action.command == {
+        "cmd": "action",
+        "action": "select_cards",
+        "args": {"indices": "0,5,10,15"},
+    }
+    assert meta["parsed"]["selected_card_indices"] == selected_indices
+    action_space = _json_after(sent_messages[0][1]["content"], "Legal actions:\n")
+    assert action_space["legal_combination_count"] == 1820
+    assert action_space["candidates"] == cards
+
+
+def test_card_select_view_action_is_expressible_in_every_conversation_mode():
+    state = {
+        "decision": "card_select",
+        "min_select": 2,
+        "max_select": 2,
+        "can_skip": False,
+        "cards": [{"index": index, "name": f"Card {index}"} for index in range(3)],
+    }
+    actions = build_legal_actions(state)
+    view = next(action for action in actions if action.kind == "view_deck")
+
+    for factory in (_single_turn_agent, _turn_chat_agent, _combat_mdp_agent):
+        agent, sent_messages = factory(
+            [
+                {
+                    "action_id": view.action_id,
+                    "selected_action_label": view.label,
+                    "reason": "Inspect the complete deck before selecting cards.",
+                }
+            ],
+            fallback_mode="error",
+        )
+        action, _meta = agent.choose(state, actions)
+        prompt = "\n".join(message["content"] for message in sent_messages[0])
+
+        assert action == view
+        assert '"action_id": <for a listed non-selection action only; otherwise omit>' in prompt
+        assert '"selected_action_label": "<for a listed non-selection action only' in prompt
+
+
 class _ChooseSequenceAgent:
     def build_prompt(self, state, legal_actions):
         return ""
@@ -3555,6 +5247,9 @@ def test_runner_reasks_after_custom_sequence_validation_failure_before_stopping(
     assert result.extra["custom_sequence_validation_retry_count"] == 1
     assert any(row.get("type") == "custom_sequence_validation_feedback" for row in rows)
     assert not any(row.get("type") == "custom_sequence_validation_error" for row in rows)
+    action_rows = [row for row in rows if row.get("type") == "action"]
+    assert len(action_rows) == 1
+    assert action_rows[0]["action"]["kind"] == "combat_end_turn"
 
 
 def test_runner_reasks_twice_after_repeated_custom_sequence_validation_failure():
@@ -3619,8 +5314,11 @@ def test_openai_compat_agent_strict_mode_raises_after_invalid_action_without_fal
         fallback_mode="error",
     )
 
-    with pytest.raises(ModelActionError, match="action_id out of range: 99"):
+    with pytest.raises(ModelActionError, match="action_id out of range: 99") as exc_info:
         agent.choose(state, build_legal_actions(state))
+
+    assert len(exc_info.value.audit_meta["model_request_audits"]) == 1
+    assert exc_info.value.audit_meta["model_request_audits"][0]["request_index"] == 0
 
 
 def test_compact_assistant_history_omits_state_local_action_ids():
@@ -3741,14 +5439,14 @@ def test_openai_compat_agent_combat_mdp_state_keeps_structured_turn_history_with
     assert '"target":{"index":0,"name":"Jaw Worm"}' in user_prompt
     assert "enemy Jaw Worm[0]: hp 20/40 -> 14/40" in user_prompt
     assert "Strike now." not in user_prompt
-    assert "calculations" not in user_prompt
+    assert "do not persist verbose scratchpad" not in user_prompt
     process_json = user_prompt.split("Combat turn process JSON:\n", 1)[1].split("\n\nLegal actions:", 1)[0]
     assert '"action_id":5' not in process_json
     assert second_meta["conversation_mode"] == "combat_mdp_state"
     assert second_meta["combat_mdp_turn_actions"] == 1
 
 
-def test_openai_compat_agent_combat_mdp_state_can_keep_reasoning_pool():
+def test_openai_compat_agent_combat_mdp_state_keeps_only_code_owned_turn_intent_checkpoint():
     state = _combat_turn_state()
     next_state = _combat_turn_state(
         energy=2,
@@ -3765,9 +5463,12 @@ def test_openai_compat_agent_combat_mdp_state_can_keep_reasoning_pool():
     agent, sent_messages = _combat_mdp_agent(
         [
             {
+                "turn_intent": "Use potion for 1 energy, then play Strike for lethal.",
                 "turn_check": {
-                    "primary_goal": "damage",
-                    "incoming_damage": "7",
+                    "observed_numbers": {},
+                    "incoming_damage_calculation": {},
+                    "selected_action_calculation": {},
+                    "end_turn_audit": None,
                 },
                 "action_id": 5,
                 "reason": "Strike now to push lethal setup.",
@@ -3775,7 +5476,17 @@ def test_openai_compat_agent_combat_mdp_state_can_keep_reasoning_pool():
                 "calculations": ["do not persist verbose scratchpad"],
                 "candidates": [{"action_id": 5, "label": "play card"}],
             },
-            {"action_id": 5, "reason": "End after Strike."},
+            {
+                "turn_intent": "End only after checking the fresh state.",
+                "turn_check": {
+                    "observed_numbers": {},
+                    "incoming_damage_calculation": {},
+                    "selected_action_calculation": None,
+                    "end_turn_audit": {},
+                },
+                "action_id": 5,
+                "reason": "End after Strike.",
+            },
         ],
         combat_reasoning_pool_enabled=True,
         turn_check_enabled=True,
@@ -3786,28 +5497,251 @@ def test_openai_compat_agent_combat_mdp_state_can_keep_reasoning_pool():
     agent.choose(next_state, build_legal_actions(next_state))
 
     user_prompt = sent_messages[1][1]["content"]
-    assert '"reasoning_pool"' in user_prompt
-    assert "Strike now to push lethal setup." in user_prompt
-    assert "6 damage, 2 energy remains" in user_prompt
-    assert '"primary_goal":"damage"' in user_prompt
-    assert "calculations" not in user_prompt
-    assert "candidates" not in user_prompt
+    assert '"current_turn_intent"' in user_prompt
+    assert "Re-evaluate the provisional action order or resource objective against the current state." in user_prompt
+    assert "Use potion for 1 energy, then play Strike for lethal." not in user_prompt
+    assert "Strike now to push lethal setup." not in user_prompt
+    assert "6 damage, 2 energy remains" not in user_prompt
+    assert '"primary_goal"' not in user_prompt
+    assert '"reasoning_pool"' not in user_prompt
+    assert "do not persist verbose scratchpad" not in user_prompt
+    assert '"label":"play card"' not in user_prompt
     process_json = user_prompt.split("Combat turn process JSON:\n", 1)[1].split("\n\nLegal actions:", 1)[0]
     assert '"action_id":5' not in process_json
+    assert user_prompt.index("Game rules for the current decision:") > user_prompt.index(
+        "Combat turn process JSON:"
+    )
+    assert user_prompt.index("Game rules for the current decision:") < user_prompt.index(
+        "Legal actions:"
+    )
+    assert '"risk_features"' not in user_prompt
 
 
-def test_openai_compat_agent_combat_mdp_state_can_keep_cross_turn_board():
+def test_openai_compat_agent_combat_mdp_state_preserves_turn_intent_across_card_select_modal():
+    state = _combat_turn_state()
+    modal_state = {
+        "decision": "card_select",
+        "context": state["context"],
+        "player": state["player"],
+        "min_select": 1,
+        "max_select": 1,
+        "prompt": "Choose a card.",
+        "source_card": {"name": "Armaments"},
+        "combat": {
+            "round": state["round"],
+            "energy": 2,
+            "max_energy": 3,
+            "draw_pile_count": 4,
+            "discard_pile_count": 1,
+            "exhaust_pile_count": 0,
+            "enemies": state["enemies"],
+        },
+        "cards": [{"index": 0, "name": "Defend", "cost": 1, "type": "Skill"}],
+        "last_action_result": {
+            "action_label": "play card 0: Armaments",
+            "action_kind": "combat_play_card",
+            "decision_before": "combat_play",
+            "decision_after": "card_select",
+            "changes": ["energy: 3/3 -> 2/3"],
+        },
+    }
+    next_state = _combat_turn_state(
+        energy=2,
+        hand=[],
+        discard_pile_count=1,
+        last_action_result={
+            "action_label": "select cards 0",
+            "action_kind": "card_select",
+            "decision_before": "card_select",
+            "decision_after": "combat_play",
+            "changes": [],
+        },
+    )
+    non_end_contract_fields = {
+        "observed_numbers": {},
+        "incoming_damage_calculation": {},
+        "selected_action_calculation": {},
+        "end_turn_audit": None,
+    }
+    end_turn_contract_fields = {
+        "observed_numbers": {},
+        "incoming_damage_calculation": {},
+        "selected_action_calculation": None,
+        "end_turn_audit": {},
+    }
+    agent, sent_messages = _combat_mdp_agent(
+        [
+            {
+                "turn_intent": "Preserve the same turn plan through the modal choice.",
+                "turn_check": non_end_contract_fields,
+                "action_id": 5,
+                "reason": "Open the card selection.",
+            },
+            {
+                "selected_card_indices": [0],
+                "reason": "Choose Defend.",
+            },
+            {
+                "turn_intent": "Finish after rechecking the returned combat state.",
+                "turn_check": end_turn_contract_fields,
+                "action_id": 5,
+                "reason": "End the turn.",
+            },
+        ],
+        combat_reasoning_pool_enabled=True,
+        turn_check_enabled=True,
+    )
+
+    first_action, first_meta = agent.choose(state, build_legal_actions(state))
+    agent.record_transition(state, first_action, first_meta, modal_state)
+    modal_action, modal_meta = agent.choose(modal_state, build_legal_actions(modal_state))
+    agent.record_transition(modal_state, modal_action, modal_meta, next_state)
+    agent.choose(next_state, build_legal_actions(next_state))
+
+    returned_prompt = sent_messages[2][1]["content"]
+    assert '"current_turn_intent"' in returned_prompt
+    assert "Re-evaluate the provisional action order or resource objective against the current state." in returned_prompt
+    assert "Preserve the same turn plan through the modal choice." not in returned_prompt
+    assert "Choose Defend." not in returned_prompt
+
+
+def test_openai_compat_agent_combat_mdp_turn_check_contract_is_retried_without_dropping_fields():
+    state = _combat_turn_state()
+    agent, sent_messages = _combat_mdp_agent(
+        [
+            {"action_id": 5, "reason": "Missing required treatment fields."},
+            {
+                "turn_intent": "Deal damage and reassess.",
+                "turn_check": {
+                    "observed_numbers": {},
+                    "incoming_damage_calculation": {},
+                    "selected_action_calculation": {},
+                    "end_turn_audit": None,
+                },
+                "action_id": 5,
+                "reason": "Strike.",
+            },
+        ],
+        combat_reasoning_pool_enabled=True,
+        turn_check_enabled=True,
+        max_retries=1,
+        fallback_mode="error",
+    )
+
+    action, meta = agent.choose(state, build_legal_actions(state))
+
+    assert action.kind == "combat_play_card"
+    assert meta["attempt"] == 1
+    assert meta["previous_errors"] == [
+        "turn_intent is required by the current combat response contract"
+    ]
+    correction = sent_messages[1][-1]["content"]
+    assert "Preserve the required top-level turn_intent and turn_check fields" in correction
+
+
+def test_openai_compat_agent_turn_check_requires_only_non_end_calculation_for_card_action():
+    state = _combat_turn_state()
+    base_turn_check = {
+        "observed_numbers": {},
+        "incoming_damage_calculation": {},
+        "selected_action_calculation": {},
+    }
+    agent, _ = _combat_mdp_agent(
+        [
+            {
+                "turn_intent": "Strike and reassess.",
+                "turn_check": {**base_turn_check, "end_turn_audit": {}},
+                "action_id": 5,
+                "reason": "Strike.",
+            },
+            {
+                "turn_intent": "Strike and reassess.",
+                "turn_check": base_turn_check,
+                "action_id": 5,
+                "reason": "Strike.",
+            },
+        ],
+        combat_reasoning_pool_enabled=True,
+        turn_check_enabled=True,
+        max_retries=1,
+        fallback_mode="error",
+    )
+
+    action, meta = agent.choose(state, build_legal_actions(state))
+
+    assert action.kind == "combat_play_card"
+    assert meta["attempt"] == 1
+    assert meta["previous_errors"] == [
+        "turn_check.end_turn_audit must be null for a non-end-turn action"
+    ]
+
+
+def test_openai_compat_agent_turn_check_requires_only_end_audit_for_end_turn_action():
+    state = _combat_turn_state(hand=[], energy=0)
+    agent, _ = _combat_mdp_agent(
+        [
+            {
+                "turn_intent": "End the spent turn.",
+                "turn_check": {
+                    "observed_numbers": {},
+                    "incoming_damage_calculation": {},
+                    "selected_action_calculation": {},
+                    "end_turn_audit": None,
+                },
+                "action_id": 5,
+                "reason": "End.",
+            },
+            {
+                "turn_intent": "End the spent turn.",
+                "turn_check": {
+                    "observed_numbers": {},
+                    "incoming_damage_calculation": {},
+                    "end_turn_audit": {},
+                },
+                "action_id": 5,
+                "reason": "End.",
+            },
+        ],
+        combat_reasoning_pool_enabled=True,
+        turn_check_enabled=True,
+        max_retries=1,
+        fallback_mode="error",
+    )
+
+    action, meta = agent.choose(state, build_legal_actions(state))
+
+    assert action.kind == "combat_end_turn"
+    assert meta["attempt"] == 1
+    assert meta["previous_errors"] == [
+        "turn_check.selected_action_calculation must be null when selecting end turn"
+    ]
+
+
+def test_openai_compat_agent_combat_mdp_state_keeps_compact_recent_turn_delta():
     state = _combat_turn_state(
         energy=0,
         hand=[],
         player={"hp": 70, "max_hp": 80, "block": 5, "gold": 0, "deck_size": 10, "potions": []},
+        player_powers=[{"name": "Vulnerable", "amount": 2, "type": "Debuff"}],
     )
     next_state = _combat_turn_state(
         round=2,
         energy=3,
         hp=68,
-        hand=[],
+        hand=[{"index": 0, "name": "Defend", "cost": 1, "type": "Skill", "can_play": True}],
         player={"hp": 68, "max_hp": 80, "block": 0, "gold": 0, "deck_size": 10, "potions": []},
+        player_powers=[{"name": "Vulnerable", "amount": 1, "type": "Debuff"}],
+        enemies=[
+            {
+                "index": 0,
+                "name": "Jaw Worm",
+                "hp": 14,
+                "max_hp": 40,
+                "block": 0,
+                "intents": [{"type": "Buff"}],
+                "powers": [{"name": "Poison", "amount": 2, "type": "Debuff"}],
+            }
+        ],
         last_action_result={
             "action_label": "end turn",
             "action_kind": "combat_end_turn",
@@ -3837,16 +5771,44 @@ def test_openai_compat_agent_combat_mdp_state_can_keep_cross_turn_board():
     agent.choose(next_state, build_legal_actions(next_state))
 
     fresh_prompt = sent_messages[1][1]["content"]
-    assert '"cross_turn_board"' in fresh_prompt
-    assert '"hp_delta":-2' in fresh_prompt
-    assert '"incoming_damage":7' in fresh_prompt
+    process = _json_after(fresh_prompt, "Combat turn process JSON:\n")
+    assert "cross_turn_board" not in process
+    assert "combat_summary" not in process
+    assert process["recent_window_start"]["player"]["hp"] == 70
+    assert "hand" not in process["recent_window_start"]
+    assert "piles" not in process["recent_window_start"]
+    assert "energy" not in process["recent_window_start"]
+    assert len(process["recent_turns"]) == 1
+    completed_turn = process["recent_turns"][0]
+    assert completed_turn["round"] == 1
+    assert "turn_start" not in completed_turn
+    assert "turn_boundary" not in completed_turn
+    transition = completed_turn["end_turn_transition"]
+    assert transition["source"] == "snapshot_diff"
+    assert transition["ordering"] == "not_observed"
+    assert transition["announced_enemy_intents"] == [
+        {
+            "index": 0,
+            "name": "Jaw Worm",
+            "intents": [{"type": "Attack", "damage": 7, "hits": 1}],
+        }
+    ]
+
+    facts = {(fact["entity"], fact["field"]): fact for fact in transition["observed_facts"]}
+    assert facts[("player", "hp")]["delta"] == -2
+    assert facts[("player", "power:Vulnerable")]["change"] == "changed"
+    assert facts[("enemy:0:Jaw Worm", "hp")]["delta"] == -6
+    assert facts[("enemy:0:Jaw Worm", "power:Poison")]["change"] == "added"
+    assert ("player", "block") not in facts
+    assert ("enemy:0:Jaw Worm", "intents") not in facts
+    assert all(entity != "combat" for entity, _field in facts)
     assert "End the spent turn." not in fresh_prompt
     process_json = fresh_prompt.split("Combat turn process JSON:\n", 1)[1].split("\n\nLegal actions:", 1)[0]
     assert '"action_id":5' not in process_json
     assert "candidates" not in process_json
 
 
-def test_openai_compat_agent_combat_mdp_state_cross_turn_board_resets_after_combat_exit():
+def test_openai_compat_agent_combat_mdp_state_rolling_memory_resets_after_combat_exit():
     state = _combat_turn_state(energy=0, hand=[])
     reward_state = {
         "decision": "combat_reward",
@@ -3868,8 +5830,126 @@ def test_openai_compat_agent_combat_mdp_state_cross_turn_board_resets_after_comb
     agent.choose(later_combat, build_legal_actions(later_combat))
 
     later_prompt = sent_messages[1][1]["content"]
-    assert '"cross_turn_board"' not in later_prompt
+    assert '"recent_turns"' not in later_prompt
+    assert '"combat_summary"' not in later_prompt
     assert "End combat." not in later_prompt
+
+
+def test_openai_compat_agent_combat_mdp_state_rolls_old_turn_into_summary():
+    agent = OpenAICompatAgent(
+        base_url="http://127.0.0.1:1",
+        model="test",
+        conversation_mode="combat_mdp_state",
+        short_term_memory_enabled=False,
+        combat_turn_board_enabled=True,
+    )
+
+    for round_number in range(1, 6):
+        start_hp = 71 - round_number
+        start_enemy_hp = 22 - (2 * round_number)
+        start_state = _combat_turn_state(
+            round=round_number,
+            energy=3,
+            hand=[],
+            player={
+                "hp": start_hp,
+                "max_hp": 80,
+                "block": 0,
+                "gold": 0,
+                "deck_size": 10,
+                "potions": [],
+            },
+            enemies=[
+                {
+                    "index": 0,
+                    "name": "Jaw Worm",
+                    "hp": start_enemy_hp,
+                    "max_hp": 40,
+                    "block": 0,
+                    "intents": [{"type": "Attack", "damage": 1}],
+                }
+            ],
+        )
+        agent.build_prompt(start_state, build_legal_actions(start_state))
+
+        before_end_state = _combat_turn_state(
+            round=round_number,
+            energy=0,
+            hand=[],
+            player={
+                "hp": start_hp,
+                "max_hp": 80,
+                "block": 0,
+                "gold": 0,
+                "deck_size": 10,
+                "potions": [],
+            },
+            enemies=[
+                {
+                    "index": 0,
+                    "name": "Jaw Worm",
+                    "hp": start_enemy_hp - 2,
+                    "max_hp": 40,
+                    "block": 0,
+                    "intents": [{"type": "Attack", "damage": 1}],
+                }
+            ],
+        )
+        next_state = _combat_turn_state(
+            round=round_number + 1,
+            energy=3,
+            hand=[],
+            player={
+                "hp": start_hp - 1,
+                "max_hp": 80,
+                "block": 0,
+                "gold": 0,
+                "deck_size": 10,
+                "potions": [],
+            },
+            enemies=[
+                {
+                    "index": 0,
+                    "name": "Jaw Worm",
+                    "hp": start_enemy_hp - 2,
+                    "max_hp": 40,
+                    "block": 0,
+                    "intents": [{"type": "Attack", "damage": 1}],
+                }
+            ],
+        )
+        end_turn = next(
+            action for action in build_legal_actions(before_end_state) if action.kind == "combat_end_turn"
+        )
+        agent.record_transition(
+            before_end_state,
+            end_turn,
+            {"parsed": {"reason": f"finish round {round_number}"}},
+            next_state,
+        )
+
+    prompt = agent.build_prompt(next_state, build_legal_actions(next_state))
+    process = _json_after(prompt, "Combat turn process JSON:\n")
+
+    assert [turn["round"] for turn in process["recent_turns"]] == [3, 4, 5]
+    summary = process["combat_summary"]
+    assert summary["source"] == "deterministic_fold"
+    assert summary["covered_rounds"] == {"first": 1, "last": 2, "count": 2}
+    assert summary["completed_turns"] == 2
+    assert summary["player_hp_delta"] == -2
+    assert summary["boundary_player_hp_delta"] == -2
+    assert summary["enemy_hp_delta_by_enemy"] == {"0:Jaw Worm": -4}
+
+    reward_state = {
+        "decision": "combat_reward",
+        "context": {"act": 1, "floor": 2, "room_type": "Monster"},
+        "player": {"hp": 65, "max_hp": 80},
+    }
+    end_turn = next(action for action in build_legal_actions(next_state) if action.kind == "combat_end_turn")
+    agent.record_transition(next_state, end_turn, {"parsed": {"reason": "combat ended"}}, reward_state)
+    later_combat = _combat_turn_state(context={"act": 1, "floor": 3, "room_type": "Monster"})
+    later_prompt = agent.build_prompt(later_combat, build_legal_actions(later_combat))
+    assert "Combat turn process JSON:" not in later_prompt
 
 
 def test_openai_compat_agent_combat_mdp_state_resets_after_end_turn_transition():
@@ -3890,7 +5970,7 @@ def test_openai_compat_agent_combat_mdp_state_resets_after_end_turn_transition()
     fresh_prompt = sent_messages[1][1]["content"]
     assert "Combat MDP state JSON:" in fresh_prompt
     assert "End the spent turn." not in fresh_prompt
-    assert '"actions_this_turn":[]' in fresh_prompt
+    assert "Combat turn process JSON:" not in fresh_prompt
 
 
 def test_openai_compat_agent_turn_check_is_added_to_combat_prompt_and_kept_compact():
@@ -3910,15 +5990,43 @@ def test_openai_compat_agent_turn_check_is_added_to_combat_prompt_and_kept_compa
     agent, sent_messages = _turn_chat_agent(
         [
             {
+                "turn_intent": "Apply pressure and reassess after the selected action.",
                 "turn_check": {
-                    "primary_goal": "damage",
-                    "must_recompute_after": ["draw changes hand"],
+                    "observed_numbers": {
+                        "current_hp": 70,
+                        "current_block": 0,
+                        "current_energy": 3,
+                    },
+                    "incoming_damage_calculation": {
+                        "parts": ["enemy 0: 7 x 1 = 7"],
+                        "total": 7,
+                    },
+                    "selected_action_calculation": {
+                        "cost": 1,
+                        "displayed_damage": 6,
+                        "displayed_block": None,
+                        "expected_energy_after": 2,
+                        "expected_block_after": 0,
+                        "expected_target_hp_after": 34,
+                        "effect_summary": "Deal 6 damage.",
+                    },
+                    "end_turn_audit": None,
                 },
                 "action_id": 5,
                 "reason": "Start with Strike.",
                 "calculations": ["do not keep this verbose field"],
             },
-            {"action_id": 5, "reason": "End after the plan."},
+            {
+                "turn_intent": "End after checking the refreshed state.",
+                "turn_check": {
+                    "observed_numbers": {},
+                    "incoming_damage_calculation": {},
+                    "selected_action_calculation": None,
+                    "end_turn_audit": {},
+                },
+                "action_id": 5,
+                "reason": "End after the plan.",
+            },
         ],
         turn_check_enabled=True,
     )
@@ -3927,11 +6035,15 @@ def test_openai_compat_agent_turn_check_is_added_to_combat_prompt_and_kept_compa
     agent.choose(next_state, build_legal_actions(next_state))
 
     assert "turn_check" in sent_messages[0][0]["content"]
-    assert "current-state tactical guardrail" in sent_messages[0][0]["content"]
+    assert "your own current-state arithmetic scratchpad" in sent_messages[0][0]["content"]
+    assert "Do not enumerate or calculate every unselected alternative" in sent_messages[0][0]["content"]
+    assert "expected_hp_after_enemy_attacks" in sent_messages[0][0]["content"]
+    assert "omit selected_action_calculation" in sent_messages[0][0]["content"]
+    assert "recompute_after_action" not in sent_messages[0][0]["content"]
     assert "Turn planning instruction:" not in sent_messages[0][1]["content"]
     assistant_history = sent_messages[1][2]["content"]
-    assert "turn_check" in assistant_history
-    assert "damage" in assistant_history
+    assert "turn_check" not in assistant_history
+    assert "incoming_damage_calculation" not in assistant_history
     assert "calculations" not in assistant_history
 
 
@@ -3949,16 +6061,95 @@ def test_openai_compat_agent_turn_chat_omits_turn_check_prompt_by_default():
 def test_openai_compat_agent_combat_mdp_state_can_require_turn_check():
     state = _combat_turn_state()
     agent, sent_messages = _combat_mdp_agent(
-        [{"action_id": 5, "turn_check": {"primary_goal": "damage"}, "reason": "Strike."}],
+        [
+            {
+                "action_id": 5,
+                "turn_intent": "Deal damage and reassess.",
+                "turn_check": {
+                    "observed_numbers": {
+                        "current_hp": 70,
+                        "current_block": 0,
+                        "current_energy": 3,
+                    },
+                    "incoming_damage_calculation": {
+                        "parts": ["enemy 0: 7 x 1 = 7"],
+                        "total": 7,
+                    },
+                    "selected_action_calculation": {
+                        "cost": 1,
+                        "displayed_damage": 6,
+                        "displayed_block": None,
+                        "expected_energy_after": 2,
+                        "expected_block_after": 0,
+                        "expected_target_hp_after": 34,
+                        "effect_summary": "Deal 6 damage.",
+                    },
+                    "end_turn_audit": None,
+                },
+                "reason": "Strike.",
+            }
+        ],
         turn_check_enabled=True,
     )
 
     action, meta = agent.choose(state, build_legal_actions(state))
 
     assert action.kind == "combat_play_card"
-    assert meta["parsed"]["turn_check"]["primary_goal"] == "damage"
+    assert meta["parsed"]["turn_check"]["incoming_damage_calculation"]["total"] == 7
+    assert meta["parsed"]["turn_intent"] == "Deal damage and reassess."
     assert "turn_check" in sent_messages[0][1]["content"]
-    assert "current-state tactical guardrail" in sent_messages[0][1]["content"]
+    assert "your own current-state arithmetic scratchpad" in sent_messages[0][1]["content"]
+    assert '"turn_intent"' not in sent_messages[0][1]["content"]
+    assert '"candidates"' not in sent_messages[0][1]["content"]
+    assert '"calculations"' not in sent_messages[0][1]["content"]
+    assert '"situation"' not in sent_messages[0][1]["content"]
+    assert '"why_selected_action_is_safe"' not in sent_messages[0][1]["content"]
+    assert "expected_energy_next_player_turn" in sent_messages[0][1]["content"]
+
+
+def test_openai_compat_agent_combat_reasoning_pool_requires_intent_without_turn_check():
+    state = _combat_turn_state()
+    next_state = _combat_turn_state(
+        energy=2,
+        hand=[],
+        discard_pile_count=1,
+        last_action_result={
+            "action_label": "play card 0: Strike on enemy 0: Jaw Worm",
+            "action_kind": "combat_play_card",
+            "decision_before": "combat_play",
+            "decision_after": "combat_play",
+            "changes": ["energy: 3/3 -> 2/3"],
+        },
+    )
+    agent, sent_messages = _combat_mdp_agent(
+        [
+            {
+                "turn_intent": "Apply pressure, then reassess the observed state.",
+                "action_id": 5,
+                "reason": "Strike.",
+            },
+            {
+                "turn_intent": "End only after rechecking the current state.",
+                "action_id": 5,
+                "reason": "End.",
+            },
+        ],
+        combat_reasoning_pool_enabled=True,
+        turn_check_enabled=False,
+    )
+
+    first_action, first_meta = agent.choose(state, build_legal_actions(state))
+    agent.record_transition(state, first_action, first_meta, next_state)
+    agent.choose(next_state, build_legal_actions(next_state))
+
+    first_prompt = sent_messages[0][1]["content"]
+    second_prompt = sent_messages[1][1]["content"]
+    assert '"turn_intent"' in first_prompt
+    assert '"turn_check"' not in first_prompt
+    assert "Do not put arithmetic, lethal claims, future enemy intents, or unobserved consequences" in first_prompt
+    assert '"current_turn_intent"' in second_prompt
+    assert "Re-evaluate the provisional action order or resource objective against the current state." in second_prompt
+    assert "Apply pressure, then reassess the observed state." not in second_prompt
 
 
 def test_openai_compat_agent_turn_chat_clears_after_end_turn_transition():
@@ -4049,6 +6240,168 @@ def test_openai_compat_agent_turn_chat_view_update_keeps_current_turn_reminder()
     assert "Legal actions:" in update
 
 
+def test_map_prompt_preserves_complete_deck_relic_and_potion_mechanics():
+    state = {
+        "decision": "map_select",
+        "context": {
+            "act": 1,
+            "floor": 4,
+            "room_type": "Map",
+            "boss": {"id": "BOSS.TEST", "name": "Test Boss", "description": "Boss mechanic."},
+        },
+        "player": {
+            "hp": 61,
+            "max_hp": 80,
+            "gold": 99,
+            "deck_size": 1,
+            "deck": [
+                {
+                    "id": "CARD.TEST",
+                    "instance_id": "card-1",
+                    "name": "Route Card",
+                    "upgraded": False,
+                    "description": "Current card mechanic.",
+                    "after_upgrade": {"description": "Upgraded card mechanic."},
+                }
+            ],
+            "relics": [
+                {
+                    "id": "RELIC.TEST",
+                    "name": "Route Relic",
+                    "description": "Relic route mechanic.",
+                    "vars": {"amount": 2},
+                }
+            ],
+            "potions": [
+                {
+                    "index": 0,
+                    "id": "POTION.TEST",
+                    "name": "Route Potion",
+                    "description": "Potion route mechanic.",
+                    "target_type": "AnyEnemy",
+                }
+            ],
+        },
+        "choices": [{"col": 2, "row": 4, "type": "Unknown"}],
+    }
+    actions = build_legal_actions(state)
+    agent = OpenAICompatAgent(
+        base_url="http://127.0.0.1:1",
+        model="test",
+        run_summary_enabled=False,
+    )
+
+    prompt = agent.build_prompt(state, actions)
+    route_state = _json_after(prompt, "Route decision state JSON:\n")
+
+    assert route_state["player"]["deck"][0]["description"] == "Current card mechanic."
+    assert route_state["player"]["deck"][0]["after_upgrade"]["description"] == "Upgraded card mechanic."
+    assert route_state["player"]["relics"][0]["description"] == "Relic route mechanic."
+    assert route_state["player"]["potions"][0]["target_type"] == "AnyEnemy"
+    assert route_state["choices"] == state["choices"]
+    assert "go to Unknown at col=2 row=4" in prompt
+
+
+def test_turn_chat_update_restates_complete_current_combat_information():
+    state = _combat_turn_state(
+        player={
+            "hp": 70,
+            "max_hp": 80,
+            "block": 3,
+            "gold": 0,
+            "deck_size": 10,
+            "relics": [],
+            "potion_slots": 3,
+            "potion_empty_slots": 2,
+            "potions": [
+                {
+                    "index": 0,
+                    "name": "Fire Potion",
+                    "description": "Deal 20 damage.",
+                    "target_type": "AnyEnemy",
+                }
+            ],
+        },
+        player_powers=[
+            {"name": "Strength", "amount": 2, "type": "Buff", "description": "Attacks deal more damage."}
+        ],
+        hand=[
+            {
+                "index": 0,
+                "id": "CARD.TEST",
+                "name": "Fresh Hand Card",
+                "cost": 1,
+                "type": "Attack",
+                "can_play": True,
+                "description": "Deal 8 damage.",
+                "after_upgrade": {
+                    "description": "Deal 11 damage.",
+                    "added_keywords": ["Retain"],
+                    "removed_keywords": ["Exhaust"],
+                },
+            }
+        ],
+        orbs=[],
+        orb_slots=3,
+        stars=2,
+        osty={
+            "name": "Osty",
+            "hp": 18,
+            "max_hp": 24,
+            "block": 4,
+            "alive": True,
+            "powers": [{"name": "Osty Power", "amount": 1, "description": "Osty mechanic."}],
+        },
+    )
+
+    update = agents_module.build_turn_update_user_message(state, build_legal_actions(state))
+
+    assert "description: Deal 8 damage." in update
+    assert "upgrade_description: Deal 11 damage." in update
+    assert "upgrade_added_keywords: Retain" in update
+    assert "upgrade_removed_keywords: Exhaust" in update
+    assert "description: Deal 20 damage." in update
+    assert "Buff Strength(2): Attacks deal more damage." in update
+    assert "Orbs: none" in update
+    assert "Orb slots: 3" in update
+    assert "Stars: 2" in update
+    assert "Osty powers (1):" in update
+    assert "Osty Power(1): Osty mechanic." in update
+
+
+def test_card_reward_prompt_exposes_upgrade_keyword_delta():
+    state = {
+        "decision": "card_reward",
+        "context": {"act": 1, "floor": 2, "room_type": "Monster"},
+        "player": {"hp": 55, "max_hp": 80, "gold": 0, "deck_size": 0, "deck": []},
+        "cards": [
+            {
+                "index": 0,
+                "name": "Wisp",
+                "type": "Skill",
+                "cost": 1,
+                "keywords": ["Exhaust"],
+                "description": "Gain [E].\nExhaust.",
+                "after_upgrade": {
+                    "description": "Gain [E].\nExhaust.\nRetain.",
+                    "added_keywords": ["Retain"],
+                },
+            }
+        ],
+        "can_skip": True,
+    }
+    agent = OpenAICompatAgent(
+        base_url="http://127.0.0.1:1",
+        model="test",
+        run_summary_enabled=False,
+    )
+
+    prompt = agent.build_prompt(state, build_legal_actions(state))
+
+    assert "upgrade_description: Gain [E]. Exhaust. Retain." in prompt
+    assert "upgrade_added_keywords: Retain" in prompt
+
+
 def test_openai_compat_agent_turn_chat_treats_combat_card_select_as_same_turn_modal():
     state = _combat_turn_state()
     modal_state = {
@@ -4092,7 +6445,7 @@ def test_openai_compat_agent_rejects_turn_chat_with_episode_memory():
             base_url="http://127.0.0.1:1",
             model="test",
             conversation_mode="turn_chat",
-            memory_enabled=True,
+            short_term_memory_enabled=True,
         )
 
 
@@ -4115,8 +6468,10 @@ def test_agent_from_args_passes_llm_temperature():
         llm_temperature=0.25,
     )
 
-    assert isinstance(agent, OpenAICompatAgent)
-    assert agent.temperature == 0.25
+    assert isinstance(agent, OutOfCombatContextAgent)
+    assert isinstance(agent.inner, OpenAICompatAgent)
+    assert agent.reward_only is True
+    assert agent.inner.temperature == 0.25
 
 
 def test_agent_from_args_passes_strict_fallback_mode_by_default():
@@ -4127,8 +6482,9 @@ def test_agent_from_args_passes_strict_fallback_mode_by_default():
         api_key="local",
     )
 
-    assert isinstance(agent, OpenAICompatAgent)
-    assert agent.fallback_mode == "error"
+    assert isinstance(agent, OutOfCombatContextAgent)
+    assert isinstance(agent.inner, OpenAICompatAgent)
+    assert agent.inner.fallback_mode == "error"
 
 
 def test_load_benchmark_config_reads_nested_context_management(tmp_path, monkeypatch):

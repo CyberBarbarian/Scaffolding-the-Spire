@@ -1,0 +1,23 @@
+{
+  "schema_version": 2,
+  "extends": "full_run_research_memory_v26_lossless_event_level_reflection_context.json",
+  "extends_sha256": "2EC3956810691A2DF92D820CE198905A7EFB5A408688534B4223990FB6D544B0",
+  "overrides": {
+    "experiment_id": "full-run-research-memory-v27-canonical-enemy-tag-table",
+    "study_phase": "natural_exposure_pilot",
+    "purpose": "Minimal V10 canonical enemy-tag successor to V26. The same generator and critic call may create or reuse stable tag IDs and replace an observed enemy's complete tag assignment. Tags describe only coarse observable enemy behavior; the model owns semantic creation, synonym resolution, correction, and removal. Python enforces only schema, evidence and entity references, stable IDs, at most two tags per enemy, exact-enemy versus cross-enemy retrieval separation, transaction integrity, and auditability. No extra model call is added. Baseline prompts, complete decision-time context, legal actions, CoT routing, reflection checkpoints, and V8 remain unchanged. V26 remains an immutable historical prompt-reorganization artifact.",
+    "memory": {
+      "memory_schema_version": 10,
+      "canonical_enemy_tag_contract": "TAG_CATALOG stores stable tag IDs, short names, and one-sentence definitions. The generator and critic must reuse an existing ID when its definition covers the same observable enemy behavior; otherwise they may create a new tag and reference it in the same response. Python does not decide semantic equivalence.",
+      "enemy_tag_assignment_contract": "Each observed enemy has a replaceable complete set of zero to two canonical tag IDs. Exact enemy names must occur in checkpoint evidence. Empty assignment clears a profile without deleting the catalog.",
+      "tag_retrieval_contract": "Enemy-specific experience uses retrieval_keys.enemies only. Cross-enemy experience uses canonical retrieval_keys.tags only. One experience may not mix these two gates. Other baseline retrieval behavior is unchanged.",
+      "tag_call_budget_contract": "Tag creation, reuse, assignment, correction, and critic audit occur inside the existing generator and critic calls; V27 adds no model request."
+    },
+    "freeze": {
+      "intervention_files": {
+        "sts2_bench/layered_experience.py": "FE61A5E2A873A570137D7DD244450B6309C08D47C881930DD40E012FE5B58BE9",
+        "sts2_bench/full_reflection_pairs.py": "B7E91CC3AD73267C4205339F727FEA8EAF5F89B5F246FA4EAF84F86A08BBFA5C"
+      }
+    }
+  }
+}

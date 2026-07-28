@@ -1,0 +1,40 @@
+{
+  "schema_version": 2,
+  "extends": "full_run_layered_reflection_v20.json",
+  "extends_sha256": "17E59C7E4FB11BADC983EA0FF4B3909476EA8CD37D1EFB5CB7F96F0A9A315993",
+  "overrides": {
+    "experiment_id": "full-run-layered-reflection-v21-lossless-transport-efficiency",
+    "purpose": "Transport-only efficiency successor to V20. V21 preserves the model, temperature, complete messages and engine-visible information, every legal action, reasoning policy, memory treatment, seeds, and paired scientific design. It adds byte-equivalent persistent HTTP connections in a disposable worker process, a parent-enforced hard wall-clock deadline even for slow response trickles, per-attempt transport telemetry, durable exact-response recovery, safe paired-arm scheduling, and a historically justified retry budget. V20 remains immutable historical configuration.",
+    "baseline": {
+      "name": "current_coordinator_cot_route_baseline_20260718_v21_lossless_transport_efficiency"
+    },
+    "run": {
+      "scheduler": {
+        "max_parallel_arms": 2,
+        "seed_pairing": "same_seed_start_barrier",
+        "r1_seed_order": "causal_serial",
+        "intra_agent_requests": "serial"
+      },
+      "transport_reliability": {
+        "enabled": true,
+        "max_additional_attempts": 3,
+        "initial_backoff_sec": 10,
+        "max_backoff_sec": 20,
+        "retry_scope": "transport_exception_before_model_response_only",
+        "attempt_budget_scope": "per_logical_request_messages_identity",
+        "logical_request_deadline_sec": 240,
+        "minimum_attempt_window_sec": 10,
+        "http_backend": "requests_session_worker"
+      }
+    },
+    "freeze": {
+      "baseline_files": {
+        "sts2_bench/agents.py": "289C37E69D3AE4D4E0AB757414AFA1F3A013F96088797CAB238FCAC8F1B45CD0",
+        "sts2_bench/requirements.txt": "4C0887934D80D16ADDA4F540F4996B1B729F0629D2C0E2BA5777AFD2F6901334"
+      },
+      "intervention_files": {
+        "sts2_bench/full_reflection_pairs.py": "87701EB5A5AEC2B50DED31EE98B98A5424B92AA699FB87752B6D61E5B336A490"
+      }
+    }
+  }
+}

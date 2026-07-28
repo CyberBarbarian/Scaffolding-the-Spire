@@ -1,0 +1,20 @@
+[
+  {
+    "seed": "ironclad_a0_3407",
+    "role": "anchor",
+    "holdout": false,
+    "selection_basis": "Known full-game victory under the route-hint-injected Coordinator; extensively reused for full-game and replay-based local studies."
+  },
+  {
+    "seed": "ironclad_a0_1007",
+    "role": "core",
+    "holdout": false,
+    "selection_basis": "Existing complete-run coverage across multiple agent configurations plus reusable replay snapshots."
+  },
+  {
+    "seed": "ironclad_a0_2407",
+    "role": "core",
+    "holdout": false,
+    "selection_basis": "Existing repeated full-game and paired-reflection coverage with outcomes spanning multiple acts."
+  }
+]

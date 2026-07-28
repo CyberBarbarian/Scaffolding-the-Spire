@@ -12,4 +12,4 @@ def test_pytest_fixture_uses_sts2_cli_local_tools():
 
 def test_benchmark_process_uses_sts2_cli_local_tools():
     root = Path(__file__).resolve().parents[1]
-    assert bench_process.LOCAL_DOTNET_DIR == root / ".tools" / "dotnet"
+    assert bench_process.LOCAL_DOTNET_DIR == root.parent / "sts2-cli" / ".tools" / "dotnet"

@@ -88,6 +88,88 @@ class RoutePlanTracker:
             return None
         return self.active.to_prompt_context()
 
+    def apply_forced_map_action(
+        self,
+        *,
+        state: dict[str, Any],
+        action: LegalAction,
+    ) -> dict[str, Any]:
+        """Advance route state for an engine-forced singleton map transition.
+
+        A map state with exactly one executable node has no policy choice.  The
+        runner executes it without asking the model, so this method consumes a
+        matching active plan or clears a stale one without inventing a model
+        route-plan event.
+        """
+
+        selected = _node_from_action(action)
+        if state.get("decision") != "map_select" or action.kind != "map" or selected is None:
+            raise ValueError("forced route transition requires one concrete map action")
+
+        map_snapshot = _map_snapshot(state)
+        map_revision = map_revision_for_state(state)
+        state_act = _state_act(state)
+        previous = self.active
+        effect: dict[str, Any] = {
+            "mode": "forced_singleton_map",
+            "selected_node": selected,
+            "previous_plan_id": previous.plan_id if previous is not None else None,
+            "previous_expected_next": (
+                dict(previous.remaining[0])
+                if previous is not None and previous.remaining
+                else None
+            ),
+            "map_revision": map_revision,
+            "act": state_act,
+        }
+        if previous is None or not previous.remaining:
+            self.active = None
+            effect["outcome"] = "no_active_plan"
+            effect["remaining_after"] = []
+            return effect
+
+        selected_matches_plan = _coord(selected) == _coord(previous.remaining[0])
+        act_changed = bool(
+            previous.act is not None
+            and state_act is not None
+            and previous.act != state_act
+        )
+        map_changed = bool(
+            previous.map_revision
+            and map_revision
+            and previous.map_revision != map_revision
+        )
+        route_still_valid = True
+        if map_changed:
+            topology = _validate_plan_topology(
+                previous.remaining,
+                map_snapshot,
+                winged_boots_remaining=winged_boots_remaining_for_state(state),
+            )
+            route_still_valid = topology["route_validity"] not in {"invalid", "incomplete"}
+
+        if selected_matches_plan and not act_changed and route_still_valid:
+            self._consume_followed(map_revision=map_revision, act=state_act)
+            effect["outcome"] = "followed_active_plan"
+            effect["remaining_after"] = (
+                [dict(node) for node in self.active.remaining]
+                if self.active is not None
+                else []
+            )
+            return effect
+
+        self.active = None
+        effect["outcome"] = "invalidated_active_plan"
+        effect["invalidation_reason"] = (
+            "act_changed"
+            if act_changed
+            else "map_changed"
+            if not route_still_valid
+            else "forced_node_differs_from_expected"
+        )
+        effect["remaining_after"] = []
+        return effect
+
     def validate_and_apply(
         self,
         *,
@@ -234,6 +316,17 @@ class RoutePlanTracker:
 
         planned_next = self.active.remaining[0]
         selected_matches_plan = _coord(selected) == _coord(planned_next)
+        old_route_invalid_after_map_change = False
+        if map_changed:
+            old_topology = _validate_plan_topology(
+                self.active.remaining,
+                map_snapshot,
+                winged_boots_remaining=winged_boots_remaining,
+            )
+            old_route_invalid_after_map_change = old_topology["route_validity"] in {
+                "invalid",
+                "incomplete",
+            }
         if event is None:
             if not selected_matches_plan:
                 return RoutePlanValidationResult(
@@ -243,10 +336,27 @@ class RoutePlanTracker:
                         "Selected map node is outside the active route plan and no route_plan_updated event was emitted.",
                     ),
                 )
+            if old_route_invalid_after_map_change:
+                return RoutePlanValidationResult(
+                    [],
+                    self._error(
+                        "route_plan_invalid_after_map_change",
+                        "The map revision changed and the remaining active route is no longer a complete valid path; emit route_plan_updated with reason_tags containing map_changed.",
+                    ),
+                )
             return self._consume_followed(map_revision=map_revision, act=state_act)
 
         event_type = event.get("event_type")
         if event_type == "route_plan_updated":
+            if old_route_invalid_after_map_change and "map_changed" not in event.get("reason_tags", []):
+                return RoutePlanValidationResult(
+                    [],
+                    self._error(
+                        "route_plan_update_missing_map_changed_reason",
+                        "Route update after a changed map invalidated the old route and must include reason_tags containing map_changed.",
+                        event=event,
+                    ),
+                )
             return self._apply_created_or_updated(
                 event,
                 event_type="route_plan_updated",
@@ -259,9 +369,6 @@ class RoutePlanTracker:
                 winged_boots_remaining=winged_boots_remaining,
                 step=step,
             )
-        if event_type == "route_plan_created" and selected_matches_plan:
-            return self._consume_followed(map_revision=map_revision, act=state_act)
-
         return RoutePlanValidationResult(
             [],
             self._error(

@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "experiment_id": "direct-cli-baseline-v1-silent",
+  "purpose": "AGENT-01-MC: zero-scaffold direct-CLI full-game baseline for Silent using the same matched seeds and inference protocol as Ironclad.",
+  "output_root": "results/direct_cli_baseline_v1_silent_20260722",
+  "model": "deepseek-v4-flash",
+  "base_url": "https://zgc.apihy.com/v1",
+  "seeds": [
+    "ironclad_a0_3407",
+    "ironclad_a0_1007",
+    "ironclad_a0_2407"
+  ],
+  "repeats_per_seed": 5,
+  "workers": 3,
+  "character": "Silent",
+  "ascension": 0,
+  "lang": "en",
+  "temperature": 0.0,
+  "history_chars": 24000,
+  "max_tokens": 64,
+  "request_timeout_sec": 180,
+  "transport_retries": 3,
+  "max_decisions": 5000,
+  "run_timeout_sec": 7200,
+  "max_attempts_per_invocation": 3
+}

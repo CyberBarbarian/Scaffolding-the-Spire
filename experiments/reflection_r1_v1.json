@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "base_experiment": "experiments/reflection_probe_v0.json",
+  "base_experiment_sha256": "0AD5D1D329C0964927BEC21ADEF1177334198DC9F310E4CB27ADF5359B559E61",
+  "experiment_id": "reflection-r1-v1-five-pressure-fights",
+  "description": "Fresh matched B0/R0/R1 triads. R1 keeps each frozen R0 card unchanged but delivers it only on deterministic material-state gate signatures.",
+  "output_root": "results/reflection_triads_r1_v1_20260712",
+  "run_overrides": {
+    "log_level": "full"
+  },
+  "evaluation_overrides": {
+    "stage_1_blocks_per_scenario": 2,
+    "stage_2_blocks_per_scenario": 6
+  },
+  "r1": {
+    "policy_id": "deterministic-material-state-gate-v1",
+    "arms": ["b0", "r0", "r1"],
+    "workers": 2,
+    "start_interval_sec": 5.0,
+    "endpoint_failure_limit": 2,
+    "stage_1_continue_gate": {
+      "kin_r1_vs_b0_improvements_gt_degradations": true,
+      "queen_r1_vs_r0_improvements_gt_degradations": true,
+      "no_scenario_r1_vs_b0_majority_degradation": true,
+      "all_r1_injection_audits_pass": true,
+      "all_r1_blocks_delivered_at_least_once": true,
+      "minimum_prompt_reduction_vs_r0": 0.9
+    }
+  }
+}

@@ -1,7 +1,11 @@
 import json
 from pathlib import Path
 
+import pytest
+import sts2_bench.combat_snapshot as combat_snapshot_module
+
 from sts2_bench.combat_snapshot import (
+    SnapshotReplayError,
     create_save_backed_combat_snapshot,
     extract_combat_snapshot,
     replay_snapshot_prefix,
@@ -64,6 +68,70 @@ def test_extract_combat_snapshot_records_prefix_and_entry(tmp_path):
     assert snapshot["stop_policy"]["active_decisions"] == ["combat_play", "card_select"]
 
 
+def test_extract_combat_snapshot_summarizes_authoritative_target_state(tmp_path):
+    trace_path = tmp_path / "trace.jsonl"
+    _write_jsonl(
+        trace_path,
+        [
+            {"type": "start", "seed": "bench_0000", "character": "Ironclad", "ascension": 0},
+            {
+                "type": "decision",
+                "step": 3,
+                "decision": "combat_play",
+                "state": {"type": "decision", **_combat_state()},
+                "authoritative_state": {
+                    **_combat_state(),
+                    "last_action_result": _combat_summary()["last_action_result"],
+                },
+            },
+        ],
+    )
+
+    snapshot = extract_combat_snapshot(trace_path, start_step=3)
+
+    assert snapshot["target"]["state_summary"] == _combat_summary()
+
+
+def test_extract_combat_snapshot_preserves_setup_action_prefix(tmp_path):
+    trace_path = tmp_path / "trace.jsonl"
+    setup_command = {"cmd": "action", "action": "choose_option", "args": {"option_index": 1}}
+    _write_jsonl(
+        trace_path,
+        [
+            {"type": "start", "seed": "bench_0000", "character": "Ironclad", "ascension": 0},
+            {
+                "type": "setup_action",
+                "setup_index": 0,
+                "command": setup_command,
+                "state": _event_summary(),
+            },
+            {"type": "decision", "step": 2, "decision": "event_choice", "state": _event_summary()},
+            {
+                "type": "action",
+                "step": 2,
+                "decision": "event_choice",
+                "action": {"action_id": 5, "kind": "event", "label": "choose option 0: Fight"},
+            },
+            {
+                "type": "decision",
+                "step": 3,
+                "decision": "combat_play",
+                "state": _combat_summary(),
+                "enemy_snapshot": [{"index": 0, "name": "Punch Construct", "hp": 33, "max_hp": 55}],
+            },
+        ],
+    )
+
+    snapshot = extract_combat_snapshot(trace_path, start_step=3)
+
+    assert snapshot["prefix_actions"][0] == {
+        "source": "setup_action",
+        "setup_index": 0,
+        "command": setup_command,
+    }
+    assert snapshot["prefix_actions"][1]["kind"] == "event"
+
+
 def test_extract_recovers_old_custom_sequence_from_next_decision_summary(tmp_path):
     trace_path = tmp_path / "trace.jsonl"
     _write_jsonl(
@@ -116,6 +184,28 @@ def test_extract_recovers_old_custom_sequence_from_next_decision_summary(tmp_pat
             ],
         }
     ]
+    assert snapshot["target"]["last_action_result"] == {
+        "action_label": "custom sequence: 0 on enemy 0 -> 1 -> 2 on enemy 0",
+        "action_kind": "combat_card_sequence",
+        "decision_before": "combat_play",
+        "decision_after": "combat_play",
+        "changes": [],
+    }
+
+
+def test_replay_snapshot_prefix_rejects_last_action_result_drift():
+    snapshot = _snapshot()
+    snapshot["target"]["last_action_result"] = {
+        "action_label": "choose option 0",
+        "action_kind": "event",
+        "decision_before": "event_choice",
+        "decision_after": "combat_play",
+        "changes": ["floor: 1 -> 2"],
+    }
+    process = _PrefixProcess()
+
+    with pytest.raises(SnapshotReplayError, match="last_action_result mismatch"):
+        replay_snapshot_prefix(snapshot, process=process)
 
 
 def test_replay_snapshot_prefix_matches_actions_by_kind_and_label():
@@ -126,6 +216,25 @@ def test_replay_snapshot_prefix_matches_actions_by_kind_and_label():
 
     assert replay.state["decision"] == "combat_play"
     assert process.commands == [{"cmd": "action", "action": "choose_option", "args": {"option_index": 0}}]
+    assert replay.action_tape == process.commands
+
+
+def test_replay_snapshot_prefix_replays_raw_setup_commands_before_saved_actions():
+    snapshot = _snapshot()
+    setup_command = {"cmd": "action", "action": "choose_option", "args": {"option_index": 1}}
+    snapshot["prefix_actions"] = [
+        {"source": "setup_action", "setup_index": 0, "command": setup_command},
+        *snapshot["prefix_actions"],
+    ]
+    process = _RawSetupPrefixProcess()
+
+    replay = replay_snapshot_prefix(snapshot, process=process)
+
+    assert replay.state["decision"] == "combat_play"
+    assert process.commands == [
+        setup_command,
+        {"cmd": "action", "action": "choose_option", "args": {"option_index": 0}},
+    ]
     assert replay.action_tape == process.commands
 
 
@@ -158,6 +267,25 @@ def test_replay_snapshot_prefix_replays_historical_sequence_from_label_when_mask
     ]
 
 
+@pytest.mark.parametrize("failure_stage", ["start", "start_run", "send"])
+def test_replay_snapshot_prefix_closes_owned_process_on_every_replay_failure(failure_stage):
+    process = _FailingOwnedPrefixProcess(failure_stage)
+
+    with pytest.raises(RuntimeError, match=failure_stage):
+        replay_snapshot_prefix(_snapshot(), process_factory=lambda: process)
+
+    assert process.closed
+
+
+def test_replay_snapshot_prefix_does_not_close_borrowed_process_on_failure():
+    process = _FailingOwnedPrefixProcess("start_run")
+
+    with pytest.raises(RuntimeError, match="start_run"):
+        replay_snapshot_prefix(_snapshot(), process=process)
+
+    assert not process.closed
+
+
 def test_run_combat_snapshot_stops_after_the_fight():
     process = _CombatCompletesProcess()
 
@@ -175,6 +303,54 @@ def test_run_combat_snapshot_stops_after_the_fight():
     assert result.game_action_count == 1
     assert result.extra["snapshot_outcome"] == "combat_complete"
     assert result.extra["snapshot_entry_step"] == 3
+
+
+def test_run_combat_snapshot_zero_max_steps_runs_until_fight_ends():
+    process = _CombatCompletesProcess()
+
+    result = run_combat_snapshot(
+        snapshot=_snapshot(),
+        agent=_EndTurnAgent(),
+        process=process,
+        max_steps=0,
+    )
+
+    assert result.error is None
+    assert result.truncated is False
+    assert result.decision == "combat_reward"
+    assert result.steps == 1
+    assert result.extra["snapshot_outcome"] == "combat_complete"
+
+
+def test_run_combat_snapshot_refuses_implicit_proceed_when_action_surface_is_empty(monkeypatch, tmp_path):
+    process = _CombatCompletesProcess()
+    original = combat_snapshot_module.build_legal_actions
+
+    def empty_at_target(state, *args, **kwargs):
+        if state.get("decision") == "combat_play":
+            return []
+        return original(state, *args, **kwargs)
+
+    monkeypatch.setattr(combat_snapshot_module, "build_legal_actions", empty_at_target)
+    trace_path = tmp_path / "trace.jsonl"
+    logger = JsonlLogger(trace_path)
+    try:
+        result = run_combat_snapshot(
+            snapshot=_snapshot(),
+            agent=_EndTurnAgent(),
+            process=process,
+            logger=logger,
+            log_level="full",
+            max_steps=5,
+        )
+    finally:
+        logger.close()
+
+    assert "refusing implicit proceed" in result.error
+    assert result.invalid_states == 1
+    assert process.commands == [{"cmd": "action", "action": "choose_option", "args": {"option_index": 0}}]
+    rows = [json.loads(line) for line in trace_path.read_text(encoding="utf-8").splitlines()]
+    assert any(row.get("type") == "decision_error" and row.get("report_required") for row in rows)
 
 
 def test_run_combat_snapshot_hides_precomputed_sequences_by_default_but_keeps_custom_gateway():
@@ -231,6 +407,10 @@ def test_run_combat_snapshot_logs_custom_sequence_validation_feedback(tmp_path):
     assert result.error is None
     assert result.extra["custom_sequence_validation_retry_count"] == 1
     assert any(row.get("type") == "custom_sequence_validation_feedback" for row in rows)
+    action_rows = [row for row in rows if row.get("type") == "action"]
+    assert len(action_rows) == 1
+    assert action_rows[0]["action"]["kind"] == "combat_end_turn"
+    assert action_rows[0]["snapshot_id"] == "sequence_unit_snapshot"
 
 
 def test_save_backed_snapshot_loads_save_and_replays_entry_commands(tmp_path):
@@ -305,7 +485,7 @@ def _event_state() -> dict:
         "decision": "event_choice",
         "context": {"act": 1, "floor": 12, "room_type": "Event"},
         "player": {"hp": 51, "max_hp": 82, "gold": 129, "deck_size": 17},
-        "options": [{"index": 0, "title": "Fight"}],
+        "options": [{"index": 0, "title": "Fight", "is_locked": False}],
     }
 
 
@@ -424,6 +604,30 @@ class _PrefixProcess:
         pass
 
 
+class _FailingOwnedPrefixProcess(_PrefixProcess):
+    def __init__(self, failure_stage):
+        super().__init__()
+        self.failure_stage = failure_stage
+        self.closed = False
+
+    def start(self):
+        if self.failure_stage == "start":
+            raise RuntimeError("start")
+
+    def start_run(self, **_kwargs):
+        if self.failure_stage == "start_run":
+            raise RuntimeError("start_run")
+        return _event_state()
+
+    def send(self, command):
+        if self.failure_stage == "send":
+            raise RuntimeError("send")
+        return super().send(command)
+
+    def close(self):
+        self.closed = True
+
+
 class _CombatCompletesProcess(_PrefixProcess):
     def send(self, command):
         self.commands.append(command)
@@ -431,6 +635,21 @@ class _CombatCompletesProcess(_PrefixProcess):
             return _combat_state()
         if command == {"cmd": "action", "action": "end_turn"}:
             return _reward_state()
+        raise AssertionError(f"unexpected command: {command!r}")
+
+
+class _RawSetupPrefixProcess(_PrefixProcess):
+    def __init__(self):
+        super().__init__()
+        self.saw_setup = False
+
+    def send(self, command):
+        self.commands.append(command)
+        if command == {"cmd": "action", "action": "choose_option", "args": {"option_index": 1}}:
+            self.saw_setup = True
+            return _event_state()
+        if self.saw_setup and command == {"cmd": "action", "action": "choose_option", "args": {"option_index": 0}}:
+            return _combat_state()
         raise AssertionError(f"unexpected command: {command!r}")
 
 

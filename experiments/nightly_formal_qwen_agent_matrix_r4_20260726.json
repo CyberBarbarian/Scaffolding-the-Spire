@@ -1,0 +1,107 @@
+{
+  "schema_version": 1,
+  "experiment_id": "nightly-formal-qwen-agent-r4-20260726",
+  "purpose": "Paper main B1/B2 agent matrix using Qwen 3.6 Flash after protocol-driven formal validation repair; B0 remains in the separate r3 Direct-CLI ledger.",
+  "output_root": "C:/WorkSpace/BG-Agent/sts2-agent-bench/results/qwen_agent_r4",
+  "model": "qwen3.6-flash",
+  "base_url": "https://zgc.apihy.com/v1",
+  "global_model_lane_cap": 10,
+  "tokens": [
+    {
+      "id": "qwen-route-r4",
+      "env_file": "C:/Users/alltr/AppData/Local/Temp/bg_agent_qwen_formal_r2_20260726.env"
+    }
+  ],
+  "retry": {
+    "max_cycles": 3,
+    "backoff_initial_sec": 15,
+    "backoff_cap_sec": 180
+  },
+  "protocols": [
+    {
+      "condition": "b1_formal_generalist",
+      "character": "Ironclad",
+      "runner": "agent",
+      "template": "formal_generalist_defect_template_20260726.json"
+    },
+    {
+      "condition": "b1_formal_generalist",
+      "character": "Silent",
+      "runner": "agent",
+      "template": "formal_generalist_defect_template_20260726.json"
+    },
+    {
+      "condition": "b1_formal_generalist",
+      "character": "Defect",
+      "runner": "agent",
+      "template": "formal_generalist_defect_template_20260726.json"
+    },
+    {
+      "condition": "b1_formal_generalist",
+      "character": "Regent",
+      "runner": "agent",
+      "template": "formal_generalist_defect_template_20260726.json"
+    },
+    {
+      "condition": "b1_formal_generalist",
+      "character": "Necrobinder",
+      "runner": "agent",
+      "template": "formal_generalist_defect_template_20260726.json"
+    },
+    {
+      "condition": "b2_full_bg_agent",
+      "character": "Ironclad",
+      "runner": "agent",
+      "template": "ablation_combat_state_only_defect_template_20260726.json",
+      "switches": {
+        "context_mode": "combat_mdp_state",
+        "route_plan": true,
+        "reward_posterior_evaluator": true
+      }
+    },
+    {
+      "condition": "b2_full_bg_agent",
+      "character": "Silent",
+      "runner": "agent",
+      "template": "ablation_combat_state_only_defect_template_20260726.json",
+      "switches": {
+        "context_mode": "combat_mdp_state",
+        "route_plan": true,
+        "reward_posterior_evaluator": true
+      }
+    },
+    {
+      "condition": "b2_full_bg_agent",
+      "character": "Defect",
+      "runner": "agent",
+      "template": "ablation_combat_state_only_defect_template_20260726.json",
+      "switches": {
+        "context_mode": "combat_mdp_state",
+        "route_plan": true,
+        "reward_posterior_evaluator": true
+      }
+    },
+    {
+      "condition": "b2_full_bg_agent",
+      "character": "Regent",
+      "runner": "agent",
+      "template": "ablation_combat_state_only_defect_template_20260726.json",
+      "switches": {
+        "context_mode": "combat_mdp_state",
+        "route_plan": true,
+        "reward_posterior_evaluator": true
+      }
+    },
+    {
+      "condition": "b2_full_bg_agent",
+      "character": "Necrobinder",
+      "runner": "agent",
+      "template": "ablation_combat_state_only_defect_template_20260726.json",
+      "switches": {
+        "context_mode": "combat_mdp_state",
+        "route_plan": true,
+        "reward_posterior_evaluator": true
+      }
+    }
+  ]
+}

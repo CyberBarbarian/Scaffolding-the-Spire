@@ -1,24 +1,28 @@
 # Self-Improving Experience Memory Plan
 
+> Historical design and experiment-outline document. Its three-study research questions remain useful, but its older Top-K, frozen-store, deterministic semantic-gating, and implementation sections are superseded by `docs/structured-memory-reflection-release-todo-20260721.md`. Do not implement or run from this file without reconciling against the current recovery plan.
+
 本文记录一个新的长期研究方向：让模型在 benchmark 游玩过程中维护一个可检索、可更新的经验库，并在后续决策中利用这些经验优化策略。这个方向类似 text gradient / textual feedback 的思想：模型不仅输出动作，还从结果中提炼文字形式的策略改进，持续更新一个外部知识库。
 
-这个方案与 `turn_chat`、`memory_enabled` 的关系不同：
+这个方案与 `turn_chat`、`short_term_memory_enabled` 的关系不同：
 
 - `turn_chat`: 当前玩家出牌回合内的短 chat history，解决同一回合多步操作的局部连续性。
-- `memory_enabled`: 单局 episode 内的短期事实记忆，解决最近若干动作和状态变化的可见性。
+- `short_term_memory_enabled`: 单局 episode 内的短期动作/事实历史，解决最近若干动作和状态变化的可见性。
 - `experience_memory`: 跨局、跨 seed、可冻结评估的长期经验库，解决“这个角色/敌人/遗物/卡牌组合应该怎么打”的策略知识积累。
 
 因此 `experience_memory` 可以与 `single_turn` 或 `turn_chat` 同时存在。它不是 prompt 组织方法，而是一个检索增强的长期策略层。
 
 ## Research Questions
 
-| Question | Why it matters |
-|---|---|
-| 经验库能否改善同一角色、同一难度的后续 run？ | 验证自我反思和策略积累是否有正向效果。 |
-| Ironclad A0 学到的知识能否泛化到 Ironclad 更高 ascension？ | 验证同角色跨难度迁移。 |
-| Ironclad 学到的通用战斗原则能否迁移到 Silent / Defect / Regent / Necrobinder？ | 验证角色无关的全局策略知识与角色专属知识的边界。 |
-| 在线更新会不会污染评估？ | 如果边玩边学，必须区分 training mode 和 frozen evaluation mode。 |
-| 模型自写经验会不会积累错误？ | 需要证据、置信度、反例和淘汰机制。 |
+自 2026-07-20 起，记忆方向不再以“实现一个更复杂的记忆系统”为目标，而是拆成三个可独立证伪的 benchmark 研究问题：
+
+| ID | Formal question | Why it matters |
+|---|---|---|
+| `RQ1 Experience Induction` | 长时序、多层级游戏轨迹会如何影响经验抽取的忠实度、覆盖率和可迁移性？ | 不能只凭几条错误经验宣称“反思很难”，必须对退化现象做可量化比较。 |
+| `RQ2 Exposure Gating` | 经验暴露的覆盖率、特异性、重复度和上下文成本如何影响长程表现？ | 把“门控会影响表现”改写为可验证的暴露—效用权衡，而不是比较两个任意实现。 |
+| `RQ3 Cross-Character Transfer` | 哪些经验能够跨角色迁移，哪些经验会导致系统性负迁移？ | 利用 STS2 共享敌人/地图与角色私有牌组并存的特点，研究经验的可迁移边界。 |
+
+以下问题作为上述三个 RQ 的辅助分析，不单独宣称为创新点：同角色跨难度迁移、在线更新对评估的污染、模型自写经验的错误积累、以及 frozen evaluation 与 online training 的边界。
 
 ## Method Naming
 
@@ -302,6 +306,140 @@ Mark uncertain lessons as low confidence.
 | Ironclad full library | Other characters A0 | 故意测试污染风险，不作为默认设置。 |
 
 默认只允许 `global` 和明确角色无关的 encounter/mechanic entries 迁移。角色专属卡牌、遗物、HP tradeoff 经验默认不迁移。
+
+## Formal Three-Study Experimental Outline (2026-07-20)
+
+三项实验彼此独立，但按“产生经验 → 使用经验 → 迁移经验”的顺序共享数据和审计基础设施。任何一项失败都应产生独立的否定性结论，不应靠继续增加记忆系统复杂度来回避。
+
+### Study 1 / RQ1: Long-Horizon Experience Induction
+
+#### Hypothesis
+
+整条超长轨迹的单次反思容易产生稀疏、过度概括或无法由原始证据支持的经验；局部分段能提高证据忠实度和决策覆盖，但可能丢失战斗、选牌、路线与整局结果之间的跨层关联。分段抽取加整局汇总应在两者之间取得更好平衡。
+
+#### Conditions
+
+| Arm | Extraction policy | Constraint |
+|---|---|---|
+| `E1 monolithic` | 把完整 run 轨迹一次性交给模型反思。 | 不预先按决策域分段。 |
+| `E2 segmented-local` | 分别处理战斗、选牌和路线片段。 | 不提供整局后验汇总。 |
+| `E3 hierarchical` | 先局部抽取，再用整局结果审计、合并和标注跨层冲突。 | 局部证据引用必须保留。 |
+
+每个 arm 使用相同模型、完整卡牌/敌人信息、源轨迹、输出 schema 和最大候选数。在多条完整轨迹上重复抽取，不得只用一条 run 或一次模型采样下结论。
+
+#### Primary Metrics
+
+- `evidence_fidelity`: 经验的核心主张能否由它引用的原始 transition 直接支持。
+- `hallucination_rate`: 误解卡牌、敌人意图、事件、伤害或资源变化的经验比例。
+- `domain_coverage`: 战斗、卡牌价值、选牌和路线经验的覆盖与均衡度。
+- `nontriviality`: 经验是否超出卡牌文本、当前状态的浅层推理或无条件常识。
+- `cross-trajectory_confirmation`: 经验在不同轨迹中获得后续支持、反驳或仍无法判定的比例。
+- `cross-level_conflict`: 局部有利但与整局构筑、路线或资源结果冲突的经验比例。
+
+保留模型的全部原始候选，不允许为了结果好看而人工删除。人工或独立模型可以作为评估标注者，但标注与运行时自动筛选必须分开。
+
+#### Success and Stop Criteria
+
+- 成功不等于 `E3` 必须更好；只要三种方法在预注册指标上出现跨轨迹可重复的差异，就能形成 benchmark 分析结论。
+- 若标注者之间无法就“证据忠实/平凡/幻觉”达到可接受一致性，先修订评估规则，不进入 RQ2。
+- 若所有抽取方法都只产生浅层知识且无法后续验证，则把它作为经验抽取失败结论，而不继续增加复杂记忆模块。
+
+### Study 2 / RQ2: Exposure Gating and Long-Horizon Performance
+
+#### Hypothesis
+
+经验暴露不是“越多越好”。宽门控可能提高召回但导致重复污染；精确门控可能降低污染但产生零暴露。门控特异性、暴露频率和单位上下文成本之间可能存在非单调的效用曲线。
+
+#### Conditions
+
+RQ2 必须冻结同一批已经 RQ1 证据审计的经验，只改变暴露策略：
+
+| Arm | Exposure policy | Purpose |
+|---|---|---|
+| `G0 no-memory` | 不注入经验。 | Baseline。 |
+| `G1 broad` | 只要决策域大致相关就注入。 | 测量高召回和重复污染。 |
+| `G2 exact` | 要求敌人/卡牌/路线实体与状态条件精确匹配。 | 测量高特异性与零暴露风险。 |
+| `G3 compiled` | 同门控经验先合并压缩，再按实体、状态和当前可执行动作暴露。 | 测量在不使用硬 `top-k` 截断时的中间方案。 |
+| `G4 mismatched-dose-control` | 按照与正常门控相同的频率和长度注入错配经验。 | 区分经验内容效果和单纯增加 prompt 的效果。 |
+
+#### Primary Metrics
+
+- 每局和每个决策域的注入次数、零暴露率与触发覆盖。
+- 每条经验的触发次数、连续重复率、单门控压缩率和实际适用率。
+- 经验载荷字符/token 成本、时延、fallback 和格式失败。
+- 经验注入后的动作改变率，以及改变后的即时与 run-level 结果。
+- act/floor、通关率、死亡位置以及每千经验 token 的进度变化。
+
+#### Identification Requirements
+
+- 严格配对实验必须共享并冻结“首次暴露之前”的完整 agent/OCC 上下文，之后才分叉。
+- 若使用独立模型采样，必须在多 seed、多重复上作分布级比较，不得把单个同 seed pair 标记为因果提升。
+- 所有 arm 保留完整状态、卡牌、敌人和合法动作上下文；不允许为了加速而缩减信息。
+
+#### Success and Stop Criteria
+
+- 只有当不同门控在多 seed 上形成可重复的暴露—行为—结果差异时，才将 RQ2 写成正式 benchmark 结论。
+- 若任一主要决策域始终零暴露，不允许声称已评估该决策域。
+- 若处理前策略上下文已经分叉，严格配对因果分析终止，只保留明确标注的描述性分析。
+
+### Study 3 / RQ3: Cross-Character Experience Transfer
+
+#### Hypothesis
+
+敌人机制、事件后果和地图资源等经验可能跨角色迁移；依赖特有卡牌、遗物、生命恢复和牌组节奏的经验若直接迁移，可能导致负迁移。显式区分通用经验与角色/牌组条件经验，可能改善迁移边界。
+
+#### Transfer Scope Taxonomy
+
+| Scope | Example | Default transfer policy |
+|---|---|---|
+| `universal_fact` | 敌人机制、事件已观测后果、地图结构。 | 允许迁移，但保留证据与不确定性。 |
+| `universal_strategy` | 成长型敌人、多目标威胁、资源风险的一般处理。 | 待跨角色验证，不默认为真。 |
+| `character_conditioned` | 依赖角色固有机制、恢复或资源的策略。 | 默认禁止跨角色。 |
+| `deck_conditioned` | 依赖牌组费用、抽牌、遗物或某套构筑的经验。 | 只在可执行条件匹配时允许。 |
+| `character_private` | 特有卡牌、遗物和套路知识。 | 禁止迁移。 |
+
+#### Conditions
+
+| Arm | Target-character memory | Purpose |
+|---|---|---|
+| `T0 no-memory` | 无经验。 | Target baseline。 |
+| `T1 target-self` | 来自目标角色其他训练 seed 的冻结经验。 | 同角色参照上界。 |
+| `T2 naive-cross-character` | 不区分 scope，直接注入源角色全部经验。 | 测量朴素迁移和负迁移。 |
+| `T3 typed-cross-character` | 只迁移 `universal_*` 或条件真正匹配的经验。 | 测量作用域过滤的价值。 |
+| `T4 mismatched-transfer` | 使用数量/长度匹配但与目标场景无关的迁移经验。 | 负对照。 |
+
+源角色的经验生成 seed 与目标角色 evaluation seed 必须完全分离。整个实验必须使用 RQ2 选定后冻结的暴露策略，避免同时改变经验内容和门控。
+
+#### Primary Metrics
+
+- `transfer_exposure_rate`: 迁移经验在目标角色决策中实际触发的比例。
+- `portable_validation_rate`: 迁移经验在目标轨迹中被支持、反驳或仍无法判定的比例。
+- `negative_transfer_rate`: 迁移经验触发后产生明确不适用建议、有害动作或表现下降的比例。
+- 不同 scope 的触发覆盖、动作改变率、act/floor、通关率和单位上下文成本。
+
+#### Success and Stop Criteria
+
+- RQ3 不要求跨角色迁移必须为正。若朴素迁移稳定导致负迁移，且能定位到具体 scope，仍然是有效 benchmark 分析结论。
+- 只有当 `T3` 在多角色、多 seed 上相对 `T2` 减少负迁移或改善效用时，才能把“作用域类型化迁移”作为轻量方法候选。
+- 若目标轨迹根本不遇到可迁移实体，则该 seed 不具有 treatment exposure，必须在运行前预检并更换，不得把零暴露当作迁移无效。
+
+### Relationship to the 2026-07-20 Five-Pair Pilot
+
+当前 `gate_compiled_memory_fullgame_v2` 五组同 seed 运行只作为 RQ2 的先导证据，不是上述任一正式实验的最终结果：
+
+- 抽取链将一条完整轨迹分成 27 个片段，生成 39 条原始候选，结构验证保留 16 条；这只能证明已建立可审计抽取链，不能证明经验质量。
+- 每局实际注入 44–102 次，说明投递链已经不再过严；但约四分之一的动作携带经验，且宽泛 `Strike` 经验占主导，提示重复污染问题。
+- 路线经验每局只触发 1–3 次，选牌经验触发 0 次，因此不得宣称已验证战斗、选牌和路线三域。
+- 描述性进度为 `2 better / 3 equal / 0 worse`，但五组在首次注入前的完整策略上下文已因模型随机采样分叉，故严格配对因果审计不通过。
+- 该先导实验只证明“经验能够被真实注入并改变行为”，不证明反思改善表现。
+
+### Execution Order and Paper Boundary
+
+1. 先做 RQ1：使用现有完整轨迹离线运行，成本最低，并产生 RQ2 的冻结经验池。
+2. 再做 RQ2：经验内容固定，只比较暴露策略，不把经验质量与门控效果混在一起。
+3. 最后做 RQ3：使用 RQ2 冻结的暴露策略，只改变迁移内容和 scope 过滤。
+
+三项实验本身是 benchmark 研究问题，不自动构成方法创新。只有当 RQ3 的类型化迁移在正式实验中稳定减少负迁移时，才考虑将其提升为轻量方法贡献；否则三者均只作为超长序列 benchmark 的系统分析。
 
 ## Evaluation Metrics
 

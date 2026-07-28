@@ -1,0 +1,61 @@
+{
+  "schema_version": 1,
+  "experiment_id": "online-cross-domain-memory-v1-seed1007",
+  "purpose": "Mechanism-validation configuration for the minimal evolving structured-memory loop. Reuse the immutable complete seed-1007 trajectory to initialize pending candidates, then run one R1 full game whose memory may evolve at exactly three checkpoint types: every completed combat, every completed Act, and the completed run. Every checkpoint may emit or review any experience domain; pending experience is delivered only through deterministic exact/action-grounded gates and is visibly labeled tentative. The historical B0 artifact remains untouched and is descriptive only.",
+  "baseline_experiment": "experiments/full_run_layered_reflection_v21.json",
+  "source": {
+    "seed": "ironclad_a0_1007",
+    "trace": "results/full_run_layered_reflection_v18_20260716_round1/r1/seeds/ironclad_a0_1007/trace.jsonl",
+    "trace_sha256": "4709468D1C47EC194458F93BFB0CC5A7D4A42D379F0BBB75028BC52E565FF1E9",
+    "audit": "results/full_run_layered_reflection_v18_20260716_round1/r1/memory_store.audit.jsonl",
+    "reflection_scopes": [
+      "offline_run_end_combat",
+      "run_end_card_choice",
+      "run_end_route"
+    ]
+  },
+  "validated_memory": {
+    "path": "results/online_pending_combat_lifecycle_v12_20260719/fogmog_terminal_second/memory_store.json",
+    "sha256": "ECE86AC0FD3739297BCC8E33970B31743E9B4F9B6A8B986BB06C5947799F00F5"
+  },
+  "mini_gate": {
+    "trace": "results/full_run_layered_reflection_v18_20260716_round1/r1/seeds/ironclad_a0_2407/trace.jsonl",
+    "irrelevant_step": 336,
+    "relevant_step": 339,
+    "enemy": "Exoskeleton",
+    "required_card": "Breakthrough",
+    "expected_action_id": 5
+  },
+  "evaluation": {
+    "seed": "ironclad_a0_1007",
+    "run_id": "online_cross_domain_memory_v1_eval_1007",
+    "matched_live_pair": false,
+    "historical_b0_result": "results/full_run_layered_reflection_v18_20260716_round1/b0/seeds/ironclad_a0_1007/result.json",
+    "historical_b0_result_sha256": "33717937FF618506D68C755B3BBC0A113B0D488102A29E0F9A116BF63188A3E1",
+    "historical_b0_trace": "results/full_run_layered_reflection_v18_20260716_round1/b0/seeds/ironclad_a0_1007/trace.jsonl",
+    "historical_b0_trace_sha256": "2D3654EF2696B5BBD400144900000BAE28C622EE1B241568E537CF9AE3161239",
+    "exposure_trace": "results/full_run_layered_reflection_v18_20260716_round1/r1/seeds/ironclad_a0_1007/trace.jsonl",
+    "exposure_trace_sha256": "4709468D1C47EC194458F93BFB0CC5A7D4A42D379F0BBB75028BC52E565FF1E9"
+  },
+  "memory": {
+    "offline_reflection_deadline_sec": 600,
+    "global_combat_limit": 0,
+    "exact_enemy_limit": 1,
+    "enemy_tag_limit": 1,
+    "combat_card_limit": 1,
+    "card_choice_limit": 2,
+    "route_limit": 2,
+    "max_prompt_chars": 2400,
+    "max_reflection_transitions": 80,
+    "reflection_output_limit": 8,
+    "reflection_json_response_format": 1,
+    "reflection_format_retries": 1,
+    "new_candidates_start_pending": 1,
+    "online_reflection_enabled": 1,
+    "cross_domain_online_reflection": 1,
+    "pending_hypothesis_retrieval": 1,
+    "active_review_rejection_threshold": 2,
+    "post_run_reflection": false
+  },
+  "output_root": "results/online_cross_domain_memory_v1_20260720"
+}

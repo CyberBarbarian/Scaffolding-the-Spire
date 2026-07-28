@@ -1,0 +1,88 @@
+{
+  "schema_version": 1,
+  "experiment_id": "kin-llm-candidate-conditioned-r1-v1",
+  "policy_variant_id": "llm-act1-kin-fa1fdb214088-conditioned-once-v1",
+  "declared_at_local_date": "2026-07-13",
+  "analysis_status": "post_hoc_mechanism_exploration_after_continuous_r0_rejection",
+  "description": "Test the frozen Kin LLM candidate only under a deterministic, recoverable subset of its own trigger, with a same-gate equal-character sham control. This does not reverse or pool with the prior continuous-R0 rejection.",
+  "base_experiment": "experiments/reflection_probe_v0.json",
+  "base_experiment_sha256": "0AD5D1D329C0964927BEC21ADEF1177334198DC9F310E4CB27ADF5359B559E61",
+  "candidate_pool": "results/reflection_candidate_kin_v0_20260713/candidate_pool.json",
+  "candidate_pool_sha256": "666AA5297677FDB99CD3B02A381A9160DD21884A5E5C5A19B6604CE2EFA6A19F",
+  "candidate_id": "llm-act1_kin_boss_multienemy_loss67-fa1fdb214088",
+  "candidate_card_digest": "ab01035a30b28250f9f4a65b69004c125dc508324253ff75f77bbc33961dc60c",
+  "scenario_id": "act1_kin_boss_multienemy_loss67",
+  "prior_continuous_r0_assessment": {
+    "status": "rejected_for_continuous_delivery",
+    "path": "results/reflection_candidate_kin_v0_screen_20260713/screen_assessment.json",
+    "sha256": "5927F794E887A8CC2C4551A1A1D4EBB5BE6FB661080E0DC184D9CD7771825210",
+    "pool_status_is_not_rewritten": true
+  },
+  "output_root": "results/reflection_candidate_kin_conditioned_r1_v1_20260713",
+  "run_overrides": {
+    "log_level": "full"
+  },
+  "arms": ["b0", "p1", "r1c"],
+  "delivery": {
+    "policy_id": "candidate-trigger-recoverable-once-v1",
+    "max_injections_per_fight": 1,
+    "insertion": "append_after_baseline_prompt",
+    "sham_policy": "neutral_equal_rendered_characters_v1"
+  },
+  "gate": {
+    "policy_id": "kin-low-hp-multihit-recoverable-block-gap-v1",
+    "hp_min": 1,
+    "hp_max": 16,
+    "priest_name": "Kin Priest",
+    "priest_min_hits": 2,
+    "require_priest_attack_meets_or_exceeds_static_block_capacity": true,
+    "require_end_turn_now_lethal": true,
+    "require_static_full_block_impossible": true,
+    "require_max_block_survives": true,
+    "require_legal_visible_block_card": true,
+    "static_block_capacity": "current block plus 0/1 knapsack over legal visible positive-block cards under current energy; no draw, energy generation, upgrades, Weak, or kill effects",
+    "evidence_note": "The literal trigger appears in source blocks 001 and 004, but only block 004 round 15 is recoverable by max visible block alone; recoverability is an identifiability filter, not a semantic rewrite of the candidate card."
+  },
+  "screen": {
+    "block_range": [1, 3],
+    "workers": 3,
+    "start_interval_sec": 5.0,
+    "endpoint_failure_limit": 2,
+    "minimum_complete_blocks": 3,
+    "minimum_r1c_delivery_blocks": 2,
+    "minimum_p1_delivery_blocks": 2,
+    "minimum_both_delivery_blocks": 2,
+    "r1c_vs_b0_min_improvements": 2,
+    "r1c_vs_b0_max_degradations": 0,
+    "r1c_vs_p1_min_improvements": 2,
+    "r1c_vs_p1_max_degradations": 0,
+    "minimum_primary_outcome_improvements_vs_b0": 1
+  },
+  "confirmation": {
+    "block_range": [4, 8],
+    "workers": 3,
+    "start_interval_sec": 5.0,
+    "endpoint_failure_limit": 2,
+    "minimum_complete_blocks": 5,
+    "minimum_r1c_delivery_blocks": 3,
+    "minimum_p1_delivery_blocks": 3,
+    "minimum_both_delivery_blocks": 3,
+    "r1c_vs_b0_min_improvements": 3,
+    "r1c_vs_b0_max_degradations": 1,
+    "r1c_vs_p1_min_improvements": 3,
+    "r1c_vs_p1_max_degradations": 1,
+    "minimum_primary_outcome_improvements_vs_b0": 2,
+    "minimum_clear_count_advantage_vs_b0": 2
+  },
+  "invariants": [
+    "Do not modify the frozen baseline or candidate card text.",
+    "B0 uses the existing unwrapped baseline run_arm implementation.",
+    "P1 and R1C share one deterministic gate implementation and differ only in payload semantics.",
+    "P1 and R1C add exactly the same number of rendered characters when delivered.",
+    "At most one payload is delivered per fight.",
+    "Run arms serially within each block and run blocks concurrently.",
+    "ITT over all valid complete blocks is the only promotion-driving analysis; delivered-only results are descriptive.",
+    "Zero or asymmetric delivery is reported as gate coverage, not silently excluded from ITT.",
+    "Do not pool screen with confirmation to make the confirmation gate pass."
+  ]
+}

@@ -2,8 +2,10 @@ import json
 
 from sts2_bench.actions import LegalAction
 from sts2_bench.agents import OpenAICompatAgent, build_llm_prompt
+from sts2_bench.multi_agent import CoordinatorAgent
 from sts2_bench.route_plan import ActiveRoutePlan, RoutePlanTracker
-from sts2_bench.runner import JsonlLogger, agent_from_args, run_one
+from sts2_bench.run_context import RunContextStore
+from sts2_bench.runner import JsonlLogger, RouteCandidatePlannerAgent, agent_from_args, run_one
 
 
 def _map_action(action_id, room_type, col, row):
@@ -95,6 +97,113 @@ def test_route_plan_created_records_topological_plan_and_remaining_route():
     assert event["route_validity"] == "topological"
     assert event["selected_node"] == {"col": 0, "row": 1, "type": "Monster"}
     assert event["active_plan"]["remaining"] == [{"col": 1, "row": 2, "type": "Elite"}]
+
+
+def test_forced_map_action_invalidates_active_plan_when_only_node_differs():
+    tracker = RoutePlanTracker()
+    tracker.active = ActiveRoutePlan(
+        plan_id="rp_001",
+        remaining=[
+            {"col": 1, "row": 2, "type": "Elite"},
+            {"col": 3, "row": 3, "type": "Boss"},
+        ],
+        map_revision=None,
+        act=1,
+    )
+    state = _map_state(
+        choices=[{"col": 2, "row": 2, "type": "RestSite"}],
+        full_map=_full_map(
+            current=(0, 1),
+            nodes={
+                (0, 1): "Monster",
+                (2, 2): "RestSite",
+                (3, 3): "Boss",
+            },
+            edges={(0, 1): [(2, 2)], (2, 2): [(3, 3)]},
+        ),
+        floor=2,
+    )
+    action = _map_action(0, "RestSite", 2, 2)
+
+    effect = tracker.apply_forced_map_action(state=state, action=action)
+
+    assert effect["outcome"] == "invalidated_active_plan"
+    assert effect["invalidation_reason"] == "forced_node_differs_from_expected"
+    assert effect["previous_plan_id"] == "rp_001"
+    assert tracker.active is None
+
+
+def test_route_candidate_replan_without_authoritative_active_plan_emits_created():
+    planner = RouteCandidatePlannerAgent(
+        OpenAICompatAgent(base_url="http://127.0.0.1:1/v1", model="fake"),
+        objective="max_restsites",
+    )
+    planner.force_replan = True
+    action = _map_action(0, "Monster", 0, 1)
+    state = _map_state(
+        choices=[{"col": 0, "row": 1, "type": "Monster"}],
+        full_map=_full_map(edges={(0, 0): [(0, 1)], (0, 1): [(1, 2)]}),
+    )
+
+    chosen, meta = planner._choose_map(state, [action])
+
+    assert chosen == action
+    assert meta["parsed"]["route_plan_event"]["event_type"] == "route_plan_created"
+
+
+def test_route_candidate_follows_authoritative_active_plan_when_private_cache_is_empty():
+    planner = RouteCandidatePlannerAgent(
+        OpenAICompatAgent(base_url="http://127.0.0.1:1/v1", model="fake"),
+        objective="max_restsites",
+    )
+    planner.planned_remaining = []
+    elite = _map_action(0, "Elite", 1, 2)
+    state = _map_state(
+        choices=[{"col": 1, "row": 2, "type": "Elite"}],
+        full_map=_full_map(current=(0, 1), edges={(0, 1): [(1, 2)]}),
+    )
+    state["active_route_plan"] = {
+        "plan_id": "rp_001",
+        "expected_next": {"col": 1, "row": 2, "type": "Elite"},
+        "remaining": [{"col": 1, "row": 2, "type": "Elite"}],
+    }
+
+    chosen, meta = planner._choose_map(state, [elite])
+
+    assert chosen == elite
+    assert meta["route_candidate_followed"] is True
+    assert "route_plan_event" not in meta["parsed"]
+
+
+def test_route_candidate_replan_preserves_map_changed_reason_from_validation_feedback():
+    planner = RouteCandidatePlannerAgent(
+        OpenAICompatAgent(base_url="http://127.0.0.1:1/v1", model="fake"),
+        objective="max_restsites",
+    )
+    old_action = _map_action(0, "Monster", 0, 1)
+    state = _map_state(
+        choices=[{"col": 0, "row": 1, "type": "Monster"}],
+        full_map=_full_map(edges={(0, 0): [(0, 1)], (0, 1): [(1, 2)]}),
+    )
+    state["active_route_plan"] = {
+        "plan_id": "rp_001",
+        "expected_next": {"col": 0, "row": 1, "type": "Monster"},
+        "remaining": [{"col": 0, "row": 1, "type": "Monster"}],
+    }
+    planner.receive_external_feedback(
+        state,
+        old_action,
+        {},
+        "route-plan validation failed [route_plan_invalid_after_map_change]",
+        [old_action],
+    )
+
+    chosen, meta = planner._choose_map(state, [old_action])
+
+    assert chosen == old_action
+    event = meta["parsed"]["route_plan_event"]
+    assert event["event_type"] == "route_plan_updated"
+    assert "map_changed" in event["reason_tags"]
 
 
 def test_route_plan_created_rejects_incomplete_visible_suffix():
@@ -689,7 +798,7 @@ def test_empty_route_plan_event_placeholder_is_treated_as_omitted_when_following
     assert result.events == []
 
 
-def test_redundant_created_event_is_treated_as_follow_when_selected_node_matches_active_route():
+def test_redundant_created_event_is_rejected_without_consuming_active_route():
     tracker = RoutePlanTracker()
     snapshot = _full_map(edges={(0, 0): [(0, 1)], (0, 1): [(1, 2)]})
     first_action = _map_action(0, "Monster", 0, 1)
@@ -700,19 +809,148 @@ def test_redundant_created_event_is_treated_as_follow_when_selected_node_matches
         meta={"parsed": {"route_plan_event": _event("route_plan_created", [(0, 1, "Monster"), (1, 2, "Elite")])}},
         step=0,
     )
+    before = tracker.active.to_dict()
     elite = _map_action(0, "Elite", 1, 2)
 
     result = tracker.validate_and_apply(
         state=_map_state(choices=[{"col": 1, "row": 2, "type": "Elite"}], full_map=snapshot),
         legal_actions=[elite],
         action=elite,
-        meta={"parsed": {"route_plan_event": _event("route_plan_created", [(1, 2, "Elite")])}},
+        meta={
+            "parsed": {
+                "route_plan_event": _event(
+                    "route_plan_created",
+                    [(1, 2, "Elite")],
+                    reason="A second creation event must not replace or silently consume the active plan.",
+                )
+            }
+        },
+        step=1,
+    )
+
+    assert result.error is not None
+    assert result.error.code == "route_plan_unexpected_event_type"
+    assert tracker.active.to_dict() == before
+
+
+def test_map_revision_with_legal_next_but_invalid_tail_requires_update_without_consuming():
+    tracker = RoutePlanTracker()
+    old = _full_map(
+        nodes={(0, 0): "Ancient", (0, 1): "Monster", (1, 2): "Elite", (1, 3): "Boss"},
+        edges={(0, 0): [(0, 1)], (0, 1): [(1, 2)], (1, 2): [(1, 3)]},
+    )
+    first = _map_action(0, "Monster", 0, 1)
+    created = tracker.validate_and_apply(
+        state=_map_state(choices=[{"col": 0, "row": 1, "type": "Monster"}], full_map=old),
+        legal_actions=[first],
+        action=first,
+        meta={
+            "parsed": {
+                "route_plan_event": _event(
+                    "route_plan_created",
+                    [(0, 1, "Monster"), (1, 2, "Elite"), (1, 3, "Boss")],
+                )
+            }
+        },
+        step=0,
+    )
+    assert created.error is None
+    before = tracker.active.to_dict()
+
+    changed = _full_map(
+        current=(0, 1),
+        nodes={(0, 1): "Monster", (1, 2): "Elite", (2, 3): "Boss"},
+        edges={(0, 1): [(1, 2)], (1, 2): [(2, 3)]},
+    )
+    elite = _map_action(0, "Elite", 1, 2)
+    stale = tracker.validate_and_apply(
+        state=_map_state(
+            choices=[{"col": 1, "row": 2, "type": "Elite"}],
+            full_map=changed,
+            floor=2,
+        ),
+        legal_actions=[elite],
+        action=elite,
+        meta={"parsed": {}},
+        step=1,
+    )
+
+    assert stale.error is not None
+    assert stale.error.code == "route_plan_invalid_after_map_change"
+    assert tracker.active.to_dict() == before
+
+    updated = tracker.validate_and_apply(
+        state=_map_state(
+            choices=[{"col": 1, "row": 2, "type": "Elite"}],
+            full_map=changed,
+            floor=2,
+        ),
+        legal_actions=[elite],
+        action=elite,
+        meta={
+            "parsed": {
+                "route_plan_event": _event(
+                    "route_plan_updated",
+                    [(1, 2, "Elite"), (2, 3, "Boss")],
+                    reason_tags=["map_changed"],
+                )
+            }
+        },
+        step=1,
+    )
+
+    assert updated.error is None
+    assert tracker.active.remaining == [{"col": 2, "row": 3, "type": "Boss"}]
+
+
+def test_benign_map_revision_keeps_valid_silent_follow_behavior():
+    tracker = RoutePlanTracker()
+    old = _full_map(
+        nodes={(0, 0): "Ancient", (0, 1): "Monster", (1, 2): "Elite", (1, 3): "Boss"},
+        edges={(0, 0): [(0, 1)], (0, 1): [(1, 2)], (1, 2): [(1, 3)]},
+    )
+    first = _map_action(0, "Monster", 0, 1)
+    tracker.validate_and_apply(
+        state=_map_state(choices=[{"col": 0, "row": 1, "type": "Monster"}], full_map=old),
+        legal_actions=[first],
+        action=first,
+        meta={
+            "parsed": {
+                "route_plan_event": _event(
+                    "route_plan_created",
+                    [(0, 1, "Monster"), (1, 2, "Elite"), (1, 3, "Boss")],
+                )
+            }
+        },
+        step=0,
+    )
+    benign = _full_map(
+        current=(0, 1),
+        nodes={
+            (0, 1): "Monster",
+            (1, 2): "Elite",
+            (2, 2): "Shop",
+            (1, 3): "Boss",
+        },
+        edges={(0, 1): [(1, 2), (2, 2)], (1, 2): [(1, 3)], (2, 2): [(1, 3)]},
+    )
+    elite = _map_action(0, "Elite", 1, 2)
+
+    result = tracker.validate_and_apply(
+        state=_map_state(
+            choices=[{"col": 1, "row": 2, "type": "Elite"}],
+            full_map=benign,
+            floor=2,
+        ),
+        legal_actions=[elite],
+        action=elite,
+        meta={"parsed": {}},
         step=1,
     )
 
     assert result.error is None
     assert result.events == []
-    assert tracker.active is None
+    assert tracker.active.remaining == [{"col": 1, "row": 3, "type": "Boss"}]
 
 
 def test_blank_route_plan_event_type_is_rejected_when_following_active_route():
@@ -797,6 +1035,85 @@ def test_route_plan_update_allowed_when_map_revision_changes_and_new_plan_is_leg
 
     assert result.error is None
     assert result.events[0]["trigger"] == "map_changed"
+
+
+def test_route_plan_update_requires_map_changed_tag_when_revision_invalidates_old_tail():
+    tracker = RoutePlanTracker()
+    original = _full_map(
+        nodes={(0, 0): "Ancient", (0, 1): "Monster", (1, 2): "Elite", (1, 3): "Boss"},
+        edges={(0, 0): [(0, 1)], (0, 1): [(1, 2)], (1, 2): [(1, 3)]},
+    )
+    first = _map_action(0, "Monster", 0, 1)
+    tracker.validate_and_apply(
+        state=_map_state(choices=[{"col": 0, "row": 1, "type": "Monster"}], full_map=original),
+        legal_actions=[first],
+        action=first,
+        meta={
+            "parsed": {
+                "route_plan_event": _event(
+                    "route_plan_created",
+                    [(0, 1, "Monster"), (1, 2, "Elite"), (1, 3, "Boss")],
+                )
+            }
+        },
+        step=0,
+    )
+    before = tracker.active.to_dict()
+    changed = _full_map(
+        current=(0, 1),
+        nodes={
+            (0, 1): "Monster",
+            (1, 2): "Elite",
+            (2, 3): "Boss",
+        },
+        edges={(0, 1): [(1, 2)], (1, 2): [(2, 3)]},
+    )
+    elite = _map_action(0, "Elite", 1, 2)
+    without_tag = tracker.validate_and_apply(
+        state=_map_state(
+            choices=[{"col": 1, "row": 2, "type": "Elite"}],
+            full_map=changed,
+            floor=2,
+        ),
+        legal_actions=[elite],
+        action=elite,
+        meta={
+            "parsed": {
+                "route_plan_event": _event(
+                    "route_plan_updated",
+                    [(1, 2, "Elite"), (2, 3, "Boss")],
+                    reason_tags=["test"],
+                )
+            }
+        },
+        step=1,
+    )
+
+    assert without_tag.error is not None
+    assert without_tag.error.code == "route_plan_update_missing_map_changed_reason"
+    assert tracker.active.to_dict() == before
+
+    with_tag = tracker.validate_and_apply(
+        state=_map_state(
+            choices=[{"col": 1, "row": 2, "type": "Elite"}],
+            full_map=changed,
+            floor=2,
+        ),
+        legal_actions=[elite],
+        action=elite,
+        meta={
+            "parsed": {
+                "route_plan_event": _event(
+                    "route_plan_updated",
+                    [(1, 2, "Elite"), (2, 3, "Boss")],
+                    reason_tags=["map_changed"],
+                )
+            }
+        },
+        step=1,
+    )
+
+    assert with_tag.error is None
 
 
 def test_route_plan_created_allowed_when_map_revision_changes_and_stale_next_coord_is_legal():
@@ -905,13 +1222,15 @@ def test_map_prompt_instructs_llm_to_emit_route_plan_event():
     assert "omit route_plan_event" in prompt
     assert "new_plan" in prompt
     assert "reason_tags" in prompt
-    assert '"reason_tags":["low_hp","map_changed","avoid_elite","route_override"]' in prompt
+    assert 'reason_tags must include the separate string "map_changed"' in prompt
     assert "Canonical route map JSON:" in prompt
     assert "Route graph JSON:" not in prompt
     assert '"id":"r01c0"' in prompt
     assert '"symbol":"M"' in prompt
     assert "each adjacent pair in new_plan must follow an edge" in prompt
     assert "Route graph exact nodes:" not in prompt
+    assert "Active route plan JSON:\nnull" in prompt
+    assert "No formal active route plan exists" in prompt
 
 
 def test_map_prompt_uses_canonical_route_map_representation_by_default():
@@ -989,6 +1308,11 @@ def test_map_prompt_can_omit_route_plan_instructions_when_disabled():
         choices=[{"col": 0, "row": 1, "type": "Monster"}],
         full_map=_full_map(edges={(0, 0): [(0, 1)]}),
     )
+    state["active_route_plan"] = {
+        "plan_id": "stale",
+        "remaining": [{"col": 0, "row": 1, "type": "Monster"}],
+        "expected_next": {"col": 0, "row": 1, "type": "Monster"},
+    }
     action = _map_action(0, "Monster", 0, 1)
 
     prompt = build_llm_prompt(state, [action], route_plan_enabled=False)
@@ -997,6 +1321,10 @@ def test_map_prompt_can_omit_route_plan_instructions_when_disabled():
     assert "route_plan_created" not in prompt
     assert "route_plan_updated" not in prompt
     assert "Canonical route map JSON:" in prompt
+    assert "Persistent route planning is disabled." not in prompt
+    assert "Route decision contract:" not in prompt
+    assert "Active route plan JSON:" not in prompt
+    assert "active_route_plan" not in prompt
 
 
 def test_map_prompt_uses_structured_route_state_without_text_map_duplication():
@@ -1091,34 +1419,49 @@ def test_map_changed_feedback_requires_explicit_map_changed_tag():
     assert 'separate string "map_changed"' in result.error.feedback
 
 
-def test_runner_exposes_active_route_plan_to_next_map_decision(tmp_path):
-    class _CaptureStateAgent(_RoutePlanScriptAgent):
-        def __init__(self, responses):
-            super().__init__(responses)
-            self.seen_states = []
-
-        def choose(self, state, legal_actions, *, prompt=None):
-            self.seen_states.append(state)
-            return super().choose(state, legal_actions, prompt=prompt)
-
-    boss_nodes = {(0, 0): "Ancient", (0, 1): "Monster", (1, 2): "Elite", (3, 3): "Boss"}
+def test_runner_runtime_follows_active_route_without_second_model_decision(tmp_path):
+    boss_nodes = {
+        (0, 0): "Ancient",
+        (0, 1): "Monster",
+        (2, 1): "Shop",
+        (1, 2): "Elite",
+        (2, 2): "RestSite",
+        (3, 3): "Boss",
+    }
     first_map = _full_map(
         nodes=boss_nodes,
-        edges={(0, 0): [(0, 1)], (0, 1): [(1, 2)], (1, 2): [(3, 3)]},
+        edges={
+            (0, 0): [(0, 1), (2, 1)],
+            (0, 1): [(1, 2)],
+            (2, 1): [(2, 2)],
+            (1, 2): [(3, 3)],
+            (2, 2): [(3, 3)],
+        },
     )
     second_map = _full_map(
         current=(0, 1),
         nodes={key: value for key, value in boss_nodes.items() if key != (0, 0)},
-        edges={(0, 1): [(1, 2)], (1, 2): [(3, 3)]},
+        edges={
+            (0, 1): [(1, 2)],
+            (2, 1): [(2, 2)],
+            (1, 2): [(3, 3)],
+            (2, 2): [(3, 3)],
+        },
     )
     process = _RoutePlanProcess(
         [
-            _map_state(choices=[{"col": 0, "row": 1, "type": "Monster"}], full_map=first_map),
+            _map_state(
+                choices=[
+                    {"col": 0, "row": 1, "type": "Monster"},
+                    {"col": 2, "row": 1, "type": "Shop"},
+                ],
+                full_map=first_map,
+            ),
             _map_state(choices=[{"col": 1, "row": 2, "type": "Elite"}], full_map=second_map, hp=62),
             {"decision": "game_over", "victory": False, "player": {"hp": 54, "max_hp": 80}},
         ]
     )
-    agent = _CaptureStateAgent(
+    agent = _RoutePlanScriptAgent(
         [
             {
                 "action_index": 5,
@@ -1130,18 +1473,36 @@ def test_runner_exposes_active_route_plan_to_next_map_decision(tmp_path):
                     ),
                 },
             },
-            {"action_index": 5, "parsed": {"reason": "follow planned elite"}},
         ]
     )
     out = tmp_path / "run.jsonl"
     logger = JsonlLogger(out)
     try:
-        result = run_one(agent=agent, seed="route-plan", process=process, logger=logger, max_steps=5)
+        result = run_one(
+            agent=agent,
+            seed="route-plan",
+            process=process,
+            logger=logger,
+            log_level="full",
+            max_steps=5,
+        )
     finally:
         logger.close()
 
     assert result.error is None
-    assert agent.seen_states[1]["active_route_plan"]["expected_next"] == {"col": 1, "row": 2, "type": "Elite"}
+    assert agent.calls == 1
+    assert result.extra["forced_singleton_map_count"] == 1
+    rows = _read_jsonl(out)
+    map_decisions = [row for row in rows if row.get("type") == "decision" and row.get("decision") == "map_select"]
+    assert len(map_decisions) == 2
+    assert "runtime_takeover" not in map_decisions[0]
+    assert map_decisions[1]["runtime_takeover"]["model_called"] is False
+    assert "prompt" not in map_decisions[1]
+    map_actions = [row for row in rows if row.get("type") == "action" and row.get("decision") == "map_select"]
+    assert map_actions[1]["agent_meta"]["policy"] == "forced_singleton_map"
+    assert map_actions[1]["agent_meta"]["route_plan_effect"]["outcome"] == "followed_active_plan"
+    events = [row for row in rows if row.get("type") == "route_plan_event"]
+    assert [event["event_type"] for event in events] == ["route_plan_created"]
 
 
 class _RoutePlanScriptAgent:
@@ -1157,7 +1518,10 @@ class _RoutePlanScriptAgent:
         response = self.responses[self.calls]
         self.calls += 1
         action = legal_actions[response["action_index"]]
-        return action, {"agent": "route_plan_script", "parsed": dict(response.get("parsed") or {})}
+        meta = {"agent": "route_plan_script", "parsed": dict(response.get("parsed") or {})}
+        if "raw_response" in response:
+            meta["raw_response"] = response["raw_response"]
+        return action, meta
 
     def receive_external_feedback(self, state, action, meta, feedback, legal_actions):
         self.feedback.append(feedback)
@@ -1190,49 +1554,47 @@ def _read_jsonl(path):
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
-def test_runner_logs_route_plan_created_and_silent_execution(tmp_path):
-    boss_nodes = {(0, 0): "Ancient", (0, 1): "Monster", (1, 2): "Elite", (3, 3): "Boss"}
-    first_map = _full_map(
-        nodes=boss_nodes,
-        edges={(0, 0): [(0, 1)], (0, 1): [(1, 2)], (1, 2): [(3, 3)]},
-    )
-    second_map = _full_map(
-        current=(0, 1),
-        nodes={key: value for key, value in boss_nodes.items() if key != (0, 0)},
-        edges={(0, 1): [(1, 2)], (1, 2): [(3, 3)]},
-    )
+def test_runner_automatically_executes_singleton_map_without_agent_or_prompt(tmp_path):
+    first_map = _full_map(edges={(0, 0): [(0, 1)]})
     process = _RoutePlanProcess(
         [
             _map_state(choices=[{"col": 0, "row": 1, "type": "Monster"}], full_map=first_map),
-            _map_state(choices=[{"col": 1, "row": 2, "type": "Elite"}], full_map=second_map, hp=62),
             {"decision": "game_over", "victory": False, "player": {"hp": 54, "max_hp": 80}},
         ]
     )
-    agent = _RoutePlanScriptAgent(
-        [
-            {
-                "action_index": 5,
-                "parsed": {
-                    "reason": "create route",
-                    "route_plan_event": _event(
-                        "route_plan_created",
-                        [(0, 1, "Monster"), (1, 2, "Elite"), (3, 3, "Boss")],
-                    ),
-                },
-            },
-            {"action_index": 5, "parsed": {"reason": "follow planned elite"}},
-        ]
-    )
+    agent = _RoutePlanScriptAgent([])
     out = tmp_path / "run.jsonl"
     logger = JsonlLogger(out)
     try:
-        result = run_one(agent=agent, seed="route-plan", process=process, logger=logger, max_steps=5)
+        result = run_one(
+            agent=agent,
+            seed="route-plan",
+            process=process,
+            logger=logger,
+            log_level="full",
+            max_steps=2,
+        )
     finally:
         logger.close()
 
     assert result.error is None
+    assert agent.calls == 0
+    assert process.sent == [
+        {"cmd": "action", "action": "select_map_node", "args": {"col": 0, "row": 1}}
+    ]
+    rows = _read_jsonl(out)
+    decision = next(row for row in rows if row.get("type") == "decision")
+    assert decision["runtime_takeover"]["model_called"] is False
+    assert "prompt" not in decision
+    action = next(row for row in rows if row.get("type") == "action")
+    assert action["agent_meta"]["agent"] == "runtime"
+    assert action["agent_meta"]["model_called"] is False
+    assert action["agent_meta"]["route_plan_effect"]["outcome"] == "no_active_plan"
+    assert "parsed" not in action["agent_meta"]
+    assert "run_context_patch" not in action["agent_meta"]
     events = [row for row in _read_jsonl(out) if row.get("type") == "route_plan_event"]
-    assert [event["event_type"] for event in events] == ["route_plan_created"]
+    assert events == []
+    assert not any(row.get("type") == "route_plan_validation_error" for row in rows)
 
 
 def test_runner_can_disable_route_plan_validation(tmp_path):
@@ -1268,13 +1630,20 @@ def test_runner_reasks_when_map_choice_deviates_without_route_plan_update(tmp_pa
     boss_nodes = {
         (0, 0): "Ancient",
         (0, 1): "Monster",
+        (2, 1): "Shop",
         (1, 2): "Elite",
         (2, 2): "RestSite",
         (3, 3): "Boss",
     }
     first_map = _full_map(
         nodes=boss_nodes,
-        edges={(0, 0): [(0, 1)], (0, 1): [(1, 2), (2, 2)], (1, 2): [(3, 3)], (2, 2): [(3, 3)]},
+        edges={
+            (0, 0): [(0, 1), (2, 1)],
+            (0, 1): [(1, 2), (2, 2)],
+            (2, 1): [(2, 2)],
+            (1, 2): [(3, 3)],
+            (2, 2): [(3, 3)],
+        },
     )
     second_map = _full_map(
         current=(0, 1),
@@ -1283,7 +1652,13 @@ def test_runner_reasks_when_map_choice_deviates_without_route_plan_update(tmp_pa
     )
     process = _RoutePlanProcess(
         [
-            _map_state(choices=[{"col": 0, "row": 1, "type": "Monster"}], full_map=first_map),
+            _map_state(
+                choices=[
+                    {"col": 0, "row": 1, "type": "Monster"},
+                    {"col": 2, "row": 1, "type": "Shop"},
+                ],
+                full_map=first_map,
+            ),
             _map_state(
                 choices=[{"col": 1, "row": 2, "type": "Elite"}, {"col": 2, "row": 2, "type": "RestSite"}],
                 full_map=second_map,
@@ -1338,17 +1713,103 @@ def test_runner_reasks_when_map_choice_deviates_without_route_plan_update(tmp_pa
     assert events[-1]["reason_tags"] == ["low_hp", "avoid_elite"]
 
 
+def test_runner_rolls_back_rejected_context_patch_and_logs_raw_attempt(tmp_path):
+    full_map = _full_map(
+        nodes={
+            (0, 0): "Ancient",
+            (0, 1): "Monster",
+            (2, 1): "Shop",
+            (1, 2): "Elite",
+            (3, 3): "Boss",
+        },
+        edges={
+            (0, 0): [(0, 1), (2, 1)],
+            (0, 1): [(1, 2)],
+            (2, 1): [(3, 3)],
+            (1, 2): [(3, 3)],
+        },
+    )
+    process = _RoutePlanProcess(
+        [
+            _map_state(
+                choices=[
+                    {"col": 0, "row": 1, "type": "Monster"},
+                    {"col": 2, "row": 1, "type": "Shop"},
+                ],
+                full_map=full_map,
+            ),
+            {"decision": "game_over", "victory": False, "player": {"hp": 70, "max_hp": 80}},
+        ]
+    )
+    store = RunContextStore(formal_route_plan_enabled=True)
+    occ = _RoutePlanScriptAgent(
+        [
+            {
+                "action_index": 5,
+                "raw_response": "RAW_INVALID_ROUTE_ATTEMPT",
+                "parsed": {
+                    "reason": "invalid attempt without a formal route",
+                    "run_memory_facts": ["rejected fact must be rolled back"],
+                },
+            },
+            {
+                "action_index": 5,
+                "raw_response": "RAW_VALID_ROUTE_ATTEMPT",
+                "parsed": {
+                    "reason": "create valid route after feedback",
+                    "run_memory_facts": ["accepted fact remains"],
+                    "route_plan_event": _event(
+                        "route_plan_created",
+                        [(0, 1, "Monster"), (1, 2, "Elite"), (3, 3, "Boss")],
+                    ),
+                },
+            },
+        ]
+    )
+    agent = CoordinatorAgent(ca_agent=_RoutePlanScriptAgent([]), occ_agent=occ, store=store)
+    out = tmp_path / "run.jsonl"
+    logger = JsonlLogger(out)
+    try:
+        result = run_one(
+            agent=agent,
+            seed="route-plan-rollback",
+            process=process,
+            logger=logger,
+            log_level="full",
+            max_steps=2,
+        )
+    finally:
+        logger.close()
+
+    assert result.error is None
+    fact_texts = [str(item.get("text") or "") for item in store.run_memory.facts]
+    assert "rejected fact must be rolled back" not in fact_texts
+    assert "accepted fact remains" in fact_texts
+    rows = _read_jsonl(out)
+    rejected = [row for row in rows if row.get("type") == "rejected_action"]
+    assert len(rejected) == 1
+    assert rejected[0]["validation"]["code"] == "route_plan_missing_created_event"
+    assert rejected[0]["agent_meta"]["raw_response"] == "RAW_INVALID_ROUTE_ATTEMPT"
+
+
 def test_runner_can_soft_log_route_plan_validation_without_reask(tmp_path):
     boss_nodes = {
         (0, 0): "Ancient",
         (0, 1): "Monster",
+        (2, 1): "Shop",
         (1, 2): "Elite",
         (2, 2): "RestSite",
         (3, 3): "Boss",
     }
     first_map = _full_map(
         nodes=boss_nodes,
-        edges={(0, 0): [(0, 1)], (0, 1): [(1, 2), (2, 2)], (1, 2): [(3, 3)], (2, 2): [(3, 3)]},
+        edges={
+            (0, 0): [(0, 1), (2, 1)],
+            (0, 1): [(1, 2), (2, 2)],
+            (2, 1): [(2, 2)],
+            (1, 2): [(3, 3)],
+            (2, 2): [(3, 3)],
+        },
     )
     second_map = _full_map(
         current=(0, 1),
@@ -1357,7 +1818,13 @@ def test_runner_can_soft_log_route_plan_validation_without_reask(tmp_path):
     )
     process = _RoutePlanProcess(
         [
-            _map_state(choices=[{"col": 0, "row": 1, "type": "Monster"}], full_map=first_map),
+            _map_state(
+                choices=[
+                    {"col": 0, "row": 1, "type": "Monster"},
+                    {"col": 2, "row": 1, "type": "Shop"},
+                ],
+                full_map=first_map,
+            ),
             _map_state(
                 choices=[{"col": 1, "row": 2, "type": "Elite"}, {"col": 2, "row": 2, "type": "RestSite"}],
                 full_map=second_map,

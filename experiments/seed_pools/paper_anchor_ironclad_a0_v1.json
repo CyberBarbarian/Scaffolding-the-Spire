@@ -1,0 +1,8 @@
+[
+  {
+    "seed": "ironclad_a0_3407",
+    "role": "anchor",
+    "holdout": false,
+    "selection_basis": "Known full-game victory under the route-hint-injected Coordinator; designated as the single-seed ablation anchor."
+  }
+]

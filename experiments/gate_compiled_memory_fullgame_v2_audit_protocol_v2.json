@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "protocol": "ordered-delivery-audit-v2",
+  "reason": "The frozen v1 post-run audit recomputes a runtime state key from compact trace state, which intentionally omits engine-only identifiers. Audit v2 preserves the frozen treatment and verifies the ordered decision coordinate plus exact injected prompt-suffix hash instead.",
+  "base_experiment": "experiments/gate_compiled_memory_fullgame_v2.json",
+  "base_experiment_sha256": "D81F9E4B2CE05BA2D6EE865006266DB73A27032613935B03C7897BE47DD39C4A",
+  "frozen_runner": "sts2_bench/repeated_gated_fullgame.py",
+  "frozen_runner_sha256": "D3B8CBEB4B6B58DC2AC82828AA246301A0A7E27D63B83D370928772D52F1199F",
+  "protocol_code": "sts2_bench/repeated_gated_fullgame_audit_v2.py",
+  "protocol_code_sha256": "18B9D68A62465A232F1349537F368D296BD878A1F60912C38D32A8ECF750F826",
+  "allowed_legacy_false_negative_check": "r1_committed_injections_match_trace",
+  "audit_coordinate": [
+    "decision",
+    "act",
+    "floor",
+    "exact_prompt_suffix_sha256"
+  ],
+  "requires_original_order": true,
+  "mutates_treatment": false
+}

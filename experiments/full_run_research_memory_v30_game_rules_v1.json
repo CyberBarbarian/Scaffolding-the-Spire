@@ -1,0 +1,72 @@
+{
+  "schema_version": 2,
+  "extends": "full_run_research_memory_v27_canonical_enemy_tag_table.json",
+  "extends_sha256": "C7EA6866BB7D47E693B97D8DEB59A198A394AEDCBC5F2126142300EF79EB4E98",
+  "overrides": {
+    "experiment_id": "full-run-research-memory-v30-game-rules-v1",
+    "purpose": "Versioned rerun of the V27 single-seed natural-exposure B0/R1 structured-memory pilot after adding the shared neutral official-rules context. Both arms receive the identical state-selected rule modules; only R1 receives the existing structured-memory and reflection treatment. V27 and all earlier results remain immutable historical evidence.",
+    "game_rules": {
+      "ruleset_id": "sts2-official-rules-v1",
+      "ruleset_sha256": "161a83a7b7cf2adc7b91a008079fceb3429f1b90d2dd4dc97d7a9e20ccf2ccb4",
+      "module_ids": [
+        "core_run",
+        "persistent_resources",
+        "combat_cycle",
+        "map_navigation",
+        "room_glossary",
+        "act_transition",
+        "post_combat_rewards",
+        "deckbuilding_choice",
+        "rest_site",
+        "merchant",
+        "event",
+        "crystal_sphere"
+      ],
+      "delivery": "state_selected_prompt",
+      "source": "sts2_bench/game_rules.py"
+    },
+    "rules_rerun_contract": {
+      "historical_results": "invalid_for_rules_v1_comparison_but_preserved",
+      "control_arm": "B0 receives the same game-rules context and no memory/reflection treatment.",
+      "treatment_arm": "R1 receives the same game-rules context plus the frozen V27 structured-memory/reflection treatment.",
+      "planned_output_root": "results/full_run_research_memory_v30_game_rules_v1_20260722"
+    },
+    "freeze": {
+      "baseline_files": {
+        "__replace__": true,
+        "sts2_bench/__init__.py": "E77AB24375CA54CCBF2F4E2243FE7B46960A4ABA4F94B6E0ED49421CED95A250",
+        "sts2_bench/actions.py": "4C075DE4CE6BD41715665434C8AEDD9DB53C8C86F299C995BA9A9ADBFB622726",
+        "sts2_bench/agents.py": "C674C3FF566E35D3F177174148D003B000F098DD511F276D1EBBE01D66C34AB2",
+        "sts2_bench/artifact_lease.py": "893392B316707E17DA524C03DB334D49D83D4CA670ED21932973BAF931308FDD",
+        "sts2_bench/combat_snapshot.py": "302FEA0521FD0BBA08AA847ED1285A0DDD24952EB1EADC264864097449432E1A",
+        "sts2_bench/context.py": "6E17D1B30E8D51ACB2045CC0FA7CB48E42D67BB70F6C5C389873AF883341E338",
+        "sts2_bench/evidence.py": "E73550247782E2E2007AB33EB2795088B47AB03D632EB5DE8761385498FE2A95",
+        "sts2_bench/feedback.py": "B1F37B7DCA117AAF9ED32158268507CF2D6D005ED236D1B8A086069BF567C59E",
+        "sts2_bench/game_rules.py": "4DEF9206577401421EF83ACC5BEF92262DD18A773371542F4607B956257340B4",
+        "sts2_bench/multi_agent.py": "615D5530E13DB3D1F4A11D31398C05CFBBD489B5D8A36E04771949FA5558B5F8",
+        "sts2_bench/posterior.py": "CCB47BD08EC1EF89A8EA12514ED0C001E81BAA03F6486986CC8D14AF34A23A0E",
+        "sts2_bench/reflection_probe.py": "406AAE3B5D303B60F25BD9FC6E5CC7A817A0C44CED274E5D6E35936F1013C6A0",
+        "sts2_bench/route_candidates.py": "BB002BBF2F4D79573E98E07976B38C0C32EC4DF6EE7B8BB5EB79BE789F7F1AD4",
+        "sts2_bench/route_graph.py": "46086136BC097BAFF78F0CC973F99BB9955E45BC6DC46F13050949A541C65E1B",
+        "sts2_bench/route_plan.py": "267AA99D448C604E8C4D536097B63EA6F9F24FD2FDA9C38922AE3CA652EA9F10",
+        "sts2_bench/run_benchmark.py": "E5B645BD9E21A9F20480C369E7C4C66F7190D21EAEF14C068BC859DF943989A7",
+        "sts2_bench/run_context.py": "3E66DF40043791FA19E838BA157EC67D6D4FC276FA7C8E827366B9D2CC19F87E",
+        "sts2_bench/runner.py": "DE89C7D1DE1D168349E7C10D2DFC912B0840926A91090ED8A2932F226E1F9D49",
+        "sts2_bench/routing.py": "3ECFE739C1ABF388593790ED456BF78FA8382A733D95C674478533C0D249C321",
+        "sts2_bench/seeds.py": "AEAA41AF9E95325BCCF25D3160AE74632D37111E4833328D230347CCB113578E",
+        "sts2_bench/sequence_safety.py": "43D38E7055A64A23E30DC0CC658214125F739D3E79C93F4D345ED38068CF6A3A",
+        "sts2_bench/sequence_validation.py": "075D2397ECB12D03C30BA9CD8D82FF9869AF79A98557A15F885368DB6081745C",
+        "sts2_bench/sequences.py": "29B3D8F6D1F3ADC9FAE81A04AD10D9A5A53F40A1943A7A3780974B46ECC40F41",
+        "sts2_bench/trace_analysis.py": "0FBEAB91BE50DA20AAEFE2EE00E9B6460349D66217092958DEB1E2C84A41953D",
+        "sts2_bench/benchmark.yaml": "6353C114F97273431FE8EEB13B1F5F7F937D9649262D33AC3AD4EB36F29A4F26",
+        "sts2_bench/requirements.txt": "4C0887934D80D16ADDA4F540F4996B1B729F0629D2C0E2BA5777AFD2F6901334"
+      },
+      "intervention_files": {
+        "__replace__": true,
+        "sts2_bench/experiment_identity.py": "851F6F8E9860D28B55D7B0BE823D75BEED5EBB230D6AFC6FFF324DB5BD737A68",
+        "sts2_bench/layered_experience.py": "2364E4BB26FDDA3E3F1AA9C6291BA8A61377E3AEAE46BB850BFFADE227074ECD",
+        "sts2_bench/full_reflection_pairs.py": "CCEE24CDCCACEF62524597BEF2D25AC33EE41889EB1DB27B2BAD06EBFF3D1D6C"
+      }
+    }
+  }
+}

@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from .actions import CustomSequenceExposure, LegalAction, build_legal_actions
+from .actions import CustomSequenceExposure, LegalAction, UnsupportedDecisionError, build_legal_actions
 from .agents import Agent
 from .evidence import build_evidence_bundle
 from .process import Sts2Process
@@ -21,7 +21,6 @@ from .runner import (
     LogLevel,
     RoutePlanEnforcement,
     RunResult,
-    _action_log_entry,
     _agent_run_context_store,
     _allow_card_sequences_for_agent,
     _allow_custom_sequences_for_agent,
@@ -34,6 +33,7 @@ from .runner import (
     _decision_log_entry,
     _enemy_snapshot_for_trace,
     _fill_result,
+    _log_executed_action,
     _max_game_actions_reached,
     _record_agent_transition,
     _reset_agent_episode,
@@ -76,14 +76,15 @@ def extract_combat_snapshot(
     rows = _read_jsonl(trace_path)
     start_row = _first_row(rows, "start")
     run_config = next((row.get("config") for row in rows if row.get("type") == "run_config"), {})
-    target_row = next(
+    target_index = next(
         (
-            row
-            for row in rows
+            index
+            for index, row in enumerate(rows)
             if row.get("type") == "decision" and row.get("step") == start_step
         ),
         None,
     )
+    target_row = rows[target_index] if target_index is not None else None
     if target_row is None:
         raise CombatSnapshotError(f"No decision row found at step {start_step} in {trace_path}")
 
@@ -94,7 +95,18 @@ def extract_combat_snapshot(
         )
 
     prefix_actions = []
-    for index, row in enumerate(rows):
+    for index, row in enumerate(rows[:target_index]):
+        if row.get("type") == "setup_action":
+            command = row.get("command")
+            if isinstance(command, dict):
+                prefix_actions.append(
+                    {
+                        "source": "setup_action",
+                        "setup_index": row.get("setup_index"),
+                        "command": _copy_command(command),
+                    }
+                )
+            continue
         if row.get("type") != "action":
             continue
         step = row.get("step")
@@ -120,6 +132,22 @@ def extract_combat_snapshot(
         prefix_actions.append(prefix_item)
 
     game = _game_from_rows(start_row, run_config)
+    authoritative_target_state = target_row.get("authoritative_state")
+    target_state = (
+        authoritative_target_state
+        if isinstance(authoritative_target_state, dict)
+        else target_row.get("state")
+    )
+    if not isinstance(target_state, dict):
+        target_state = {}
+    target_state_summary = (
+        _state_summary(target_state)
+        if isinstance(authoritative_target_state, dict)
+        else target_state
+    )
+    target_last_action_result = target_state.get("last_action_result")
+    if not isinstance(target_last_action_result, dict):
+        target_last_action_result = None
     return {
         "type": "combat_snapshot",
         "version": SNAPSHOT_VERSION,
@@ -133,8 +161,9 @@ def extract_combat_snapshot(
         "target": {
             "step": start_step,
             "decision": target_decision,
-            "state_summary": target_row.get("state") or {},
+            "state_summary": target_state_summary,
             "enemy_snapshot": target_row.get("enemy_snapshot"),
+            "last_action_result": target_last_action_result,
         },
         "stop_policy": {
             "active_decisions": list(DEFAULT_ACTIVE_DECISIONS),
@@ -226,7 +255,39 @@ def replay_snapshot_prefix(
     """Start a run and replay saved labels to the snapshot entry."""
 
     _validate_snapshot(snapshot)
-    proc = process or (process_factory or Sts2Process)()
+    owns_process = process is None
+    proc = process if process is not None else (process_factory or Sts2Process)()
+    try:
+        return _replay_snapshot_prefix_with_process(
+            snapshot,
+            proc=proc,
+            allow_repeat_views=allow_repeat_views,
+            allow_card_sequences=allow_card_sequences,
+            allow_precomputed_card_sequences=allow_precomputed_card_sequences,
+            allow_custom_sequences=allow_custom_sequences,
+            custom_sequence_exposure=custom_sequence_exposure,
+        )
+    except BaseException:
+        if owns_process:
+            close = getattr(proc, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:
+                    pass
+        raise
+
+
+def _replay_snapshot_prefix_with_process(
+    snapshot: dict[str, Any],
+    *,
+    proc: Any,
+    allow_repeat_views: bool,
+    allow_card_sequences: bool,
+    allow_precomputed_card_sequences: bool,
+    allow_custom_sequences: bool,
+    custom_sequence_exposure: CustomSequenceExposure,
+) -> PrefixReplayResult:
     game = snapshot["game"]
     proc.start()
     if _is_save_backed_snapshot(snapshot):
@@ -263,6 +324,14 @@ def replay_snapshot_prefix(
     prefix_actions = snapshot.get("prefix_actions") or []
 
     for item in prefix_actions:
+        raw_command = item.get("command")
+        if isinstance(raw_command, dict):
+            command = _copy_command(raw_command)
+            state = proc.send(command)
+            if isinstance(state, dict) and state.get("type") == "error":
+                raise SnapshotReplayError(state.get("message") or "Headless engine returned an error state")
+            action_tape.append(command)
+            continue
         legal_actions = build_legal_actions(
             state,
             allow_repeat_views=allow_repeat_views,
@@ -298,7 +367,7 @@ def run_combat_snapshot(
     process: Any | None = None,
     process_factory: Callable[[], Any] | None = None,
     logger: JsonlLogger | None = None,
-    max_steps: int = 200,
+    max_steps: int | None = 200,
     max_game_actions: int | None = None,
     allow_repeat_views: bool = False,
     allow_custom_sequences: bool | None = None,
@@ -373,7 +442,9 @@ def run_combat_snapshot(
             }
         )
 
-        for step in range(max_steps):
+        step_limit = None if max_steps is None or max_steps <= 0 else max_steps
+        step = 0
+        while step_limit is None or step < step_limit:
             decision = state.get("decision")
             if decision == "game_over":
                 result.extra["snapshot_outcome"] = "game_over"
@@ -384,14 +455,32 @@ def run_combat_snapshot(
                 _fill_result(result, state)
                 return result
 
-            legal_actions = build_legal_actions(
-                state,
-                allow_repeat_views=allow_repeat_views,
-                allow_card_sequences=card_sequences_enabled,
-                allow_precomputed_card_sequences=precomputed_card_sequences_enabled,
-                allow_custom_sequences=custom_sequences_enabled,
-                custom_sequence_exposure=custom_sequence_exposure,
-            )
+            try:
+                legal_actions = build_legal_actions(
+                    state,
+                    allow_repeat_views=allow_repeat_views,
+                    allow_card_sequences=card_sequences_enabled,
+                    allow_precomputed_card_sequences=precomputed_card_sequences_enabled,
+                    allow_custom_sequences=custom_sequences_enabled,
+                    custom_sequence_exposure=custom_sequence_exposure,
+                )
+            except UnsupportedDecisionError as exc:
+                result.invalid_states += 1
+                if logger:
+                    decision_entry = _decision_log_entry(
+                        log_level=log_level,
+                        step=step,
+                        state=state,
+                        legal_actions=[],
+                        prompt=None,
+                    )
+                    if decision_entry:
+                        decision_entry["snapshot_id"] = snapshot.get("snapshot_id")
+                        decision_entry["snapshot_entry_step"] = snapshot.get("target", {}).get("step")
+                        decision_entry["decision_error"] = str(exc)
+                        decision_entry["report_required"] = True
+                        logger.write(decision_entry)
+                raise
             evidence_bundle = build_evidence_bundle(
                 state,
                 legal_actions,
@@ -414,12 +503,22 @@ def run_combat_snapshot(
 
             if not legal_actions:
                 result.invalid_states += 1
-                result.game_action_count += 1
-                result.steps = step + 1
-                state = proc.send({"cmd": "action", "action": "proceed"})
-                if _max_game_actions_reached(result, max_game_actions, state):
-                    return result
-                continue
+                error = (
+                    f"recognized snapshot decision {decision!r} exposed no legal actions; "
+                    "refusing implicit proceed"
+                )
+                logger and logger.write(
+                    {
+                        "type": "decision_error",
+                        "step": step,
+                        "decision": decision,
+                        "snapshot_id": snapshot.get("snapshot_id"),
+                        "snapshot_entry_step": snapshot.get("target", {}).get("step"),
+                        "error": error,
+                        "report_required": True,
+                    }
+                )
+                raise UnsupportedDecisionError(error)
 
             if print_prompts:
                 print(f"\n===== SNAPSHOT PROMPT step={step} decision={decision} =====")
@@ -448,17 +547,6 @@ def run_combat_snapshot(
                 route_plan_enforcement=route_plan_enforcement,
                 evidence_bundle=evidence_bundle,
             )
-            if logger:
-                action_entry = _action_log_entry(
-                    log_level=log_level,
-                    step=step,
-                    decision=decision,
-                    action=action,
-                    meta=meta,
-                )
-                action_entry["snapshot_id"] = snapshot.get("snapshot_id")
-                action_entry["command"] = action.command
-                logger.write(action_entry)
             if validation_error:
                 result.invalid_states += 1
                 result.error = validation_error
@@ -475,8 +563,21 @@ def run_combat_snapshot(
                 meta=meta,
                 result=result,
             )
+            _log_executed_action(
+                logger=logger,
+                log_level=log_level,
+                step=step,
+                decision=decision,
+                action=action,
+                meta=meta,
+                extra={
+                    "snapshot_id": snapshot.get("snapshot_id"),
+                    "snapshot_entry_step": snapshot.get("target", {}).get("step"),
+                },
+            )
             if _max_game_actions_reached(result, max_game_actions, state):
                 return result
+            step += 1
 
         result.truncated = True
         result.extra["truncation_reason"] = f"max_steps exceeded ({max_steps})"
@@ -687,6 +788,15 @@ def _assert_target_matches(snapshot: dict[str, Any], state: dict[str, Any]) -> N
     if mismatches:
         raise SnapshotReplayError("Prefix replay target state mismatch: " + "; ".join(mismatches[:8]))
 
+    if "last_action_result" in target:
+        expected_last_action_result = target.get("last_action_result")
+        actual_last_action_result = state.get("last_action_result")
+        if actual_last_action_result != expected_last_action_result:
+            raise SnapshotReplayError(
+                "Prefix replay last_action_result mismatch: "
+                f"expected {expected_last_action_result!r}, got {actual_last_action_result!r}"
+            )
+
     expected_enemies = target.get("enemy_snapshot")
     if expected_enemies is not None:
         actual_enemies = _enemy_snapshot_for_trace(state)
@@ -869,12 +979,13 @@ def main(argv: list[str] | None = None) -> int:
             llm_temperature=args.llm_temperature,
             include_json_state=args.include_json_state,
             prompt_style=args.prompt_style,
-            memory_enabled=args.memory_enabled,
-            memory_window=args.memory_window,
-            memory_mode=args.memory_mode,
+            short_term_memory_enabled=args.short_term_memory_enabled,
+            short_term_memory_window=args.short_term_memory_window,
+            short_term_memory_mode=args.short_term_memory_mode,
             run_summary_enabled=args.run_summary,
             conversation_mode=conversation_mode,
             turn_chat_window=args.turn_chat_window,
+            combat_dialogue_history_turns=args.combat_dialogue_history_turns,
             turn_chat_update_mode="delta",
             turn_chat_assistant_history="compact",
             turn_chat_plan_enabled=args.turn_check,
@@ -886,15 +997,16 @@ def main(argv: list[str] | None = None) -> int:
             self_consistency_samples=args.self_consistency_samples,
             self_consistency_decisions=args.self_consistency_decisions,
             self_consistency_mode=args.self_consistency_mode,
-            reflection_enabled=args.reflection_enabled,
-            reflection_decisions=args.reflection_decisions,
-            reflection_mode=args.reflection_mode,
-            reflection_max_options=args.reflection_max_options,
             action_prompt_order=args.action_prompt_order,
             action_prompt_order_seed=args.action_prompt_order_seed,
             combat_card_sequences_enabled=args.combat_card_sequences,
             combat_reasoning_pool_enabled=args.combat_reasoning_pool,
             combat_turn_board_enabled=args.combat_turn_board,
+            combat_skill_hints_enabled=args.combat_skill_hints,
+            combat_skill_hints_profile=args.combat_skill_hints_profile,
+            combat_skill_hints_max_hints=args.combat_skill_hints_max_hints,
+            combat_skill_lines_enabled=args.combat_skill_lines,
+            rule_projection_and_recent_changes_enabled=args.rule_projection_and_recent_changes_enabled,
         )
         result = run_combat_snapshot(
             snapshot=snapshot,
@@ -923,7 +1035,11 @@ def _add_run_args(parser: argparse.ArgumentParser) -> None:
     from .run_benchmark import env_bool, env_float, env_int, env_str, load_benchmark_env
 
     load_benchmark_env()
-    parser.add_argument("--agent", choices=["random", "llm", "coordinator"], default=env_str("STS2_BENCH_AGENT", "random"))
+    parser.add_argument(
+        "--agent",
+        choices=["random", "llm", "coordinator", "formal_generalist"],
+        default=env_str("STS2_BENCH_AGENT", "random"),
+    )
     parser.add_argument("--base-url", default=env_str("STS2_BENCH_BASE_URL"))
     parser.add_argument("--model", default=env_str("STS2_BENCH_MODEL"))
     parser.add_argument("--api-key", default=env_str("DEEPSEEK_API_KEY", "local", fallbacks=("OPENAI_API_KEY",)))
@@ -933,24 +1049,41 @@ def _add_run_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--llm-temperature", type=float, default=env_float("STS2_BENCH_LLM_TEMPERATURE", 0.0))
     parser.add_argument("--prompt-style", choices=["default", "analysis"], default=env_str("STS2_BENCH_PROMPT_STYLE", "default"))
     parser.add_argument("--include-json-state", action=argparse.BooleanOptionalAction, default=env_bool("STS2_BENCH_INCLUDE_JSON_STATE", False))
-    parser.add_argument("--memory-enabled", action=argparse.BooleanOptionalAction, default=env_bool("STS2_BENCH_MEMORY_ENABLED", False))
-    parser.add_argument("--memory-window", type=int, default=env_int("STS2_BENCH_MEMORY_WINDOW", 8))
-    parser.add_argument("--memory-mode", choices=["action_reason", "factual_diff"], default=env_str("STS2_BENCH_MEMORY_MODE", "action_reason"))
+    parser.add_argument("--short-term-memory", action=argparse.BooleanOptionalAction, dest="short_term_memory_enabled", default=env_bool("STS2_BENCH_SHORT_TERM_MEMORY_ENABLED", False))
+    parser.add_argument("--short-term-memory-window", type=int, default=env_int("STS2_BENCH_SHORT_TERM_MEMORY_WINDOW", 8))
+    parser.add_argument("--short-term-memory-mode", choices=["action_reason", "factual_diff"], default=env_str("STS2_BENCH_SHORT_TERM_MEMORY_MODE", "action_reason"))
     parser.add_argument("--run-summary", action=argparse.BooleanOptionalAction, default=env_bool("STS2_BENCH_RUN_SUMMARY_ENABLED", True))
-    parser.add_argument("--context-mode", choices=["single_turn", "turn_chat", "combat_mdp_state"], default=env_str("STS2_BENCH_CONTEXT_MODE", "combat_mdp_state"))
+    parser.add_argument(
+        "--context-mode",
+        choices=[
+            "single_turn",
+            "turn_chat",
+            "combat_mdp_state",
+            "combat_state_only",
+            "combat_dialogue",
+        ],
+        default=env_str("STS2_BENCH_CONTEXT_MODE", "combat_mdp_state"),
+    )
     parser.add_argument("--turn-chat-window", type=int, default=env_int("STS2_BENCH_TURN_CHAT_WINDOW", 4))
+    parser.add_argument(
+        "--combat-dialogue-history-turns",
+        type=int,
+        default=env_int("STS2_BENCH_COMBAT_DIALOGUE_HISTORY_TURNS", 3),
+    )
     parser.add_argument("--turn-check", action=argparse.BooleanOptionalAction, default=env_bool("STS2_BENCH_TURN_CHECK_ENABLED", False))
     parser.add_argument("--route-plan", action=argparse.BooleanOptionalAction, dest="route_plan_enabled", default=env_bool("STS2_BENCH_ROUTE_PLAN_ENABLED", False))
     parser.add_argument("--route-plan-enforcement", choices=["hard", "soft"], default=env_str("STS2_BENCH_ROUTE_PLAN_ENFORCEMENT", "hard"))
     parser.add_argument("--reward-posterior-evaluator", action=argparse.BooleanOptionalAction, default=env_bool("STS2_BENCH_REWARD_POSTERIOR_EVALUATOR", True))
+    parser.add_argument(
+        "--rule-projection-and-recent-changes",
+        action=argparse.BooleanOptionalAction,
+        dest="rule_projection_and_recent_changes_enabled",
+        default=env_bool("STS2_BENCH_RULE_PROJECTION_AND_RECENT_CHANGES", True),
+    )
     parser.add_argument("--self-consistency", action=argparse.BooleanOptionalAction, dest="self_consistency_enabled", default=env_bool("STS2_BENCH_SELF_CONSISTENCY", False))
     parser.add_argument("--self-consistency-samples", type=int, default=env_int("STS2_BENCH_SELF_CONSISTENCY_SAMPLES", 3))
     parser.add_argument("--self-consistency-decisions", default=env_str("STS2_BENCH_SELF_CONSISTENCY_DECISIONS", "combat_play"))
     parser.add_argument("--self-consistency-mode", choices=["diagnostic", "majority_vote"], default=env_str("STS2_BENCH_SELF_CONSISTENCY_MODE", "diagnostic"))
-    parser.add_argument("--reflection-verifier", action=argparse.BooleanOptionalAction, dest="reflection_enabled", default=env_bool("STS2_BENCH_REFLECTION_VERIFIER", False))
-    parser.add_argument("--reflection-decisions", default=env_str("STS2_BENCH_REFLECTION_DECISIONS", "combat_play"))
-    parser.add_argument("--reflection-mode", choices=["diagnostic", "verifier_vote"], default=env_str("STS2_BENCH_REFLECTION_MODE", "diagnostic"))
-    parser.add_argument("--reflection-max-options", type=int, default=env_int("STS2_BENCH_REFLECTION_MAX_OPTIONS", 8))
     parser.add_argument("--action-prompt-order", choices=["default", "shuffle_map"], default=env_str("STS2_BENCH_ACTION_PROMPT_ORDER", "default"))
     parser.add_argument("--action-prompt-order-seed", type=int, default=env_int("STS2_BENCH_ACTION_PROMPT_ORDER_SEED", 0))
     parser.add_argument("--allow-repeat-views", action=argparse.BooleanOptionalAction, default=env_bool("STS2_BENCH_ALLOW_REPEAT_VIEWS", False))
@@ -975,7 +1108,18 @@ def _add_run_args(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument("--combat-reasoning-pool", action=argparse.BooleanOptionalAction, default=env_bool("STS2_BENCH_COMBAT_REASONING_POOL", False))
     parser.add_argument("--combat-turn-board", action=argparse.BooleanOptionalAction, default=env_bool("STS2_BENCH_COMBAT_TURN_BOARD", False))
+    parser.add_argument("--combat-skill-hints", action=argparse.BooleanOptionalAction, default=env_bool("STS2_BENCH_COMBAT_SKILL_HINTS", False))
+    parser.add_argument("--combat-skill-hints-profile", choices=["baseline", "survival", "targeting", "full"], default=env_str("STS2_BENCH_COMBAT_SKILL_HINTS_PROFILE", "baseline"))
+    parser.add_argument("--combat-skill-hints-max-hints", type=int, default=env_int("STS2_BENCH_COMBAT_SKILL_HINTS_MAX_HINTS", 4))
+    parser.add_argument("--combat-skill-lines", action=argparse.BooleanOptionalAction, default=env_bool("STS2_BENCH_COMBAT_SKILL_LINES", True))
     parser.add_argument("--max-steps", type=int, default=80)
+    parser.add_argument(
+        "--no-max-steps",
+        dest="max_steps",
+        action="store_const",
+        const=0,
+        help="Run until natural combat termination without a combat step cap.",
+    )
     parser.add_argument("--max-game-actions", type=int, default=0)
     parser.add_argument("--out")
     parser.add_argument("--log-level", choices=["metrics", "decisions", "full"], default=env_str("STS2_BENCH_LOG_LEVEL", "decisions"))
@@ -995,14 +1139,33 @@ def _snapshot_run_config(args: argparse.Namespace, snapshot: dict[str, Any]) -> 
             "llm_timeout": args.llm_timeout,
             "llm_max_retries": args.llm_max_retries,
             "context_mode": args.context_mode,
+            "combat_context": {
+                "variant": args.context_mode,
+                "dialogue_history_turns": args.combat_dialogue_history_turns,
+                "history_representation": {
+                    "combat_state_only": "none",
+                    "combat_dialogue": "raw_dialogue",
+                    "combat_mdp_state": "managed_structured",
+                    "turn_chat": "legacy_turn_chat",
+                    "single_turn": "legacy_none",
+                }[args.context_mode],
+            },
             "turn_check": args.turn_check,
             "route_plan_enabled": args.route_plan_enabled,
             "route_plan_enforcement": args.route_plan_enforcement,
             "self_consistency_enabled": args.self_consistency_enabled,
-            "reflection_enabled": args.reflection_enabled,
             "action_prompt_order": args.action_prompt_order,
             "combat_reasoning_pool": args.combat_reasoning_pool,
             "combat_turn_board": args.combat_turn_board,
+            "combat_skill_lines": args.combat_skill_lines,
+            "rule_projection_and_recent_changes": {
+                "enabled": args.rule_projection_and_recent_changes_enabled,
+            },
+            "combat_skill_hints": {
+                "enabled": args.combat_skill_hints,
+                "profile": args.combat_skill_hints_profile,
+                "max_hints": args.combat_skill_hints_max_hints,
+            },
         },
         "runner": {
             "allow_custom_sequences": args.allow_custom_sequences,

@@ -17,6 +17,33 @@ LOW_HP_RATIO = 0.60
 LARGE_LOSS_HP = 20
 LARGE_LOSS_RATIO = 0.25
 ROUTE_PLAN_STAGE_COLORS = ["#2166ac", "#b2182b", "#1b9e77", "#7570b3", "#e6ab02"]
+TRACE_ANALYSIS_MARKER = ".sts2-trace-analysis-root"
+TRACE_ANALYSIS_MARKER_CONTENT = "sts2_trace_analysis_root_v1\n"
+
+
+def _prepare_trace_analysis_dir(out_path: Path) -> None:
+    if out_path.exists():
+        if not out_path.is_dir():
+            raise FileExistsError(f"Trace analysis output exists and is not a directory: {out_path}")
+        entries = list(out_path.iterdir())
+        if entries:
+            marker = out_path / TRACE_ANALYSIS_MARKER
+            try:
+                marker_content = marker.read_text(encoding="utf-8")
+            except OSError as exc:
+                raise FileExistsError(
+                    f"Refusing to write trace analysis into a non-empty unowned directory: {out_path}"
+                ) from exc
+            if marker_content != TRACE_ANALYSIS_MARKER_CONTENT:
+                raise FileExistsError(
+                    f"Refusing to write trace analysis into a non-empty unowned directory: {out_path}"
+                )
+    else:
+        out_path.mkdir(parents=True, exist_ok=False)
+    (out_path / TRACE_ANALYSIS_MARKER).write_text(
+        TRACE_ANALYSIS_MARKER_CONTENT,
+        encoding="utf-8",
+    )
 
 
 def analyze_trace(
@@ -31,7 +58,7 @@ def analyze_trace(
 
     trace = _load_trace(Path(trace_path))
     out_path = Path(out_dir)
-    out_path.mkdir(parents=True, exist_ok=True)
+    _prepare_trace_analysis_dir(out_path)
 
     report = _build_report(
         trace,
@@ -65,7 +92,7 @@ def analyze_benchmark_trace(
 
     source = Path(trace_path)
     out_path = Path(out_dir)
-    out_path.mkdir(parents=True, exist_ok=True)
+    _prepare_trace_analysis_dir(out_path)
 
     run_paths = _write_split_run_traces(source, out_path)
     if not run_paths:
@@ -177,8 +204,10 @@ def _load_trace(path: Path) -> dict[str, Any]:
         if event_type == "start":
             start = obj
         elif event_type == "decision":
-            last_decision = obj
-            decisions.append({"line_no": index, "obj": obj, "state": obj.get("state") or {}})
+            authoritative_state = obj.get("authoritative_state")
+            logged_state = authoritative_state if isinstance(authoritative_state, dict) else obj.get("state") or {}
+            last_decision = {**obj, "state": logged_state}
+            decisions.append({"line_no": index, "obj": obj, "state": logged_state})
         elif event_type == "action":
             action = obj.get("action") or {}
             record = {
@@ -193,13 +222,18 @@ def _load_trace(path: Path) -> dict[str, Any]:
                 "before_decision": last_decision,
                 "before_state": (last_decision or {}).get("state") or {},
                 "legal_actions": (last_decision or {}).get("legal_actions") or [],
+                "logged_after_state": obj.get("state_after") if isinstance(obj.get("state_after"), dict) else None,
             }
             actions.append(record)
         elif event_type == "result":
             result = obj.get("result") or {}
 
     for action in actions:
-        action["after_state"] = _next_state_after(decisions, action["line_no"]) or _result_state(result)
+        action["after_state"] = (
+            action.get("logged_after_state")
+            or _next_state_after(decisions, action["line_no"])
+            or _result_state(result)
+        )
 
     return {
         "path": path,
@@ -222,6 +256,11 @@ def _next_state_after(decisions: list[dict[str, Any]], line_no: int) -> dict[str
 def _result_state(result: dict[str, Any] | None) -> dict[str, Any]:
     if not result:
         return {}
+    extra = result.get("extra") if isinstance(result.get("extra"), dict) else {}
+    for key in ("authoritative_terminal_state", "last_observed_state"):
+        state = extra.get(key)
+        if isinstance(state, dict):
+            return state
     return {
         "decision": result.get("decision"),
         "act": result.get("act"),
@@ -251,11 +290,14 @@ def _build_report(
     rooms = _extract_rooms(actions)
     map_choices = _extract_map_choices(actions)
     card_rewards = _extract_card_rewards(actions)
+    bundle_selections = _extract_bundle_selections(actions)
     rest_sites = _extract_rest_sites(actions)
     shops = _extract_shops(actions)
     start = trace.get("start") or {}
     result = trace.get("result") or {}
     final_deck = _extract_final_deck(actions, result, start)
+    terminal_state = _result_state(result)
+    final_inventory = _terminal_inventory(result, terminal_state)
     route_plan_events = _extract_route_plan_events(trace["entries"])
     route_plan_validation_errors = _extract_route_plan_validation_errors(trace["entries"])
     high_risk_events = _extract_high_risk_events(map_choices, low_hp_ratio=low_hp_ratio)
@@ -289,12 +331,29 @@ def _build_report(
         "map_choices": map_choices,
         "rooms": rooms,
         "card_rewards": card_rewards,
+        "bundle_selections": bundle_selections,
         "final_deck": final_deck,
+        "final_inventory": final_inventory,
+        "terminal_state": terminal_state,
         "rest_sites": rest_sites,
         "shops": shops,
         "route_plan_events": route_plan_events,
         "route_plan_validation_errors": route_plan_validation_errors,
         "high_risk_events": high_risk_events,
+    }
+
+
+def _terminal_inventory(result: dict[str, Any], terminal_state: dict[str, Any]) -> dict[str, Any]:
+    extra = result.get("extra") if isinstance(result.get("extra"), dict) else {}
+    authoritative = isinstance(extra.get("authoritative_terminal_state"), dict)
+    player = terminal_state.get("player") if isinstance(terminal_state.get("player"), dict) else {}
+    return {
+        "source": "authoritative_terminal_state" if authoritative else "result_summary",
+        "deck_size": player.get("deck_size", result.get("deck_size")),
+        "relics": list(player.get("relics") or []),
+        "potions": list(player.get("potions") or []),
+        "potion_slots": player.get("potion_slots"),
+        "potion_empty_slots": player.get("potion_empty_slots"),
     }
 
 
@@ -501,9 +560,64 @@ def _extract_card_rewards(actions: list[dict[str, Any]]) -> list[dict[str, Any]]
     return rewards
 
 
+def _extract_bundle_selections(actions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    selections = []
+    for action in actions:
+        state = action.get("before_state") or {}
+        if state.get("decision") != "bundle_select" and action.get("kind") != "bundle_select":
+            continue
+
+        command = (action.get("action") or {}).get("cmd") or (action.get("obj") or {}).get("command") or {}
+        args = command.get("args") if isinstance(command.get("args"), dict) else {}
+        bundle_index = args.get("bundle_index")
+        if bundle_index is None:
+            match = re.search(r"select bundle\s+(\d+)", str(action.get("label") or ""), flags=re.IGNORECASE)
+            bundle_index = int(match.group(1)) if match else None
+
+        selected_bundle = None
+        for bundle in state.get("bundles") or state.get("options") or []:
+            if not isinstance(bundle, dict):
+                continue
+            if bundle.get("index") == bundle_index or str(bundle.get("index")) == str(bundle_index):
+                selected_bundle = bundle
+                break
+        engine_cards = [
+            dict(card)
+            for card in (selected_bundle or {}).get("cards") or []
+            if isinstance(card, dict)
+        ]
+        cards = [card_name for card_name in (_card_name(card) for card in engine_cards) if card_name]
+        if not cards:
+            cards = _bundle_card_names_from_label(action.get("label"))
+        selections.append(
+            {
+                "step": action.get("step"),
+                **_position_info(state),
+                **_hp_info(state),
+                "bundle_index": bundle_index,
+                "selected": action.get("label"),
+                "cards": cards,
+                "cards_zh": [_card_zh_name(card) for card in cards],
+                "cards_bilingual": [_card_bilingual_name(card) for card in cards],
+                "engine_cards": engine_cards,
+            }
+        )
+    return selections
+
+
+def _bundle_card_names_from_label(label: Any) -> list[str]:
+    match = re.search(r"select bundle\s+\d+\s*:\s*(.+)$", str(label or ""), flags=re.IGNORECASE)
+    if not match:
+        return []
+    return [card.strip() for card in match.group(1).split(",") if card.strip()]
+
+
 def _extract_final_deck(actions: list[dict[str, Any]], result: dict[str, Any], start: dict[str, Any] | None = None) -> dict[str, Any]:
-    initial_deck = _initial_deck_from_first_card_select(actions)
-    initial_source = "trace_card_select"
+    initial_deck = _initial_deck_from_first_state(actions)
+    initial_source = "trace_initial_state"
+    if not initial_deck:
+        initial_deck = _initial_deck_from_first_card_select(actions)
+        initial_source = "trace_card_select"
     if not initial_deck:
         initial_deck = _starter_deck_for_character((result or {}).get("character") or (start or {}).get("character"))
         initial_source = "starter_deck_fallback" if initial_deck else "unavailable"
@@ -537,6 +651,17 @@ def _extract_final_deck(actions: list[dict[str, Any]], result: dict[str, Any], s
             }
         )
 
+    terminal_cards = _authoritative_terminal_deck(result)
+    if terminal_cards is not None:
+        return _authoritative_final_deck_report(
+            terminal_cards,
+            initial_deck=initial_deck,
+            initial_source=initial_source,
+            result=result,
+            events=events,
+            warnings=warnings,
+        )
+
     counts = Counter(deck)
     return {
         "source": "reconstructed_from_trace_deck_changes",
@@ -557,9 +682,98 @@ def _extract_final_deck(actions: list[dict[str, Any]], result: dict[str, Any], s
     }
 
 
+def _authoritative_terminal_deck(result: dict[str, Any]) -> list[dict[str, Any]] | None:
+    terminal = _result_state(result)
+    if terminal.get("decision") != "game_over":
+        return None
+    player = terminal.get("player") if isinstance(terminal.get("player"), dict) else {}
+    deck = player.get("deck")
+    if not isinstance(deck, list) or not all(isinstance(card, dict) for card in deck):
+        return None
+    return [dict(card) for card in deck]
+
+
+def _authoritative_final_deck_report(
+    cards: list[dict[str, Any]],
+    *,
+    initial_deck: list[str],
+    initial_source: str,
+    result: dict[str, Any],
+    events: list[dict[str, Any]],
+    warnings: list[str],
+) -> dict[str, Any]:
+    records = [_authoritative_card_record(card) for card in cards]
+    counts = Counter((record["name"], record["upgrade_level"]) for record in records)
+    result_deck_size = result.get("deck_size")
+    if result_deck_size not in (None, len(cards)):
+        warnings.append(
+            f"Authoritative terminal deck has {len(cards)} cards but result deck_size is {result_deck_size}"
+        )
+    count_rows = []
+    for (card_name, upgrade_level), count in sorted(
+        counts.items(),
+        key=lambda item: (_card_zh_name(item[0][0]), item[0][0], item[0][1]),
+    ):
+        record = _localized_card(card_name)
+        record["upgrade_level"] = upgrade_level
+        record["bilingual"] = _upgraded_bilingual(record["bilingual"], upgrade_level)
+        record["count"] = count
+        count_rows.append(record)
+    return {
+        "source": "authoritative_terminal_state",
+        "initial_source": initial_source,
+        "initial_size": len(initial_deck),
+        "size": len(cards),
+        "result_deck_size": result_deck_size,
+        "matches_result_deck_size": result_deck_size in (None, len(cards)),
+        "unique_count": len(counts),
+        "unmapped": sorted({record["name"] for record in records if not _card_has_zh_mapping(record["name"])}),
+        "cards": records,
+        "counts": count_rows,
+        "engine_card_objects": cards,
+        "events": events,
+        "warnings": warnings,
+    }
+
+
+def _authoritative_card_record(card: dict[str, Any]) -> dict[str, Any]:
+    card_name = _card_name(card) or "?"
+    raw_upgrade = card.get("upgrade_level", card.get("upgraded", 0))
+    try:
+        upgrade_level = int(raw_upgrade or 0)
+    except (TypeError, ValueError):
+        upgrade_level = 0
+    record = _localized_card(card_name)
+    record["upgrade_level"] = upgrade_level
+    record["bilingual"] = _upgraded_bilingual(record["bilingual"], upgrade_level)
+    record["engine_card"] = card
+    return record
+
+
+def _upgraded_bilingual(label: str, upgrade_level: int) -> str:
+    if upgrade_level <= 0:
+        return label
+    suffix = "+" if upgrade_level == 1 else f"+{upgrade_level}"
+    return f"{label}{suffix}"
+
+
 def _starter_deck_for_character(character: Any) -> list[str]:
     if str(character or "") == "Ironclad":
         return ["Strike"] * 5 + ["Defend"] * 4 + ["Bash"]
+    return []
+
+
+def _initial_deck_from_first_state(actions: list[dict[str, Any]]) -> list[str]:
+    """Use the first complete engine-exported deck, independent of character."""
+
+    for action in actions:
+        state = action.get("before_state") or {}
+        deck = _deck_from_state(state)
+        deck_size = _deck_size_info(state)
+        if deck and (deck_size is None or len(deck) == deck_size):
+            return deck
+        if _deck_changes_after_action(action):
+            break
     return []
 
 
@@ -587,7 +801,24 @@ def _deck_from_state(state: dict[str, Any]) -> list[str]:
     raw_deck = player.get("deck") or state.get("deck")
     if not isinstance(raw_deck, list):
         return []
-    return [name for name in (_card_name(card) for card in raw_deck) if name]
+    return [name for name in (_deck_card_name(card) for card in raw_deck) if name]
+
+
+def _deck_card_name(card: Any) -> str | None:
+    card_name = _card_name(card)
+    if card_name is None or not isinstance(card, dict):
+        return card_name
+    raw_upgrade = card.get("upgrade_level", card.get("upgraded", 0))
+    if raw_upgrade is True:
+        upgrade_level = 1
+    else:
+        try:
+            upgrade_level = int(raw_upgrade or 0)
+        except (TypeError, ValueError):
+            upgrade_level = 0
+    if upgrade_level <= 0:
+        return card_name
+    return card_name + ("+" if upgrade_level == 1 else f"+{upgrade_level}")
 
 
 def _initial_deck_from_card_select_actions(legal_actions: list[dict[str, Any]], *, deck_size: int | None) -> list[str]:
@@ -999,6 +1230,11 @@ def _write_replay_markdown(report: dict[str, Any], path: Path) -> None:
             f"- step {reward.get('step')} offered {offered} -> `{selected}`"
         )
 
+    lines.extend(["", "## Bundle Selections", ""])
+    for selection in report.get("bundle_selections") or []:
+        cards = selection.get("cards_bilingual") or selection.get("cards") or []
+        lines.append(f"- step {selection.get('step')} bundle {selection.get('bundle_index')}: {cards}")
+
     lines.extend(["", "## Rest Sites", ""])
     for rest in report.get("rest_sites") or []:
         suffix = f"; smith `{rest.get('smith_card')}`" if rest.get("smith_card") else ""
@@ -1031,14 +1267,22 @@ def _write_replay_markdown(report: dict[str, Any], path: Path) -> None:
 def _write_deck_and_card_rewards_markdown(report: dict[str, Any], path: Path) -> None:
     final_deck = report.get("final_deck") or {}
     card_rewards = report.get("card_rewards") or []
+    bundle_selections = report.get("bundle_selections") or []
+    authoritative_deck = final_deck.get("source") == "authoritative_terminal_state"
+    deck_note = (
+        "- 说明: 终局牌组直接读取自 Headless 返回的完整 game_over 状态；选牌和牌组变化事件仍按轨迹整理。"
+        if authoritative_deck
+        else "- 说明: 轨迹没有权威终局牌组，本文件只能用初始牌组和后续 `deck:` 变更重构。"
+    )
+    deck_heading = "## 终局牌组（引擎终局状态）" if authoritative_deck else "## 终局牌组（重构）"
     lines = [
         "# 终局牌组与选牌事件（中文）",
         "",
         f"- Source trace: `{report.get('source')}`",
-        "- 说明: trace 的 `view_deck` 只记录 deck_size 和 viewed 标记，没有展开完整牌组；本文件用初始牌组和后续 `deck:` 变更重构终局牌组。",
+        deck_note,
         "- 中文名来源: `localization_eng/cards.json` title 反查 key，再从 `localization_zhs/cards.json` 读取官方简中 title。",
         "",
-        "## 终局牌组（重构）",
+        deck_heading,
         "",
         f"- 初始牌组张数: {final_deck.get('initial_size', 0)}",
         f"- 终局牌组张数: {final_deck.get('size', 0)}",
@@ -1047,11 +1291,13 @@ def _write_deck_and_card_rewards_markdown(report: dict[str, Any], path: Path) ->
         f"- 终局不同牌名数: {final_deck.get('unique_count', 0)}",
         f"- 未映射牌名: {', '.join(final_deck.get('unmapped') or []) if final_deck.get('unmapped') else '无'}",
         "",
-        "| 中文牌名 | English | 数量 |",
-        "|---|---|---:|",
+        "| 中文牌名 | English | 升级 | 数量 |",
+        "|---|---|---:|---:|",
     ]
     for item in final_deck.get("counts") or []:
-        lines.append(f"| {item.get('name_zh')} | {item.get('name')} | {item.get('count')} |")
+        lines.append(
+            f"| {item.get('name_zh')} | {item.get('name')} | {item.get('upgrade_level', 0)} | {item.get('count')} |"
+        )
 
     lines.extend(["", "### 终局完整列表", ""])
     for index, card in enumerate(final_deck.get("cards") or [], start=1):
@@ -1079,6 +1325,24 @@ def _write_deck_and_card_rewards_markdown(report: dict[str, Any], path: Path) ->
         if reward.get("unopened"):
             selected = f"{selected}<br>（未打开 card_reward，trace 没有候选牌）"
         lines.append(f"| {index} | {reward.get('step')} | {pos} | {hp_text} | {offered} | **{selected}** |")
+
+    lines.extend(
+        [
+            "",
+            "## Bundle Select 卡牌包获得",
+            "",
+            "| # | Step | 位置 | HP | Bundle | 获得卡牌（中文 / English） |",
+            "|---:|---:|---|---:|---:|---|",
+        ]
+    )
+    for index, selection in enumerate(bundle_selections, start=1):
+        pos = f"A{selection.get('act')}F{selection.get('floor')} {selection.get('room_type')}"
+        hp_text = f"{selection.get('hp')}/{selection.get('max_hp')}"
+        cards = "<br>".join(selection.get("cards_bilingual") or selection.get("cards") or [])
+        lines.append(
+            f"| {index} | {selection.get('step')} | {pos} | {hp_text} | "
+            f"{selection.get('bundle_index')} | {cards} |"
+        )
 
     lines.extend(
         [

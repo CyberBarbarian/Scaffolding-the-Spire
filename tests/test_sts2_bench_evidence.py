@@ -178,6 +178,69 @@ def test_render_evidence_context_states_advisory_contract_and_no_scores():
     assert "skip card reward" in rendered
 
 
+def test_card_select_evidence_preserves_exact_subset_facts_without_repeating_combinations():
+    state = {
+        "decision": "card_select",
+        "min_select": 4,
+        "max_select": 4,
+        "can_skip": False,
+        "cards": [
+            {
+                "index": index,
+                "name": f"Card {index}",
+                "description": f"Complete effect {index}.",
+                "after_upgrade": {"description": f"Complete upgraded effect {index}."},
+            }
+            for index in range(16)
+        ],
+    }
+    legal_actions = build_legal_actions(state)
+
+    bundle = build_evidence_bundle(state, legal_actions)
+    rendered = render_evidence_context(bundle)
+
+    assert bundle.candidate_evidence == []
+    assert "card_select_candidate_count=16" in bundle.state_facts
+    assert "card_select_min_select=4" in bundle.state_facts
+    assert "card_select_max_select=4" in bundle.state_facts
+    assert "card_select_legal_combination_count=1820" in bundle.state_facts
+    assert any("every non-empty distinct subset" in fact for fact in bundle.state_facts)
+    assert "select cards 0,1,2,3" not in rendered
+    assert len(rendered) < 2000
+
+
+def test_card_select_evidence_hash_binds_complete_ordered_candidate_objects():
+    base = {
+        "decision": "card_select",
+        "min_select": 2,
+        "max_select": 2,
+        "can_skip": False,
+    }
+    first = {
+        **base,
+        "cards": [
+            {"index": 0, "name": "Strike", "description": "Deal 6 damage."},
+            {"index": 1, "name": "Defend", "description": "Gain 5 Block."},
+        ],
+    }
+    second = {
+        **base,
+        "cards": [
+            {"index": 0, "name": "Bash", "description": "Deal 8 damage. Apply Vulnerable."},
+            {"index": 1, "name": "Armaments", "description": "Gain Block. Upgrade a card."},
+        ],
+    }
+
+    first_bundle = build_evidence_bundle(first, build_legal_actions(first))
+    second_bundle = build_evidence_bundle(second, build_legal_actions(second))
+
+    assert first_bundle.bundle_hash() != second_bundle.bundle_hash()
+    first_digest = next(fact for fact in first_bundle.state_facts if fact.startswith("card_select_candidate_digest"))
+    second_digest = next(fact for fact in second_bundle.state_facts if fact.startswith("card_select_candidate_digest"))
+    assert first_digest != second_digest
+    assert "card_select_candidate_indices=[0,1]" in first_bundle.state_facts
+
+
 def test_occ_empty_run_plan_patch_without_no_context_reason_is_not_a_hard_validation_error():
     state = _card_reward_state()
     legal_actions = build_legal_actions(state)
@@ -251,6 +314,23 @@ class _EvidenceRefScriptAgent:
 
     def receive_external_feedback(self, state, action, meta, feedback, legal_actions):
         self.feedback.append(feedback)
+
+
+class _AlwaysInvalidEvidenceRefAgent(_EvidenceRefScriptAgent):
+    def choose(self, state, legal_actions, *, prompt=None):
+        self.calls += 1
+        skip = next(action for action in legal_actions if action.kind == "card_reward_skip")
+        return skip, {
+            "agent": "always_invalid_evidence_ref",
+            "parsed": {
+                "action_id": skip.action_id,
+                "selected_action_label": skip.label,
+                "reason": "This deliberately cites a nonexistent action.",
+                "evidence_refs": [999],
+                "run_plan_patch": {},
+                "run_memory_facts": [],
+            },
+        }
 
 
 class _MissingReasonThenReasonAgent:
@@ -352,6 +432,20 @@ def test_runner_reasks_when_evidence_refs_do_not_match_candidate_actions(tmp_pat
     assert "reason" in feedback_event["details"]
     assert action_rows[-1]["agent_meta"]["feedback_events"][0] == feedback_event
     assert action_rows[-1]["agent_meta"]["parsed"]["action_id"] == action_rows[-1]["action"]["action_id"]
+
+
+def test_runner_preserves_evidence_validation_error_class_after_retry_exhaustion(tmp_path):
+    agent = _AlwaysInvalidEvidenceRefAgent()
+    result = run_one(
+        agent=agent,
+        seed="evidence-ref-exhausted",
+        process=_CardRewardProcess(),
+        max_steps=2,
+    )
+
+    assert result.error is not None
+    assert result.error.startswith("evidence validation failed:")
+    assert "custom sequence" not in result.error
 
 
 def test_runner_reasks_when_real_action_omits_reason(tmp_path):

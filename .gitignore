@@ -20,6 +20,8 @@ saves/*
 artifacts/
 .tools/
 results/
+/.codex_test_logs/
+/tmp/
 
 # Local analysis/visualization reports
 docs/occ-ca-rm-rp-v1-plan.html

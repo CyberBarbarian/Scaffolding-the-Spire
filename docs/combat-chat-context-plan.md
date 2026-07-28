@@ -17,7 +17,7 @@
 - 很多历史计算会过期，例如上一回合的手牌、能量、敌人 intent、block 都已经改变。
 - 如果 assistant 的旧推理有错，整场战斗级 history 会持续污染后续回合。
 
-对照 `python/play.py` 的 CLI 行为，人在一个出牌回合内可以连续进行多个操作；但 benchmark 不能把多个操作压成一个动作，因为部分卡牌会中途触发环境交互，例如烧牌、选牌、发现牌、药水选择。这说明更自然的实验单位不是“整场战斗”，而是“一个玩家出牌回合”。
+对照权威运行时 `../sts2-cli/python/play.py` 的 CLI 行为，人在一个出牌回合内可以连续进行多个操作；但 benchmark 不能把多个操作压成一个动作，因为部分卡牌会中途触发环境交互，例如烧牌、选牌、发现牌、药水选择。这说明更自然的实验单位不是“整场战斗”，而是“一个玩家出牌回合”。
 
 所以本设计把 chat history 缩小到：
 
@@ -224,7 +224,7 @@ Legal actions:
 ...
 ```
 
-这个 initial message 可以接近当前 `build_llm_prompt()`，但不应加入整局 verbose episode memory。建议保留 `run_summary`，关闭普通 `memory_enabled`，让实验更干净。
+这个 initial message 可以接近当前 `build_llm_prompt()`，但不应加入整局 verbose episode memory。建议保留 `run_summary`，关闭 `short_term_memory_enabled`，让实验更干净。
 
 ### Turn Update User Message
 
@@ -301,7 +301,7 @@ turn_chat_reset_on_end_turn: true
 建议第一组实验关闭现有短期 memory：
 
 ```yaml
-memory_enabled: false
+short_term_memory_enabled: false
 run_summary_enabled: true
 prompt_style: analysis
 include_json_state: false
@@ -309,7 +309,7 @@ include_json_state: false
 
 理由：
 
-- `memory_enabled: false` 可以让实验更干净，只测同一玩家回合内 chat history 的影响。
+- `short_term_memory_enabled: false` 可以让实验更干净，只测同一玩家回合内 chat history 的影响。
 - `run_summary_enabled: true` 仍然提供宏观资源提醒，例如低 HP、无药水、Boss 名称。
 - `include_json_state: false` 减少重复 token。
 - modal 状态默认进入同一 turn chat；复杂性由环境的 atomic action 边界承担，而不是由 prompt 一次规划多个动作。
@@ -578,9 +578,9 @@ turn_chat_assistant_history: compact
 ### Experiment Results
 
 - 2026-05-29 单 seed smoke test 结果已记录在 `docs/sts2-benchmark-experiment-2026-05-29.md`。
-  - `no_memory` baseline：`single_turn + memory_enabled=false`，死于 Act 1 floor 17。
-  - `turn_chat`：`context_management.mode=turn_chat + memory_enabled=false`，死于 Act 2 floor 6。
-  - `memory`：`single_turn + memory_enabled=true + factual_diff`，死于 Act 2 floor 7。
+  - `no_memory` baseline：`single_turn + short_term_memory_enabled=false`，死于 Act 1 floor 17。
+  - `turn_chat`：`context_management.mode=turn_chat + short_term_memory_enabled=false`，死于 Act 2 floor 6。
+  - `memory`：`single_turn + short_term_memory_enabled=true + factual_diff`，死于 Act 2 floor 7。
 - 阶段性判断：`turn_chat` 相比最原始 `no_memory` baseline 有正向信号，但当前只有 `bench_0000` 一个 seed，不能写成统计结论。
 - `turn_chat` 没有超过 `factual_diff memory`；因此更准确的定位是“有潜力的 chat-history 替代方法”，不是已验证优于 memory 的方法。
 - 三次运行都使用了相同 `logging.out` 路径，结构化 JSONL 可能被后一次覆盖；本轮分析以 `logs/bench_*.log` 为准。后续实验应让每个 variant 使用唯一 `out` 路径。

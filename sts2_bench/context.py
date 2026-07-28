@@ -215,10 +215,6 @@ def combat_facts(state: dict[str, Any]) -> dict[str, Any]:
             else:
                 non_attack_intents.append(f"{enemy_index}:{enemy_name}:{intent_type}")
 
-    hp_if_end = None
-    if hp is not None:
-        hp_if_end = hp - max(0, incoming_total - current_block)
-
     preview_fields = sorted(
         {
             "damage" if key == "calculateddamage" else key
@@ -243,7 +239,6 @@ def combat_facts(state: dict[str, Any]) -> dict[str, Any]:
         "incoming_attack_total": incoming_total,
         "incoming_attack_parts": incoming_parts,
         "current_block": current_block,
-        "hp_if_end_turn_now": hp_if_end,
         "enemy_intent_damage_basis": "engine_displayed_current_values",
         "card_preview_values_basis": "engine_displayed_current_values",
         "card_preview_fields": preview_fields,
@@ -253,7 +248,7 @@ def combat_facts(state: dict[str, Any]) -> dict[str, Any]:
 
 
 def card_cost_label(card: dict[str, Any]) -> Any:
-    """Return the CLI-facing card cost, matching python/play.py fallback order."""
+    """Return the CLI-facing card cost, matching canonical sts2-cli fallback order."""
 
     return card.get("cost", card.get("energy_cost", "?"))
 
@@ -331,7 +326,6 @@ def append_combat_fact_lines(lines: list[str], state: dict[str, Any], *, prefix:
     parts = [
         f"incoming_attack_total={facts['incoming_attack_total']}",
         f"current_block={facts['current_block']}",
-        f"hp_if_end_turn_now={facts['hp_if_end_turn_now']}",
     ]
     lines.append(prefix + " ".join(parts))
     if facts["incoming_attack_parts"]:
@@ -495,8 +489,28 @@ def _is_aoe_card(card: dict[str, Any]) -> bool:
     return "all enemies" in text or "all enemy" in text
 
 
+def dedupe_hover_tips(tips: Any) -> list[dict[str, Any]]:
+    """Keep each visible hover-tip fact once while preserving source order."""
+
+    if not isinstance(tips, list):
+        return []
+    unique: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for tip in tips:
+        if not isinstance(tip, dict):
+            continue
+        title = name(tip.get("name") or tip.get("title") or tip.get("id") or tip.get("kind"))
+        desc = description_of(tip)
+        key = (title.strip().casefold(), desc.strip().casefold())
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(tip)
+    return unique
+
+
 def append_hover_tip_lines(lines: list[str], obj: dict[str, Any], *, prefix: str = "  ") -> None:
-    for tip in obj.get("hover_tips") or []:
+    for tip in dedupe_hover_tips(obj.get("hover_tips")):
         title = name(tip.get("name") or tip.get("title") or tip.get("id") or tip.get("kind"))
         desc = description_of(tip)
         if desc:
@@ -522,7 +536,7 @@ def _draw_conn(buf: list[str], from_col: int, to_col: int, width: int) -> None:
 
 
 def map_display_choices(choices: list[dict[str, Any]], map_data: dict[str, Any] | None) -> list[dict[str, Any]]:
-    """Match ``python/play.py`` filtering of choices to visible map coords."""
+    """Match canonical ``sts2-cli/python/play.py`` filtering of visible map choices."""
 
     visible_coords: set[tuple[Any, Any]] = set()
     for row in (map_data or {}).get("rows", []):
@@ -546,7 +560,7 @@ def map_display_choices(choices: list[dict[str, Any]], map_data: dict[str, Any] 
 
 
 def render_full_map(map_data: dict[str, Any], choices: list[dict[str, Any]]) -> list[str]:
-    """Render map as a text grid close to ``python/play.py``'s TUI map."""
+    """Render a text grid close to the canonical ``sts2-cli`` TUI map."""
 
     rows = map_data.get("rows") or []
     if not rows:
@@ -674,7 +688,7 @@ def render_full_map(map_data: dict[str, Any], choices: list[dict[str, Any]]) -> 
                             _draw_conn(conn, int(node.get("col", 0)), int(child.get("col", 0)), cell_width)
             out.append(f"    | {''.join(conn)}")
 
-    out.append("  Legend: M=Monster E=Elite R=Rest $=Shop T=Treasure ?=Event A=Ancient [x]=Current [n]=Choice")
+    out.append("  Legend: M=Monster E=Elite R=Rest $=Shop T=Treasure ?=Unknown A=Ancient [x]=Current [n]=Choice")
     if choice_indices:
         parts = []
         inverse = {value: key for key, value in choice_indices.items()}
@@ -722,6 +736,14 @@ def append_card_lines(lines: list[str], card: dict[str, Any], *, prefix: str = "
             lines.append(prefix + "  upgrade: " + "; ".join(upgrade_parts))
         if after_desc:
             lines.append(prefix + f"  upgrade_description: {after_desc}")
+        for key in ("added_keywords", "removed_keywords"):
+            values = after.get(key)
+            if values:
+                if not isinstance(values, list):
+                    values = [values]
+                rendered = ", ".join(one_line(value) for value in values if one_line(value))
+                if rendered:
+                    lines.append(prefix + f"  upgrade_{key}: {rendered}")
     append_hover_tip_lines(lines, card, prefix=prefix + "  ")
 
 
@@ -911,6 +933,9 @@ def _combat_snapshot(state: dict[str, Any]) -> dict[str, Any]:
 
 
 def _enemy_key(enemy: dict[str, Any]) -> tuple[str, Any]:
+    instance_id = enemy.get("instance_id")
+    if instance_id is not None:
+        return ("instance_id", instance_id)
     return (name(enemy.get("name")), enemy.get("index"))
 
 
@@ -1069,7 +1094,7 @@ def player_summary(player: dict[str, Any]) -> str:
 def append_player_details(lines: list[str], player: dict[str, Any]) -> None:
     """Render player details like the TUI's ``show_player``.
 
-    Keep this intentionally close to ``python/play.py``: show relics and
+    Keep this intentionally close to canonical ``sts2-cli/python/play.py``: show relics and
     potions, but do not expand the full deck in ordinary decision prompts.
     Full deck expansion is available from the raw/compact JSON, but putting it
     in the human-readable section makes it too easy to confuse deck cards with
@@ -1110,8 +1135,13 @@ def append_player_details(lines: list[str], player: dict[str, Any]) -> None:
                 lines.append(f"    description: {desc}")
 
 
-def render_state_text(state: dict[str, Any]) -> str:
-    """Render a concise, stable text view inspired by ``python/play.py``."""
+def render_state_text(
+    state: dict[str, Any],
+    *,
+    combat_skill_lines_enabled: bool = True,
+    recent_state_changes_enabled: bool = True,
+) -> str:
+    """Render a concise, stable text view inspired by canonical ``sts2-cli``."""
 
     decision = state.get("decision", state.get("type", "?"))
     context = state.get("context") or {}
@@ -1123,7 +1153,8 @@ def render_state_text(state: dict[str, Any]) -> str:
         f"Player: {player_summary(player)}",
     ]
     append_player_details(lines, player)
-    append_last_action_result(lines, state.get("last_action_result"))
+    if recent_state_changes_enabled:
+        append_last_action_result(lines, state.get("last_action_result"))
 
     if decision == "combat_play":
         lines.append(
@@ -1131,15 +1162,39 @@ def render_state_text(state: dict[str, Any]) -> str:
             f"draw_pile={state.get('draw_pile_count', '?')} discard_pile={state.get('discard_pile_count', '?')}"
         )
         append_combat_fact_lines(lines, state)
-        append_combat_skill_lines(lines, state)
+        if combat_skill_lines_enabled:
+            append_combat_skill_lines(lines, state)
         powers = state.get("player_powers") or []
         if powers:
             lines.append(f"Player powers ({len(powers)}):")
             append_power_lines(lines, powers, include_type=True)
         if state.get("orbs"):
-            lines.append("Orbs: " + "; ".join(f"{name(o.get('name'))} passive={o.get('passive')} evoke={o.get('evoke')}" for o in state.get("orbs", [])))
+            orb_labels = []
+            for orb in state.get("orbs", []):
+                label = f"{name(orb.get('name'))} passive={orb.get('passive')} evoke={orb.get('evoke')}"
+                if orb.get("position_label") is not None:
+                    label += f" position={orb.get('position_label')}"
+                orb_labels.append(label)
+            lines.append("Orbs: " + "; ".join(orb_labels))
+        elif state.get("orbs") == []:
+            lines.append("Orbs: none")
+        if state.get("orb_slots") is not None:
+            lines.append(f"Orb slots: {state.get('orb_slots')}")
         if state.get("stars") is not None:
             lines.append(f"Stars: {state.get('stars')}")
+        osty = state.get("osty")
+        if isinstance(osty, dict):
+            bits = [f"Osty: {name(osty.get('name'))}"]
+            if osty.get("hp") is not None or osty.get("max_hp") is not None:
+                bits.append(f"hp={osty.get('hp')}/{osty.get('max_hp')}")
+            if osty.get("block") is not None:
+                bits.append(f"block={osty.get('block')}")
+            bits.append(f"alive={bool(osty.get('alive'))}")
+            lines.append(" ".join(bits))
+            osty_powers = osty.get("powers") or []
+            if osty_powers:
+                lines.append(f"Osty powers ({len(osty_powers)}):")
+                append_power_lines(lines, osty_powers, prefix="  ", include_type=True)
 
         enemies = state.get("enemies", []) or []
         lines.append(f"Enemies ({len(enemies)}):")
@@ -1184,7 +1239,7 @@ def render_state_text(state: dict[str, Any]) -> str:
         lines.append(f"Card rewards ({len(cards)}):")
         for card in cards:
             append_card_lines(lines, card)
-        lines.append(f"Can skip: {state.get('can_skip', True)}")
+        lines.append(f"Can skip: {state.get('can_skip')}")
 
     elif decision == "bundle_select":
         bundles = state.get("bundles", []) or state.get("options", []) or []
@@ -1216,17 +1271,46 @@ def render_state_text(state: dict[str, Any]) -> str:
         lines.append(f"Event: {name(state.get('event_name'))}")
         if state.get("description"):
             lines.append(f"Description: {state.get('description')}")
+        if state.get("vars") is not None:
+            lines.append(
+                "Event vars: "
+                + json.dumps(state.get("vars"), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            )
         options = state.get("options", []) or []
         lines.append(f"Options ({len(options)}):")
         for option in options:
             locked = " locked" if option.get("is_locked") else ""
             enabled = "" if option.get("is_enabled", True) else " disabled"
             vars_text = vars_line(option) or "{}"
-            lines.append(f"  [{option.get('index')}] {name(option.get('title') or option.get('name'))}{locked}{enabled} vars={vars_text}")
+            text_key = f" text_key={option.get('text_key')}" if option.get("text_key") is not None else ""
+            lines.append(f"  [{option.get('index')}] {name(option.get('title') or option.get('name'))}{locked}{enabled}{text_key} vars={vars_text}")
             desc = description_of(option)
             if desc:
                 lines.append(f"    description: {desc}")
+            if option.get("relic_trade") is not None:
+                lines.append(
+                    "    relic_trade="
+                    + json.dumps(option.get("relic_trade"), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+                )
             append_hover_tip_lines(lines, option, prefix="    ")
+
+    elif decision == "event_result":
+        lines.append(f"Event result: {name(state.get('event_name'))}")
+        if state.get("event_id") is not None:
+            lines.append(f"Event id: {state.get('event_id')}")
+        if state.get("description"):
+            lines.append(f"Description: {state.get('description')}")
+        if state.get("vars") is not None:
+            lines.append(
+                "Event vars: "
+                + json.dumps(state.get("vars"), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            )
+        if state.get("options") is not None:
+            lines.append(
+                "Event result options: "
+                + json.dumps(state.get("options"), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            )
+        lines.append(f"Can proceed: {bool(state.get('can_proceed'))}")
 
     elif decision == "rest_site":
         options = state.get("options", []) or []
@@ -1244,14 +1328,19 @@ def render_state_text(state: dict[str, Any]) -> str:
         shop_cards = state.get("cards", []) or []
         lines.append(f"Shop cards ({len(shop_cards)}):")
         for card in shop_cards:
-            stocked = "" if card.get("is_stocked") else " sold"
-            lines.append(f"  [{card.get('index')}] {name(card.get('name'))} price={card.get('price', card.get('gold_cost', '?'))}{stocked}")
+            lines.append(
+                f"  [{card.get('index')}] {name(card.get('name'))} "
+                f"price={card.get('price', card.get('gold_cost', '?'))} "
+                f"is_stocked={card.get('is_stocked')} can_buy={card.get('can_buy')}"
+            )
             append_card_lines(lines, card, prefix="    ")
         shop_relics = state.get("relics", []) or []
         lines.append(f"Shop relics ({len(shop_relics)}):")
         for relic in shop_relics:
-            stocked = "" if relic.get("is_stocked") else " sold"
-            lines.append(f"  [{relic.get('index')}] {name(relic.get('name'))} cost={relic.get('cost')}{stocked}")
+            lines.append(
+                f"  [{relic.get('index')}] {name(relic.get('name'))} cost={relic.get('cost')} "
+                f"is_stocked={relic.get('is_stocked')} can_buy={relic.get('can_buy')}"
+            )
             desc = description_of(relic)
             if desc:
                 lines.append(f"    description: {desc}")
@@ -1259,14 +1348,78 @@ def render_state_text(state: dict[str, Any]) -> str:
         shop_potions = state.get("potions", []) or []
         lines.append(f"Shop potions ({len(shop_potions)}):")
         for potion in shop_potions:
-            stocked = "" if potion.get("is_stocked") else " sold"
-            lines.append(f"  [{potion.get('index')}] {name(potion.get('name'))} cost={potion.get('cost')}{stocked} target={potion.get('target_type', '?')}")
+            lines.append(
+                f"  [{potion.get('index')}] {name(potion.get('name'))} cost={potion.get('cost')} "
+                f"is_stocked={potion.get('is_stocked')} can_buy={potion.get('can_buy')} "
+                f"target={potion.get('target_type', '?')}"
+            )
             desc = description_of(potion)
             if desc:
                 lines.append(f"    description: {desc}")
             append_hover_tip_lines(lines, potion, prefix="    ")
         if state.get("card_removal_cost") is not None:
-            lines.append(f"Card removal cost: {state.get('card_removal_cost')}")
+            lines.append(
+                f"Card removal cost: {state.get('card_removal_cost')} "
+                f"can_remove_card={state.get('can_remove_card')}"
+            )
+
+    elif decision == "fake_merchant_shop":
+        lines.append(f"Fake merchant event: {name(state.get('event_name'))}")
+        if state.get("description"):
+            lines.append(f"Description: {state.get('description')}")
+        if state.get("vars") is not None:
+            lines.append(
+                "Event vars: "
+                + json.dumps(state.get("vars"), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            )
+        relics = state.get("relics", []) or []
+        lines.append(f"Fake merchant relics ({len(relics)}):")
+        for relic in relics:
+            can_buy = relic.get("can_buy")
+            stocked = relic.get("is_stocked")
+            bits = [
+                f"[{relic.get('index')}]",
+                name(relic.get("name")),
+                f"cost={relic.get('cost', relic.get('price', relic.get('gold_cost', '?')))}",
+            ]
+            if stocked is not None:
+                bits.append(f"is_stocked={stocked}")
+            if can_buy is not None:
+                bits.append(f"can_buy={can_buy}")
+            lines.append("  " + " ".join(bits))
+            desc = description_of(relic)
+            if desc:
+                lines.append(f"    description: {desc}")
+            append_hover_tip_lines(lines, relic, prefix="    ")
+
+        can_throw = bool(state.get("can_throw_foul_potion"))
+        lines.append(f"Fake merchant foul potion: can_throw_foul_potion={can_throw}")
+        foul_action = state.get("foul_potion_action")
+        if isinstance(foul_action, dict):
+            lines.append(
+                "  foul_potion_action="
+                + json.dumps(foul_action, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            )
+        lines.append(f"Can leave fake merchant: {bool(state.get('can_leave'))}")
+
+    elif decision == "crystal_sphere":
+        lines.append(f"Crystal Sphere event: {name(state.get('event_name'))}")
+        lines.append(
+            "Crystal Sphere grid: "
+            f"width={state.get('grid_width', '?')} height={state.get('grid_height', '?')} "
+            f"divinations_remaining={state.get('divinations_remaining', '?')} tool={state.get('tool', '?')}"
+        )
+        lines.append(
+            "Crystal Sphere controls: "
+            f"can_use_big_tool={bool(state.get('can_use_big_tool'))} "
+            f"can_use_small_tool={bool(state.get('can_use_small_tool'))} "
+            f"can_proceed={bool(state.get('can_proceed'))}"
+        )
+        for key in ("cells", "clickable_cells", "visible_items", "revealed_items"):
+            lines.append(
+                f"Crystal Sphere {key}: "
+                + json.dumps(state.get(key) or [], ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            )
 
     elif decision == "treasure":
         relics = state.get("relics", []) or []
@@ -1281,7 +1434,10 @@ def render_state_text(state: dict[str, Any]) -> str:
             lines.append(state.get("message", "No relic choices"))
 
     elif decision == "card_select":
-        lines.append(f"Card select: min={state.get('min_select')} max={state.get('max_select')} prompt={name(state.get('prompt'))}")
+        lines.append(
+            f"Card select: min={state.get('min_select')} max={state.get('max_select')} "
+            f"can_skip={state.get('can_skip', False)} prompt={name(state.get('prompt'))}"
+        )
         for source_key in ("source_event_option", "source_room_option", "source_potion", "source_card", "source_power"):
             source = state.get(source_key)
             if isinstance(source, dict) and source:
@@ -1299,6 +1455,33 @@ def render_state_text(state: dict[str, Any]) -> str:
             if combat_powers:
                 lines.append(f"Player powers ({len(combat_powers)}):")
                 append_power_lines(lines, combat_powers, include_type=True)
+            if combat.get("orbs"):
+                orb_labels = []
+                for orb in combat.get("orbs", []):
+                    label = f"{name(orb.get('name'))} passive={orb.get('passive')} evoke={orb.get('evoke')}"
+                    if orb.get("position_label") is not None:
+                        label += f" position={orb.get('position_label')}"
+                    orb_labels.append(label)
+                lines.append("Orbs: " + "; ".join(orb_labels))
+            elif combat.get("orbs") == []:
+                lines.append("Orbs: none")
+            if combat.get("orb_slots") is not None:
+                lines.append(f"Orb slots: {combat.get('orb_slots')}")
+            if combat.get("stars") is not None:
+                lines.append(f"Stars: {combat.get('stars')}")
+            osty = combat.get("osty")
+            if isinstance(osty, dict):
+                bits = [f"Osty: {name(osty.get('name'))}"]
+                if osty.get("hp") is not None or osty.get("max_hp") is not None:
+                    bits.append(f"hp={osty.get('hp')}/{osty.get('max_hp')}")
+                if osty.get("block") is not None:
+                    bits.append(f"block={osty.get('block')}")
+                bits.append(f"alive={bool(osty.get('alive'))}")
+                lines.append(" ".join(bits))
+                osty_powers = osty.get("powers") or []
+                if osty_powers:
+                    lines.append(f"Osty powers ({len(osty_powers)}):")
+                    append_power_lines(lines, osty_powers, prefix="  ", include_type=True)
             for enemy in combat.get("enemies") or []:
                 intents = ",".join(str(intent.get("type")) for intent in enemy.get("intents") or []) or "none"
                 powers = enemy.get("powers") or []
@@ -1308,6 +1491,12 @@ def render_state_text(state: dict[str, Any]) -> str:
                 lines.append(f"  enemy [{enemy.get('index')}] {name(enemy.get('name'))} hp={enemy.get('hp')}/{enemy.get('max_hp')} block={enemy.get('block', 0)} intents={intents}{power_text}")
                 if powers:
                     append_power_lines(lines, powers, prefix="    ", include_type=True)
+            hand = combat.get("hand") or []
+            lines.append(f"Current combat hand ({len(hand)}):")
+            if not hand:
+                lines.append("  empty")
+            for card in hand:
+                append_card_lines(lines, card)
         cards = state.get("cards", []) or []
         lines.append(f"Selectable cards ({len(cards)}):")
         for card in cards:

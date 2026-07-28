@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "experiment_id": "online-cross-domain-memory-release-v1",
+  "execution_surface": "sequential_online_memory_only",
+  "purpose": "Release-candidate treatment for the minimal structured online-memory loop. It preserves the complete V21 baseline context and CoT route behavior, learns from an initially empty store, performs deterministic action-time retrieval, and confines semantic repair, same-gate fusion, card-value audit, and lifecycle review to reflection checkpoints. Combat, card, and route responsibilities require explicit evidence-grounded production, review, or abstention. Every completed Act blocks before the next decision until a hash-bound external audit approves it.",
+  "baseline_experiment": "experiments/full_run_layered_reflection_v21.json",
+  "evaluation": {
+    "seed": "ironclad_a0_3407",
+    "run_id": "online-cross-domain-memory-release-v1:ironclad_a0_3407:round_01",
+    "matched_live_pair": false
+  },
+  "memory": {
+    "offline_reflection_deadline_sec": 600,
+    "max_reflection_transitions": 80,
+    "reflection_output_limit": 64,
+    "reflection_json_response_format": 1,
+    "reflection_format_retries": 1,
+    "reflection_semantic_retries": 1,
+    "new_candidates_start_pending": 1,
+    "online_reflection_enabled": 1,
+    "cross_domain_online_reflection": 1,
+    "pending_hypothesis_retrieval": 1,
+    "active_review_rejection_threshold": 2,
+    "strict_candidate_accounting": 1,
+    "semantic_candidate_repair": 1,
+    "semantic_card_value_audit": 1,
+    "strict_reflection_fail_closed": 1,
+    "require_domain_reports": 1,
+    "require_external_act_approval": 1,
+    "checkpoint_hmac_key_env": "STS2_CHECKPOINT_HMAC_KEY",
+    "checkpoint_poll_seconds": 0.5,
+    "post_run_reflection": false
+  },
+  "output_root": "results/online_cross_domain_memory_release_v1_20260721"
+}

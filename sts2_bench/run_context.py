@@ -50,6 +50,8 @@ class RunPlan:
 
 @dataclass
 class RunMemory:
+    """Per-run factual ledger reset at episode boundaries, not learned experience."""
+
     facts: list[dict[str, Any]] = field(default_factory=list)
     combat_reports: list[dict[str, Any]] = field(default_factory=list)
     route_steps: list[dict[str, Any]] = field(default_factory=list)
@@ -79,6 +81,8 @@ class RunContextStore:
 
     run_plan: RunPlan = field(default_factory=RunPlan)
     run_memory: RunMemory = field(default_factory=RunMemory)
+    formal_route_plan_enabled: bool = False
+    route_plan_enabled: bool = True
 
     def reset(self) -> None:
         self.run_plan = RunPlan()
@@ -91,11 +95,40 @@ class RunContextStore:
         }
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "RunContextStore":
+    def from_dict(
+        cls,
+        data: dict[str, Any],
+        *,
+        formal_route_plan_enabled: bool = False,
+        route_plan_enabled: bool = True,
+    ) -> "RunContextStore":
         return cls(
             run_plan=RunPlan.from_dict(data.get("run_plan") or {}),
             run_memory=RunMemory.from_dict(data.get("run_memory") or {}),
+            formal_route_plan_enabled=formal_route_plan_enabled,
+            route_plan_enabled=route_plan_enabled,
         )
+
+    def restore(self, data: dict[str, Any]) -> None:
+        restored = self.from_dict(
+            data,
+            formal_route_plan_enabled=self.formal_route_plan_enabled,
+            route_plan_enabled=self.route_plan_enabled,
+        )
+        self.run_plan = restored.run_plan
+        self.run_memory = restored.run_memory
+
+    def allowed_plan_patch_keys(self) -> set[str]:
+        keys = set(PLAN_PATCH_KEYS)
+        if self.formal_route_plan_enabled or not self.route_plan_enabled:
+            keys.discard("route_plan")
+        return keys
+
+    def prompt_run_plan(self) -> dict[str, Any]:
+        plan = self.run_plan.to_dict()
+        if self.formal_route_plan_enabled or not self.route_plan_enabled:
+            plan.pop("route_plan", None)
+        return plan
 
     def snapshot_hash(self) -> str:
         payload = json.dumps(self.to_dict(), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
@@ -104,7 +137,7 @@ class RunContextStore:
     def context_slice(self, state: dict[str, Any], *, max_facts: int = 8) -> dict[str, Any]:
         return {
             "decision": state.get("decision"),
-            "run_plan": self.run_plan.to_dict(),
+            "run_plan": self.prompt_run_plan(),
             "run_memory": {
                 "recent_facts": self.run_memory.facts[-max_facts:],
                 "pending_mandates": list(self.run_memory.pending_mandates),
@@ -144,21 +177,35 @@ class RunContextStore:
         mandates_added = 0
         combat_reports_added = 0
 
+        # Apply the model patch to a detached copy first.  Validation can fail
+        # after an earlier field has already been parsed (for example a valid
+        # build_plan followed by a malformed open_threads value).  Committing
+        # only after every field succeeds keeps rejected patches side-effect
+        # free without changing the result of any valid patch.
+        staged = self.from_dict(
+            self.to_dict(),
+            formal_route_plan_enabled=self.formal_route_plan_enabled,
+            route_plan_enabled=self.route_plan_enabled,
+        )
+
         if plan_patch is not None:
             if not isinstance(plan_patch, dict):
                 raise ValueError("run_plan_patch must be an object")
-            unsupported = sorted(set(plan_patch) - PLAN_PATCH_KEYS)
+            unsupported = sorted(set(plan_patch) - self.allowed_plan_patch_keys())
             if unsupported:
                 raise ValueError(f"Unsupported run_plan_patch keys: {', '.join(unsupported)}")
-            plan_updates, mandates_added = self._apply_plan_patch(plan_patch, owner, state, action)
+            plan_updates, mandates_added = staged._apply_plan_patch(plan_patch, owner, state, action)
 
         for fact in _normalize_entries(facts, default_kind="decision_summary"):
-            self.run_memory.facts.append(self._decorate_entry(fact, owner, state, action))
+            staged.run_memory.facts.append(staged._decorate_entry(fact, owner, state, action))
             facts_added += 1
 
         for report in _normalize_entries(reports, default_kind="combat_report"):
-            self.run_memory.combat_reports.append(self._decorate_entry(report, owner, state, action))
+            staged.run_memory.combat_reports.append(staged._decorate_entry(report, owner, state, action))
             combat_reports_added += 1
+
+        self.run_plan = staged.run_plan
+        self.run_memory = staged.run_memory
 
         return self._summary(True, plan_updates, facts_added, mandates_added, combat_reports_added)
 
@@ -236,6 +283,8 @@ def render_out_of_combat_context(store: RunContextStore, state: dict[str, Any]) 
         "RunPlan:",
     ]
     for key in ("route_plan", "build_plan", "resource_policy"):
+        if key not in plan:
+            continue
         value = plan.get(key) or "(empty)"
         lines.append(f"- {key}: {value}")
     for key in ("open_threads", "delayed_effects"):
@@ -256,18 +305,29 @@ def render_out_of_combat_context(store: RunContextStore, state: dict[str, Any]) 
         else:
             lines.append("  - (empty)")
 
+    allowed_keys = sorted(store.allowed_plan_patch_keys())
+    relevant_keys = [
+        key
+        for key in ("route_plan", "resource_policy", "open_threads", "delayed_effects", "pending_mandates")
+        if key in allowed_keys
+    ]
     lines.extend(
         [
             "",
             "OCC output contract:",
             "Return one legal action_id, selected_action_label, reason, evidence_refs, run_plan_patch, and run_memory_facts.",
             'Use "run_plan_patch": {} and "run_memory_facts": [] when nothing should change.',
-            "For map/event choices, update route_plan, resource_policy, open_threads, delayed_effects, or pending_mandates as relevant.",
+            f"For map/event choices, update {', '.join(relevant_keys)} as relevant.",
             "For shops, update resource_policy as relevant. Card reward decisions use a separate history-free reward context and do not update build_plan.",
-            "Allowed run_plan_patch keys: route_plan, build_plan, resource_policy, open_threads, delayed_effects, pending_mandates.",
+            f"Allowed run_plan_patch keys: {', '.join(allowed_keys)}.",
             "Do not mutate RM/RP directly; the coordinator validates and commits patches.",
         ]
     )
+    if store.route_plan_enabled and store.formal_route_plan_enabled:
+        lines.append(
+            "Executable routes are managed only by route_plan_event and active_route_plan; "
+            "do not write route_plan in run_plan_patch."
+        )
     return "\n".join(lines)
 
 

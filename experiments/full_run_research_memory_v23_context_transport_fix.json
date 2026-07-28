@@ -1,0 +1,27 @@
+{
+  "schema_version": 2,
+  "extends": "full_run_research_memory_v22_pilot_round1.json",
+  "extends_sha256": "C771C830A4348BF82938CC95772AEFFFCE7234A2856F75760E5B3EC298AC3E44",
+  "overrides": {
+    "experiment_id": "full-run-research-memory-v23-lossless-context-transport-fix",
+    "study_phase": "natural_exposure_pilot",
+    "purpose": "Minimal system-fix successor to the failed V22 Pilot. V23 preserves the baseline model, temperature, complete state/card/legal-action context, CoT route policy, memory semantics, retrieval, injection schedule, and reflection schedule. It replaces only the Cartesian repetition of identical injection-event evidence with an exactly reversible event-centered representation, and gives reflection requests a dedicated two-full-attempt transport envelope without changing the action transport policy. V22 remains an immutable historical artifact.",
+    "memory": {
+      "reflection_format_retries": 2,
+      "reflection_transport_max_additional_attempts": 1,
+      "reflection_transport_logical_request_deadline_sec": 420,
+      "reflection_exposure_representation_contract": "Each injection event is serialized once with every original field plus explicit memory_id, entry_version, and memory_event_index associations. The old per-memory map must be reconstructed exactly before every provider request or the request fails closed.",
+      "reflection_transport_budget_contract": "Reflection uses at most two complete 180-second provider attempts separated by the inherited 10-second backoff inside a 420-second logical deadline. Baseline action requests retain the inherited V21 240-second policy unchanged."
+    },
+    "freeze": {
+      "baseline_files": {
+        "sts2_bench/agents.py": "289C37E69D3AE4D4E0AB757414AFA1F3A013F96088797CAB238FCAC8F1B45CD0",
+        "sts2_bench/requirements.txt": "4C0887934D80D16ADDA4F540F4996B1B729F0629D2C0E2BA5777AFD2F6901334"
+      },
+      "intervention_files": {
+        "sts2_bench/layered_experience.py": "75245F9644F6EC124760E36D91FBC1CF17A3212906F76D3580DE853C88571705",
+        "sts2_bench/full_reflection_pairs.py": "74B0DE3EABBDB0B53EF115519AB386D76C2CCBA8043E98F7E2FACBDCE4DF5523"
+      }
+    }
+  }
+}

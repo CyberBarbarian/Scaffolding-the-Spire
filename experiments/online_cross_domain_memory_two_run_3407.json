@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "experiment_id": "online-cross-domain-memory-two-run-3407-20260720",
+  "purpose": "Run two full games strictly serially on the same seed. Both runs use cross-domain online reflection, and round 2 inherits the complete evolved memory from round 1 without freezing, regenerating, or compressing decision context.",
+  "online_experiment": "experiments/online_cross_domain_memory_v1.json",
+  "seed": "ironclad_a0_3407",
+  "repeat_count": 2,
+  "initial_memory": {
+    "path": "results/minimal_structured_memory_v1_20260719_retry1/memory_store.json",
+    "content_hash": "8d0eb63ad79b6bff9675a6ebabb9a186f62628b960a5a1388a09b243b7d70c66",
+    "reset_runtime_counters": true
+  },
+  "output_root": "results/online_cross_domain_memory_two_run_3407_20260720"
+}

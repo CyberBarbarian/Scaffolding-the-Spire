@@ -1,0 +1,113 @@
+{
+  "schema_version": 2,
+  "extends": "full_run_research_memory_v30_game_rules_v1.json",
+  "extends_sha256": "ED0E5FEC10407F2E8FAE4264DB296DC4782588099685B6D9684CAD2CD41800E1",
+  "overrides": {
+    "experiment_id": "full-run-research-memory-v31-game-rules-v2",
+    "purpose": "Versioned rerun of the V30 single-seed natural-exposure B0/R1 structured-memory pilot with corrected source-aware decision rules and evidence-selected official rules in both reflection generator and critic prompts. Both arms retain identical state-selected action rules; only R1 receives the frozen structured-memory/reflection treatment. V30 and all earlier protocols and results remain immutable historical evidence.",
+    "formal_run_gate": {
+      "enabled": false,
+      "status": "deferred_pending_reflection_integrity_review",
+      "reason": "Do not create paper samples until complete decision evidence, independent game-rule exposure validation, provider request binding, and output-root preflight are repaired and re-reviewed.",
+      "global_gate_id": "reflection-formal-global-v1",
+      "global_gate_sha256": "3F9AE05EEC75CF68333D763256FF49284CD48C1FA37A895BA72B5B3CAADCA114",
+      "protocol_approval_sha256": "03F67B295B19B8265CC8DFF9CB8B57E10C219D95793B859A357CCCAB6AA61D98",
+      "artifact_class": "formal_reflection_sample",
+      "tracking_document": "docs/structured-memory-reflection-release-todo-20260721.md"
+    },
+    "game_rules": {
+      "ruleset_id": "sts2-official-rules-v2",
+      "ruleset_sha256": "d462fa843517490c2aa324151b2ab68b9cddc65f32486fdc338dbb7c8de453ba",
+      "module_ids": [
+        "core_run",
+        "persistent_resources",
+        "combat_cycle",
+        "map_navigation",
+        "room_glossary",
+        "act_transition",
+        "post_combat_rewards",
+        "treasure",
+        "deckbuilding_choice",
+        "rest_site",
+        "merchant",
+        "event",
+        "crystal_sphere"
+      ],
+      "delivery": "state_selected_prompt",
+      "source": "sts2_bench/game_rules.py"
+    },
+    "rules_rerun_contract": {
+      "historical_results": "v30_and_earlier_preserved_but_not_comparable_to_rules_v2",
+      "control_arm": "B0 receives the same rules-v2 action context and no memory/reflection treatment.",
+      "treatment_arm": "R1 receives the same rules-v2 action context plus the frozen structured-memory treatment; its generator and critic receive the audited union of rules for decisions in each reflection checkpoint.",
+      "action_prompt_comparability": "B0 and R1 action prompts differ only by the existing R1 memory payload; reflection-only rules do not enter B0 or R1 action prompts.",
+      "planned_output_root": "results/full_run_research_memory_v31_game_rules_v2_20260723"
+    },
+    "freeze": {
+      "baseline_files": {
+        "sts2_bench/__init__.py": "E77AB24375CA54CCBF2F4E2243FE7B46960A4ABA4F94B6E0ED49421CED95A250",
+        "sts2_bench/actions.py": "40BE3134E9E8F3D93B6FB8015575F6FD0D3B743E247DA76E3AB163F3D5B13DC1",
+        "sts2_bench/agents.py": "F8D50705634E3B3D7ACFF0DC0CB1871CA62ADF4D405BA3C8FA55050766628317",
+        "sts2_bench/artifact_lease.py": "893392B316707E17DA524C03DB334D49D83D4CA670ED21932973BAF931308FDD",
+        "sts2_bench/benchmark.yaml": "6353C114F97273431FE8EEB13B1F5F7F937D9649262D33AC3AD4EB36F29A4F26",
+        "sts2_bench/combat_snapshot.py": "C86585E3067B9309F2CE9341063B1DCB888E2716208C7F49E8734C438BBF5D87",
+        "sts2_bench/context.py": "6235A2A371BA14F0413E7D45291DE64AE62AB1B7D5ECA17D1209FA8CF8192244",
+        "sts2_bench/evidence.py": "C0AB0293123A40571DAB7BB511E4D2E4BFE48C4C43BA1CCC183BAEA24760FFCE",
+        "sts2_bench/feedback.py": "B1F37B7DCA117AAF9ED32158268507CF2D6D005ED236D1B8A086069BF567C59E",
+        "sts2_bench/game_rules.py": "A114305FBE9A8ECB16DDC3B202C9B6188F26B5EEB9245B1CCD968620EAEBC003",
+        "sts2_bench/multi_agent.py": "615D5530E13DB3D1F4A11D31398C05CFBBD489B5D8A36E04771949FA5558B5F8",
+        "sts2_bench/posterior.py": "CCB47BD08EC1EF89A8EA12514ED0C001E81BAA03F6486986CC8D14AF34A23A0E",
+        "sts2_bench/reflection_probe.py": "675D8B5517506380608DC5312C083BE54541FA00373020DCA4AE343B50F1872D",
+        "sts2_bench/route_candidates.py": "BB002BBF2F4D79573E98E07976B38C0C32EC4DF6EE7B8BB5EB79BE789F7F1AD4",
+        "sts2_bench/route_graph.py": "46086136BC097BAFF78F0CC973F99BB9955E45BC6DC46F13050949A541C65E1B",
+        "sts2_bench/route_plan.py": "267AA99D448C604E8C4D536097B63EA6F9F24FD2FDA9C38922AE3CA652EA9F10",
+        "sts2_bench/run_benchmark.py": "E5B645BD9E21A9F20480C369E7C4C66F7190D21EAEF14C068BC859DF943989A7",
+        "sts2_bench/run_context.py": "3E66DF40043791FA19E838BA157EC67D6D4FC276FA7C8E827366B9D2CC19F87E",
+        "sts2_bench/runner.py": "62F7702511D3FC254C7A778C895BFFB393BFB18C46646D465CC6FB082391715A",
+        "sts2_bench/routing.py": "3ECFE739C1ABF388593790ED456BF78FA8382A733D95C674478533C0D249C321",
+        "sts2_bench/seeds.py": "AEAA41AF9E95325BCCF25D3160AE74632D37111E4833328D230347CCB113578E",
+        "sts2_bench/sequence_safety.py": "43D38E7055A64A23E30DC0CC658214125F739D3E79C93F4D345ED38068CF6A3A",
+        "sts2_bench/sequence_validation.py": "075D2397ECB12D03C30BA9CD8D82FF9869AF79A98557A15F885368DB6081745C",
+        "sts2_bench/sequences.py": "29B3D8F6D1F3ADC9FAE81A04AD10D9A5A53F40A1943A7A3780974B46ECC40F41",
+        "sts2_bench/trace_analysis.py": "08885E3141744CB64820A612CD6739B3B274BFE5AE48F46A678A019C9D4D8930",
+        "sts2_bench/requirements.txt": "4C0887934D80D16ADDA4F540F4996B1B729F0629D2C0E2BA5777AFD2F6901334"
+      },
+      "intervention_files": {
+        "sts2_bench/experiment_identity.py": "851F6F8E9860D28B55D7B0BE823D75BEED5EBB230D6AFC6FFF324DB5BD737A68",
+        "sts2_bench/layered_experience.py": "8D500EB781B6B746361111902DB6E64029CA346CFDDA64573E0EF7BF204B59C3",
+                "sts2_bench/full_reflection_pairs.py": "9AF13E571414FF60344E30C8F2AA611A829942BCAEEEB59D700AFF89BF615290",
+        "sts2_bench/reflection_execution.py": "4FC75C4020B5C4A6A6F63F53C6CA38B8AB448D1616E253F6C17E95A64F9472A1"
+      },
+      "runtime_files": {
+        "__replace__": true,
+                "sts2_bench/process.py": "0015126ACC919B3546EE139D37F9F7C4F9A7D20F9ECA57D22B910CA3C0DF2A61",
+        "../sts2-cli/.tools/dotnet/dotnet.exe": "2E680E6D5E2E8611B6AC8ABB440213B8F4788E1B4EE4979E01989275698DB6F1",
+        "../sts2-cli/.tools/dotnet/host/fxr/9.0.16/hostfxr.dll": "C3DA8C6E6AD0E0F3562132F07270B856030F4D5D191400539215394BEFD0727E",
+        "../sts2-cli/.tools/dotnet/shared/Microsoft.NETCore.App/9.0.16/clrjit.dll": "71E62A0B5CD2AC7CB6255111E0A586345E76813D8A8F6151D25DF334CD04B112",
+        "../sts2-cli/.tools/dotnet/shared/Microsoft.NETCore.App/9.0.16/coreclr.dll": "D9509E3A9920CEFE16A10A9B028C555EAF0D7E35C1DAF1B7383D52FC40E655F7",
+        "../sts2-cli/.tools/dotnet/shared/Microsoft.NETCore.App/9.0.16/hostpolicy.dll": "BADC87B13C4FCA6F9F42A699E902B94111777F148B72D5E8521BC17C64897862",
+        "../sts2-cli/.tools/dotnet/shared/Microsoft.NETCore.App/9.0.16/System.Private.CoreLib.dll": "D2CA21672B8AEB3FD926C559380B29E1A9C04FEFCE2A8F67E7D2E33EEE488D3D",
+        "../sts2-cli/.tools/dotnet/shared/Microsoft.NETCore.App/9.0.16/System.Runtime.dll": "E62828B723834B92120A4BE737B34E24DB2CAB4080110C3FC8C599E661D54BED",
+        "../sts2-cli/src/Sts2Headless/bin/Debug/net9.0/GodotSharp.dll": "96E944E3347C3E62F487F99538CECE0DF242E58CA237D93CADB1AFF9E19A4236",
+        "../sts2-cli/src/Sts2Headless/bin/Debug/net9.0/Sts2Headless.deps.json": "6C496BBBFC85658C68DED8BEB6F05AE5C8A0A7CC34E5286F740C0755B89748CA",
+        "../sts2-cli/src/Sts2Headless/bin/Debug/net9.0/Sts2Headless.dll": "89C51E2D6F6A6A983E48373B9AC1B723651F1CDA23C0E209BDA84AD3FC1A0760",
+        "../sts2-cli/src/Sts2Headless/bin/Debug/net9.0/Sts2Headless.runtimeconfig.json": "7C7A15281D8FB66B26DBBD2D8B77E1C7791180FF0487C411D8537CAD4FEAA8BD",
+        "../sts2-cli/lib/0Harmony.dll": "EF1898322C9F5C86DC1B0758B272A9C440823B4A41CA9A0B82A3AA6B3D206387",
+        "../sts2-cli/lib/MonoMod.Backports.dll": "AC3F32BFD44AAB83ABF71ABDFF6DDE548D57B7C0F8A1FE6D8964E348B4EEAFB1",
+        "../sts2-cli/lib/MonoMod.ILHelpers.dll": "FDD0E3538340FD78B8F521E62B8CAC1EBB7683AC1F27F6AAEDFC1044B14BF4BB",
+        "../sts2-cli/lib/Sentry.dll": "77132B2E6E1FCBF3A568A53DF6E7803E020EC7E4BDD74AA665107EE413CDFA21",
+        "../sts2-cli/lib/SmartFormat.dll": "6220CDE1DAFFFDE5C51A4E23DB4BB16E8EC620EF52BAC51C0AD5F48C4769F168",
+        "../sts2-cli/lib/SmartFormat.ZString.dll": "723E9FFDB9CEC9565D9BBBDB27B4D19A9B0BA4FF006E1AB8B94022AE5C426450",
+        "../sts2-cli/lib/Steamworks.NET.dll": "E1CD0BF2436CEFBB8BFCFCC1CEA0587E5B9C740769E8340F7B9E9DE72785FCF0",
+        "../sts2-cli/lib/sts2.dll": "554096F7790D340999A37E2239AFF81CED701B58E857EC628DF27C7798F5BF31",
+        "../sts2-cli/lib/System.IO.Hashing.dll": "FBE8C2FCB4ADC01DA5C3C8ED0D727903B8FDA1E6B84DA3C447C9794615F30664"
+      },
+      "runtime_trees": {
+        "__replace__": true,
+        "game_lib_tree_sha256": "257E32383C95748C966BC3D9D28C1DAD44DC43DC26CC5ECC94B5EA77A90447E7",
+        "dotnet_runtime_tree_sha256": "B5B4B650C16A1704B69FC772488B71E99D2F5B77AF59BAF863585E3EB66CFC09",
+        "dotnet_hostfxr_tree_sha256": "9F553BA8F3E36792E977FA1BDCE3917FA5E0D8C6B258FCC5F53786F9F1DA067E"
+      }
+    }
+  }
+}

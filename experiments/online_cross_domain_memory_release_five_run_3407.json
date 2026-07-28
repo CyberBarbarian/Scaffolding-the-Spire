@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "experiment_id": "online-cross-domain-memory-release-five-run-3407",
+  "purpose": "Five strictly serial full games on one fixed environment seed. Each round inherits the previous round's complete learned memory and runtime decisions are not parallelized or frozen. Round one is a cold-start learning run and is not treated as memory-effect evidence when exposure is zero.",
+  "online_experiment": "experiments/online_cross_domain_memory_release_v1.json",
+  "seed": "ironclad_a0_3407",
+  "repeat_count": 5,
+  "strict_code_identity": true,
+  "treatment_evaluability": {
+    "minimum_inherited_memory_injection_events": 8,
+    "minimum_inherited_memory_exposed_rounds": 2,
+    "minimum_distinct_inherited_entry_ids": 1
+  },
+  "initial_memory": {
+    "path": "results/structured_memory_release_initial_empty_20260721/memory_store.json",
+    "content_hash": "45e00d7f4c9940ef36c716b998fc01e7e6a4e52db7fbe5c0318d53a0549f6591",
+    "sha256": "903FA58C04AF0F92643581FC60D04426FB46AE5A5DC3E5C09875130790A4D68E",
+    "reset_runtime_counters": false
+  },
+  "output_root": "results/online_cross_domain_memory_release_five_run_3407_20260721_retry15"
+}

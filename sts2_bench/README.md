@@ -2,12 +2,11 @@
 
 Python benchmark and LLM-policy harness for the STS2 headless JSON protocol.
 
-This package is the benchmark/research layer.  It deliberately avoids the
-legacy HTTP bridge under `legacy/agent-http-bridge/`: benchmark runs start
-`src/Sts2Headless` as a subprocess and communicate through stdin/stdout JSON.
-The runtime adapter remains in
-`sts2-cli`; this package owns policy prompting, legal-action presentation,
-validation, trace logging, and offline analysis.
+This package is the benchmark/research layer. Benchmark runs start the
+authoritative adjacent `sts2-cli` runtime (or a frozen copy selected through
+`STS2_CLI_ROOT`) and communicate through stdin/stdout JSON. There is no second
+runtime implementation in this repository. This package owns policy prompting,
+legal-action presentation, validation, trace logging, and offline analysis.
 
 The current default research architecture is evidence-first and pure LLM:
 deterministic modules assemble facts and candidate-action evidence, but they do
@@ -28,6 +27,8 @@ selects exactly one current legal `action_id`.
 - `posterior.py` - evidence-only LLM deck-state posterior evaluator for card
   reward decisions.
 - `run_context.py` - per-run RunPlan/RunMemory store used by OCC.
+- `experiment_identity.py` - stable run identifiers, artifact hashes, and Git
+  provenance for manifests.
 - `feedback.py` - uniform validation-feedback event envelope and per-decision
   feedback bus.
 - `route_plan.py` - runner-local route-plan event validation.
@@ -35,8 +36,14 @@ selects exactly one current legal `action_id`.
 - `runner.py` - benchmark loop, action validation/retry bus, execution, metrics,
   and JSONL trace logging.
 - `run_benchmark.py` - implementation behind the `python -m sts2_bench run` command.
+- `parallel_benchmark.py` - suite launcher behind `python -m sts2_bench parallel`.
 - `trace_analysis.py` - implementation behind the `python -m sts2_bench trace-analysis` command.
 - `env.py` - dependency-free RL-style environment with action masks.
+
+Deferred research prototypes are intentionally not part of the default runtime
+flow. New studies should prefer a frozen JSON configuration plus reusable
+extraction, exposure, and audit primitives instead of adding a package-level
+runner for every one-off experiment version.
 
 ## Runtime Flow
 
@@ -146,7 +153,7 @@ Current modules:
 
 - `DeckBuildContextModule` - exposes the deck as grouped inventory when
   `player.deck` is present.
-- `CombatReflectionModule` - exposes recent observed transition changes from
+- `RecentTransitionEvidenceModule` - exposes recent observed transition changes from
   `last_action_result`.
 - `RewardEvidenceModule` - presents pick/claim/skip reward actions at the same
   candidate level.
@@ -179,9 +186,11 @@ a full-detail information action and is still logged through
 
 ### Reward Posterior Evaluator
 
-For `card_reward`, the coordinator can run a separate LLM posterior evaluator
-before OCC chooses.  This evaluator is not a second policy and does not execute
-or select actions.  It receives the current grouped deck, current legal reward
+For `card_reward`, an LLM-backed policy can run a separate posterior evaluator
+before the action-selection response. The coordinator uses it before OCC; the
+single-agent policy reuses the same history-free evaluator and prompt assembly.
+This evaluator is not a second policy and does not execute or select actions.
+It receives the current grouped deck, current legal reward
 actions, candidate evidence, recent combat facts, and the deterministic
 `posterior_audit`.  It must return one deck-state analysis per candidate:
 
@@ -196,20 +205,58 @@ actions, candidate evidence, recent combat facts, and the deterministic
 The evaluator must cover every current `candidate_evidence.action_id` exactly
 once and copy labels exactly.  The no-policy-field validator rejects scores,
 ranks, recommendations, preferred actions, selected actions, and similar
-strategy fields.  OCC receives the resulting
+strategy fields. The action-selection agent receives the resulting
 `reward_posterior_evaluation` as evidence inside the card reward prompt; final
-selection still comes from the single OCC action-selection response.
+selection still comes from one policy response.
 
-The CLI enables this by default for `--agent coordinator`.  Use
+The CLI enables this by default for LLM-backed agents. Use
 `--no-reward-posterior-evaluator` to run A/B comparisons against the
 history-free reward prompt without the second analysis pass.
+
+### Orthogonal Ablation Controls
+
+The benchmark exposes the reusable treatment dimensions through the existing
+configuration owners rather than parallel prompt implementations:
+
+- `--context-mode combat_state_only` renders the same current Combat MDP state,
+  rules, legal actions, and response contract as the managed control, with no
+  combat history.
+- `--context-mode combat_dialogue` keeps raw accepted user/assistant dialogue
+  from the current combat turn and the last three completed turns. Override the
+  completed-turn window with `--combat-dialogue-history-turns`.
+- `--context-mode combat_mdp_state` remains the managed control with
+  engine-fact action history, provisional intent, recent turn board, and older
+  compressed turn facts.
+- `--reward-posterior-evaluator` /
+  `--no-reward-posterior-evaluator` controls the existing history-free card
+  reward posterior pass for both `coordinator` and `llm`.
+- `--agent formal_generalist` selects one policy for every decision over the
+  formal engine state and legal-action surface. It uses the static full
+  rules-v2 contract and excludes CA/OCC routing, persistent route plans, reward
+  posterior evaluation, managed histories, rule projection, and adjacent state
+  changes. This is a bridge baseline between a text command interface and the
+  complete role-specialized harness, not a CA/OCC-only ablation.
+- `--rule-projection-and-recent-changes` /
+  `--no-rule-projection-and-recent-changes` jointly controls the
+  decision-selected rule block and the adjacent `last_action_result` display.
+
+Defaults retain the tracked control behavior. When a context component is not
+selected, it is omitted from the model prompt without a treatment declaration
+or placeholder. Resolved run configuration and per-action trace metadata record
+the selected values for audit.
 
 ## CA, OCC, And RunContext
 
 `--agent coordinator` creates the current multi-surface LLM harness:
 
-- CA is an `OpenAICompatAgent` in `turn_chat` mode.  It handles combat turns and
-  may keep compact chat history within the current player turn.
+- CA is an `OpenAICompatAgent` for combat turns.  The tracked default uses
+  `combat_mdp_state` with one replaceable provisional turn intent and
+  cross-turn engine-fact combat history;
+  `turn_chat` remains available for ablations that keep compact chat history
+  within the current player turn.
+- When CA uses `combat_mdp_state`, `--combat-skill-hints` can add a structured
+  `combat_guidance` field derived from visible `Combat skills` into the MDP
+  state JSON. Profiles are `baseline`, `survival`, `targeting`, and `full`.
 - OCC is an `OutOfCombatContextAgent` wrapper around an `OpenAICompatAgent`.
   It handles rewards, shops, routes, events, rest sites, treasure, and
   non-combat selections.
@@ -233,7 +280,21 @@ ignored.
 
 - `RunPlan` - `route_plan`, `build_plan`, `resource_policy`, `open_threads`,
   and `delayed_effects`.
-- `RunMemory` - recent facts, combat reports, and pending mandates.
+- `RunMemory` - a per-run factual ledger containing recent facts, combat
+  reports, and pending mandates. It resets between runs and is not learned
+  experience memory.
+
+Memory-related names deliberately separate three scopes:
+
+- `ShortTermMemory` / `short_term_memory_*` - optional recent action history
+  inside one episode for a single agent.
+- `RunContextStore` / `RunMemory` - current-run coordinator facts and plans.
+- `experience_memory` - reserved for the future cross-run experience module;
+  no current switch aliases or silently enables it.
+
+The coordinator rejects `short_term_memory_enabled=true` because its CA/OCC
+context paths already have explicit per-run context management. This prevents a
+nominal memory treatment from becoming a silent no-op.
 
 The LLM cannot mutate this store directly.  It may return:
 
@@ -458,11 +519,16 @@ The LLM agent expects an OpenAI-compatible chat completions endpoint.  Examples
 include Ollama, LM Studio, vLLM, and llama.cpp server.
 
 Non-secret defaults live in `sts2_bench/benchmark.yaml`.  The tracked defaults
-run the random baseline with the preconfigured fixed seeds in
-`sts2_bench/seeds_ironclad_a0.json` so a fresh checkout is reproducible before
-LLM credentials are configured.  The default model is DeepSeek V4 Pro, written
-as the provider model name `deepseek-v4-pro`; local provider URLs and secrets
-still come from `.env`.
+now run the coordinator chain-of-thought (CoT) route baseline: DeepSeek V4 Flash
+through the APiHY OpenAI-compatible relay, the `analysis` prompt schema,
+LLM-selected complete routes over the canonical full map with hard route-plan
+validation, no deterministic route-candidate objective or max-restsite hint,
+`combat_mdp_state` CA context with one replaceable provisional turn intent and
+cross-turn engine-fact combat history enabled, explicit combat skill prompt
+injection disabled, fixed
+Ironclad A0 seeds, and trace analysis.  Keep API keys in `.env`; a fresh
+checkout can still run a no-credential smoke by overriding
+`--agent random --base-url ""`.
 
 Supported `.env` keys:
 
@@ -473,14 +539,21 @@ Supported `benchmark.yaml` keys include:
 
 - agent/model: `agent`, `base_url`, `model`, `llm_timeout`,
   `llm_max_retries`, `llm_temperature`, `llm_fallback_mode`
-- prompt/context: `prompt_style`, `include_json_state`, `memory_enabled`,
-  `memory_window`, `memory_mode`, `run_summary_enabled`,
+- prompt/context: `prompt_style`, `include_json_state`,
+  `short_term_memory_enabled`, `short_term_memory_window`,
+  `short_term_memory_mode`, `run_summary_enabled`,
   `context_management`
 - run setup: `character`, `ascension`, `lang`, `seeds`, `count`, `max_steps`
-- logging: `out`, `log_level`, `print_prompts`, `print_model_output`,
+- identity/logging: `experiment_id`, `scenario_id`, `replicate_id`,
+  `run_id`, `out`, `log_level`, `print_prompts`, `print_model_output`,
   `trace_analysis`, `trace_analysis_dir`
 - benchmark action surface: `include_full_map`, `allow_repeat_views`,
-  `allow_custom_sequences`
+  `allow_custom_sequences`, `route_candidate_objective`, `map_route_hint`,
+  `combat_card_sequences_enabled`, `combat_reasoning_pool_enabled`,
+  `combat_turn_board_enabled`, `combat_skill_hints_enabled`,
+  `combat_skill_hints_profile`, `combat_skill_hints_max_hints`,
+  `combat_skill_lines_enabled`,
+  `reward_posterior_evaluator`
 
 Precedence is: CLI arguments, shell environment variables, `.env`,
 `sts2_bench/benchmark.yaml`, then code defaults.
@@ -498,6 +571,10 @@ ollama pull qwen2.5:14b
 
 Run a coordinator benchmark:
 
+The bundled `seeds_ironclad_a0_smoke.json` contains only two development
+seeds. It is intentionally a smoke pool; formal evaluation must use a separate,
+frozen seed file declared with `--seeds`.
+
 ```bash
 python -m sts2_bench run \
   --agent coordinator \
@@ -505,7 +582,7 @@ python -m sts2_bench run \
   --model qwen2.5:14b \
   --character Ironclad \
   --ascension 0 \
-  --seeds sts2_bench/seeds_ironclad_a0.json \
+  --seeds sts2_bench/seeds_ironclad_a0_smoke.json \
   --out results/qwen25_14b_coordinator_ironclad_a0.jsonl
 ```
 
@@ -527,6 +604,51 @@ python -m sts2_bench run \
 The summary reports floors, win rate, truncation/error rates, game-action
 counts, view-action counts, repeated-view counts, model fallback counts, and
 wall time.
+
+If `--out` is omitted, `run` writes
+`results/<experiment_id>/<run_id>/trace.jsonl` plus
+`trace.manifest.json`. The stable identity includes config, scenario,
+replicate, and model fingerprints; the manifest records Git provenance and
+prompt/config/setup/seed hashes. Existing trace or manifest files are rejected
+unless `--overwrite` is explicit.
+
+## Parallel Benchmark Suites
+
+Use the tracked parallel launcher for multi-config experiments:
+
+```bash
+python -m sts2_bench parallel \
+  --suite results/combat_pressure_candidates/verified_pressure_suite.json \
+  --workers 4 \
+  --model gemini-3.5-flash \
+  --out-root results/parallel_combat_pressure
+```
+
+The launcher starts every child through the unified `python -m sts2_bench`
+CLI. Each job receives an isolated directory with `trace.jsonl`,
+`stdout.txt`, `stderr.txt`, `launcher_config.json`, and
+`launcher_result.json`. The suite root receives `suite_manifest.json` with
+stable job identities, input hashes, prompt hash, and Git provenance,
+`suite_status.json` while the run is active, and `suite_summary.json` at the
+end. A non-empty output root is rejected instead of silently overwritten.
+
+Generic suites use a `jobs` array:
+
+```json
+{
+  "jobs": [
+    {
+      "name": "default_seed1",
+      "args": ["--agent", "coordinator", "--count", "1"]
+    }
+  ]
+}
+```
+
+The launcher also accepts verified combat-pressure suites with
+`combats[].run_command`; it strips the recorded Python/module prefix and
+rewrites `--out` so parallel jobs do not share a trace file.  Use
+`--dry-run` to write `dry_run_plan.json` without launching any child process.
 
 ## Card Choice Evaluation
 

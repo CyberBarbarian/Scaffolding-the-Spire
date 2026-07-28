@@ -1,0 +1,75 @@
+{
+  "schema_version": 2,
+  "extends": "full_run_research_memory_v27_canonical_enemy_tag_table.json",
+  "extends_sha256": "C7EA6866BB7D47E693B97D8DEB59A198A394AEDCBC5F2126142300EF79EB4E98",
+  "overrides": {
+    "experiment_id": "full-run-research-memory-v28-minimal-cot-ablation",
+    "purpose": "A fixed-corpus 2x2 ablation of minimal structured audit fields in the existing reflection generator and critic. The four arms differ only in whether the generator and/or critic must report evidence sufficiency, causal attribution, non-triviality, retrieval gate, and disposition for every candidate. Audit fields are never shown across stages, stored, retrieved, or injected; there is no extra model call and no change to the baseline context, semantic output schema, tag table, or lifecycle. Five completed combats are replayed as reflection evidence with independent empty stores and blinded semantic judging. Fullgame is permitted only after a clear positive Mini signal.",
+    "minimal_cot_ablation": {
+      "design": "2x2_generator_by_critic",
+      "arms": {
+        "00": {
+          "generator_minimal_cot": 0,
+          "critic_minimal_cot": 0
+        },
+        "10": {
+          "generator_minimal_cot": 1,
+          "critic_minimal_cot": 0
+        },
+        "01": {
+          "generator_minimal_cot": 0,
+          "critic_minimal_cot": 1
+        },
+        "11": {
+          "generator_minimal_cot": 1,
+          "critic_minimal_cot": 1
+        }
+      },
+      "fixed_source_audit": "results/full_run_research_memory_v25_complete_context_retry_and_artifact_integrity_20260722_final/r1/memory_store.audit.jsonl",
+      "fixed_source_audit_sha256": "CFA7BE6E4B3D8266FF3C382E507E953D80265A2DFF108206C448A1681A090C5C",
+      "case_count": 5,
+      "store_initial_state": "independent_empty_per_case_and_arm",
+      "call_budget": "one generator and one critic call per case in every arm",
+      "blinding": "audit-only fields are removed and arm labels randomized independently per case before semantic judging",
+      "primary_metrics": [
+        "blinded_evidence_support",
+        "blinded_causal_attribution",
+        "blinded_non_triviality",
+        "blinded_strength_calibration",
+        "blinded_decision_impact",
+        "blinded_retrieval_gate_quality",
+        "blinded_redundancy"
+      ],
+      "secondary_metrics": [
+        "final_candidate_count",
+        "system_rejection_count",
+        "repair_attempt_count",
+        "prompt_characters",
+        "provider_tokens",
+        "wall_clock_seconds"
+      ],
+      "fullgame_gate": "Run no fullgame unless the blinded Mini results show a clear semantic-quality gain without a material validity or cost regression."
+    },
+    "memory": {
+      "generator_minimal_cot": 0,
+      "critic_minimal_cot": 0,
+      "minimal_cot_contract": "When enabled for a stage, the same response must include one compact audit row for every candidate. It is structured observable rationale rather than free-form hidden reasoning. Generator audits are stripped before the critic; all audit fields are stripped before persistence and retrieval.",
+      "minimal_cot_call_budget_contract": "The treatment adds no model request: every case retains exactly one generator call and one critic call, excluding bounded format repair.",
+      "minimal_cot_semantic_boundary_contract": "Python validates audit syntax, complete candidate coverage, enum values, and critic disposition consistency only. It does not judge whether an experience is strategically true."
+    },
+    "freeze": {
+      "baseline_files": {
+        "sts2_bench/actions.py": "4C075DE4CE6BD41715665434C8AEDD9DB53C8C86F299C995BA9A9ADBFB622726",
+        "sts2_bench/agents.py": "558DBE6D264F9F8FF6CBC6C530B1ED0DFC4D095158ABAFAEA1DFCBA1668562EC",
+        "sts2_bench/run_benchmark.py": "E5B645BD9E21A9F20480C369E7C4C66F7190D21EAEF14C068BC859DF943989A7",
+        "sts2_bench/runner.py": "0EEE9E5F0AA935CA054D3EB8737E306D94113C16D0E392292B3BCDC0334D7B84",
+        "sts2_bench/trace_analysis.py": "D85CEF995DCB19E0155A82AEE7F43F25DA28BDBCCFEB4A95ABD042229F50B950"
+      },
+      "intervention_files": {
+        "sts2_bench/layered_experience.py": "634F1E7846AF0EFF2948A85D4EE70300E53A25C6931804614F48EBE4B6549B32",
+        "sts2_bench/full_reflection_pairs.py": "36736D84D657DBD59FAA6890BCE1178A04C429F1B7378293FD077554B7E62578",
+        "scripts/run_minimal_cot_ablation.py": "2D97F0B41E5076CAF2DCB5FB29CE5B35218BC249AE56E8DFA1B99AF13F94647C"
+      }
+    }
+  }
+}

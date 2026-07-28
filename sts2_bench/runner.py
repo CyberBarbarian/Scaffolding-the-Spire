@@ -9,19 +9,22 @@ from pathlib import Path
 from statistics import median
 from typing import Any, Callable, Iterable, Literal
 
-from .actions import CustomSequenceExposure, LegalAction, build_legal_actions
+from .actions import CustomSequenceExposure, LegalAction, UnsupportedDecisionError, build_legal_actions
 from .agents import (
     ActionPromptOrderMode,
     Agent,
     CUSTOM_SEQUENCE_KIND_LABEL_ERROR,
     CUSTOM_SEQUENCE_PAYLOAD_RULE,
+    CombatSkillHintsProfile,
     ConversationMode,
     FallbackMode,
-    MemoryMode,
+    MapRouteHint,
+    ModelActionError,
     OpenAICompatAgent,
     PromptStyle,
     RandomAgent,
     RouteMapPromptFormat,
+    ShortTermMemoryMode,
     TurnChatAssistantHistory,
     TurnChatUpdateMode,
 )
@@ -101,6 +104,7 @@ class RouteCandidatePlannerAgent:
     objective: RouteObjective = "max_restsites"
     planned_remaining: list[dict[str, Any]] = field(default_factory=list)
     force_replan: bool = False
+    replan_reason_tags: list[str] = field(default_factory=list)
 
     def build_prompt(self, state: dict[str, Any], legal_actions: list[LegalAction]) -> str:
         if state.get("decision") == "map_select" and isinstance(state.get("full_map"), dict):
@@ -127,6 +131,7 @@ class RouteCandidatePlannerAgent:
     def reset_episode(self) -> None:
         self.planned_remaining.clear()
         self.force_replan = False
+        self.replan_reason_tags.clear()
         reset = getattr(self.inner, "reset_episode", None)
         if callable(reset):
             reset()
@@ -141,6 +146,11 @@ class RouteCandidatePlannerAgent:
     ) -> None:
         if "route-plan validation" in feedback:
             self.force_replan = True
+            if (
+                "route_plan_invalid_after_map_change" in feedback
+                or "route_plan_update_missing_map_changed_reason" in feedback
+            ):
+                self.replan_reason_tags = ["map_changed"]
         receive = getattr(self.inner, "receive_external_feedback", None)
         if callable(receive):
             receive(state, action, meta, feedback, legal_actions)
@@ -165,11 +175,23 @@ class RouteCandidatePlannerAgent:
         if not map_actions:
             return None
 
-        if self.planned_remaining and not self.force_replan:
-            planned_next = self.planned_remaining[0]
+        active_route_plan = (
+            state.get("active_route_plan")
+            if isinstance(state.get("active_route_plan"), dict)
+            else None
+        )
+        authoritative_remaining = (
+            [dict(node) for node in active_route_plan.get("remaining") or [] if isinstance(node, dict)]
+            if active_route_plan is not None
+            else []
+        )
+        if active_route_plan is not None and not self.force_replan:
+            planned_next = active_route_plan.get("expected_next")
+            if not isinstance(planned_next, dict) and authoritative_remaining:
+                planned_next = authoritative_remaining[0]
             action = _matching_map_action(map_actions, planned_next)
             if action is not None:
-                self.planned_remaining = self.planned_remaining[1:]
+                self.planned_remaining = authoritative_remaining[1:]
                 return action, {
                     "agent": "route_candidate_planner",
                     "delegated_agent": type(self.inner).__name__,
@@ -196,10 +218,12 @@ class RouteCandidatePlannerAgent:
         if action is None:
             return None
 
-        event_type = "route_plan_updated" if self.planned_remaining or self.force_replan else "route_plan_created"
+        event_type = "route_plan_updated" if active_route_plan is not None else "route_plan_created"
         plan = [dict(node) for node in selected.nodes]
         self.planned_remaining = [dict(node) for node in selected.nodes[1:]]
         self.force_replan = False
+        reason_tags = ["route_candidate", self.objective, *self.replan_reason_tags]
+        self.replan_reason_tags.clear()
         return action, {
             "agent": "route_candidate_planner",
             "delegated_agent": type(self.inner).__name__,
@@ -216,7 +240,7 @@ class RouteCandidatePlannerAgent:
                 "route_plan_event": {
                     "event_type": event_type,
                     "new_plan": plan,
-                    "reason_tags": ["route_candidate", self.objective],
+                    "reason_tags": reason_tags,
                     "reason": (
                         f"Enumerated {len(candidates)} complete visible routes and selected "
                         f"objective={self.objective}."
@@ -246,6 +270,35 @@ class JsonlLogger:
             self.handle = None
 
 
+def _headless_error_message(state: dict[str, Any]) -> str | None:
+    if state.get("type") == "error":
+        return str(state.get("message") or "Headless engine returned an error state")
+    if state.get("engine_error") is True or state.get("error") == "engine_error":
+        return str(
+            state.get("engine_error_reason")
+            or state.get("message")
+            or "Headless engine reported engine_error"
+        )
+    return None
+
+
+def _fail_on_headless_error(
+    result: RunResult,
+    state: dict[str, Any],
+    *,
+    logger: JsonlLogger | None,
+    step: int,
+) -> bool:
+    message = _headless_error_message(state)
+    if message is None:
+        return False
+    result.invalid_states += 1
+    logger and logger.write({"type": "error", "step": step, "state": state})
+    result.error = message
+    _fill_result(result, state)
+    return True
+
+
 def run_one(
     *,
     agent: Agent,
@@ -272,6 +325,7 @@ def run_one(
     decision_hook: DecisionHook | None = None,
     combat_recorder: Any | None = None,
     route_candidate_objective: RouteObjective | None = None,
+    setup_commands: list[dict[str, Any]] | None = None,
 ) -> RunResult:
     """Run one game and return summary metrics."""
 
@@ -314,8 +368,27 @@ def run_one(
                 "route_plan_enforcement": route_plan_enforcement,
             }
         )
+        if _fail_on_headless_error(result, state, logger=logger, step=-1):
+            return result
+        for setup_index, command in enumerate(setup_commands or []):
+            setup_command = json.loads(json.dumps(command))
+            state = proc.send(setup_command)
+            action_tape.append(setup_command)
+            result.extra["setup_action_count"] = int(result.extra.get("setup_action_count") or 0) + 1
+            logger and logger.write(
+                {
+                    "type": "setup_action",
+                    "setup_index": setup_index,
+                    "command": setup_command,
+                    "state": _state_summary(state),
+                }
+            )
+            if _fail_on_headless_error(result, state, logger=logger, step=-1):
+                return result
 
         for step in range(max_steps):
+            if _fail_on_headless_error(result, state, logger=logger, step=step):
+                return result
             decision = state.get("decision")
             if decision == "game_over":
                 _fill_result(result, state)
@@ -323,6 +396,9 @@ def run_one(
 
             if (include_full_map or route_candidate_objective is not None) and decision == "map_select" and "full_map" not in state:
                 map_state = proc.send({"cmd": "get_map"})
+                if _fail_on_headless_error(result, map_state, logger=logger, step=step):
+                    state = map_state
+                    return result
                 if map_state.get("type") == "map":
                     state = {**state, "full_map": map_state}
             if route_plan_tracker is not None:
@@ -336,21 +412,65 @@ def run_one(
             blocked_card_reward_claims = (
                 skipped_card_reward_claims.get(reward_room_key) if decision == "combat_reward" else None
             )
-            legal_actions = build_legal_actions(
-                state,
-                allow_repeat_views=allow_repeat_views,
-                allow_card_sequences=card_sequences_enabled,
-                allow_precomputed_card_sequences=precomputed_card_sequences_enabled,
-                allow_custom_sequences=custom_sequences_enabled,
-                custom_sequence_exposure=custom_sequence_exposure,
-                blocked_card_reward_claims=blocked_card_reward_claims,
+            try:
+                legal_actions = build_legal_actions(
+                    state,
+                    allow_repeat_views=allow_repeat_views,
+                    allow_card_sequences=card_sequences_enabled,
+                    allow_precomputed_card_sequences=precomputed_card_sequences_enabled,
+                    allow_custom_sequences=custom_sequences_enabled,
+                    custom_sequence_exposure=custom_sequence_exposure,
+                    blocked_card_reward_claims=blocked_card_reward_claims,
+                )
+            except UnsupportedDecisionError as exc:
+                result.invalid_states += 1
+                _log_invalid_decision_state(
+                    logger=logger,
+                    log_level=log_level,
+                    step=step,
+                    state=state,
+                    error=str(exc),
+                )
+                raise
+            if not legal_actions:
+                result.invalid_states += 1
+                error = (
+                    f"recognized decision {decision!r} exposed no legal actions; "
+                    "refusing implicit proceed"
+                )
+                _log_invalid_decision_state(
+                    logger=logger,
+                    log_level=log_level,
+                    step=step,
+                    state=state,
+                    error=error,
+                )
+                logger and logger.write(
+                    {
+                        "type": "decision_error",
+                        "step": step,
+                        "decision": decision,
+                        "error": error,
+                        "report_required": True,
+                    }
+                )
+                raise UnsupportedDecisionError(error)
+
+            forced_map_action = _forced_singleton_map_action(state, legal_actions)
+            evidence_bundle = (
+                None
+                if forced_map_action is not None
+                else build_evidence_bundle(
+                    state,
+                    legal_actions,
+                    store=_agent_run_context_store(agent),
+                )
             )
-            evidence_bundle = build_evidence_bundle(
-                state,
-                legal_actions,
-                store=_agent_run_context_store(agent),
+            prompt = (
+                agent.build_prompt(state, legal_actions)
+                if forced_map_action is None and (print_prompts or log_level == "full")
+                else None
             )
-            prompt = agent.build_prompt(state, legal_actions) if print_prompts or log_level == "full" else None
             if logger:
                 decision_entry = _decision_log_entry(
                     log_level=log_level,
@@ -361,47 +481,60 @@ def run_one(
                     evidence_bundle=evidence_bundle,
                 )
                 if decision_entry:
+                    if forced_map_action is not None:
+                        decision_entry["runtime_takeover"] = {
+                            "mode": "forced_singleton_map",
+                            "action": forced_map_action.to_log_dict(),
+                            "model_called": False,
+                        }
                     logger.write(decision_entry)
 
-            if not legal_actions:
-                result.invalid_states += 1
-                result.game_action_count += 1
-                result.steps = step + 1
-                state = proc.action("proceed")
-                if _max_game_actions_reached(result, max_game_actions, state):
-                    return result
-                continue
-
-            if print_prompts:
+            if print_prompts and prompt is not None:
                 print(f"\n===== PROMPT step={step} decision={decision} =====")
                 print(prompt)
                 print(f"===== END PROMPT step={step} =====\n", flush=True)
 
-            action, meta, validation_error = _choose_action_with_runner_validation(
-                agent=agent,
-                state=state,
-                legal_actions=legal_actions,
-                prompt=prompt,
-                result=result,
-                logger=logger,
-                log_level=log_level,
-                step=step,
-                decision=decision,
-                print_model_output=print_model_output,
-                action_tape=action_tape,
-                character=character,
-                seed=seed,
-                ascension=ascension,
-                lang=lang,
-                sequence_probe_factory=sequence_probe_factory,
-                route_plan_tracker=route_plan_tracker,
-                route_plan_enabled=route_plan_enabled,
-                route_plan_enforcement=route_plan_enforcement,
-                evidence_bundle=evidence_bundle,
-            )
+            if forced_map_action is not None:
+                action = forced_map_action
+                meta = {
+                    "agent": "runtime",
+                    "active_agent": "runtime",
+                    "policy": "forced_singleton_map",
+                    "model_called": False,
+                }
+                validation_error = None
+                result.extra["forced_singleton_map_count"] = int(
+                    result.extra.get("forced_singleton_map_count") or 0
+                ) + 1
+            else:
+                assert evidence_bundle is not None
+                action, meta, validation_error = _choose_action_with_runner_validation(
+                    agent=agent,
+                    state=state,
+                    legal_actions=legal_actions,
+                    prompt=prompt,
+                    result=result,
+                    logger=logger,
+                    log_level=log_level,
+                    step=step,
+                    decision=decision,
+                    print_model_output=print_model_output,
+                    action_tape=action_tape,
+                    character=character,
+                    seed=seed,
+                    ascension=ascension,
+                    lang=lang,
+                    sequence_probe_factory=sequence_probe_factory,
+                    route_plan_tracker=route_plan_tracker,
+                    route_plan_enabled=route_plan_enabled,
+                    route_plan_enforcement=route_plan_enforcement,
+                    evidence_bundle=evidence_bundle,
+                )
             if validation_error:
                 result.invalid_states += 1
-                if validation_error.startswith("route plan validation failed:"):
+                if validation_error.startswith(
+                    ("route plan validation failed:", "evidence validation failed:")
+                ):
                     result.error = validation_error
                 else:
                     result.error = f"custom sequence validation failed: {validation_error}"
@@ -413,6 +546,17 @@ def run_one(
                 _count_view_action(result, state, action.command)
                 result.steps = step + 1
                 state = _apply_view_action(proc, state, action.command)
+                if _fail_on_headless_error(result, state, logger=logger, step=step):
+                    return result
+                _log_executed_action(
+                    logger=logger,
+                    log_level=log_level,
+                    step=step,
+                    decision=decision,
+                    action=action,
+                    meta=meta,
+                    next_state=state,
+                )
                 if combat_recorder is not None:
                     combat_recorder.after_action(
                         step=step,
@@ -428,20 +572,38 @@ def run_one(
                 result.game_action_count += 1
                 result.steps = step + 1
                 old_state = state
-                sequence_result = execute_card_sequence(state, action.command.get("sequence") or [], proc.send)
+
+                def send_sequence_command(command: dict[str, Any]) -> dict[str, Any]:
+                    sequence_state = proc.send(command)
+                    message = _headless_error_message(sequence_state)
+                    if message is not None and sequence_state.get("type") != "error":
+                        return {**sequence_state, "type": "error", "message": message}
+                    return sequence_state
+
+                sequence_result = execute_card_sequence(
+                    state,
+                    action.command.get("sequence") or [],
+                    send_sequence_command,
+                )
                 next_state = sequence_result.state
                 result.extra["last_sequence_steps"] = sequence_result.steps_executed
                 if sequence_result.stopped_reason:
                     result.extra["last_sequence_stop"] = sequence_result.stopped_reason
-                if next_state.get("type") == "error":
-                    result.invalid_states += 1
-                    logger and logger.write({"type": "error", "step": step, "state": next_state})
-                    result.error = next_state.get("message") or "Headless engine returned an error state"
-                    _fill_result(result, next_state)
+                if _fail_on_headless_error(result, next_state, logger=logger, step=step):
+                    state = next_state
                     return result
                 executed_commands = _copy_commands(sequence_result.commands_executed)
                 action_tape.extend(executed_commands)
                 state = _attach_last_action_result(old_state, next_state, action)
+                _log_executed_action(
+                    logger=logger,
+                    log_level=log_level,
+                    step=step,
+                    decision=decision,
+                    action=action,
+                    meta=meta,
+                    next_state=state,
+                )
                 if combat_recorder is not None:
                     combat_recorder.after_action(
                         step=step,
@@ -462,14 +624,25 @@ def run_one(
             result.steps = step + 1
             old_state = state
             next_state = proc.send(action.command)
-            if next_state.get("type") == "error":
-                result.invalid_states += 1
-                logger and logger.write({"type": "error", "step": step, "state": next_state})
-                result.error = next_state.get("message") or "Headless engine returned an error state"
-                _fill_result(result, next_state)
+            if _fail_on_headless_error(result, next_state, logger=logger, step=step):
+                state = next_state
                 return result
             action_tape.append(_copy_command(action.command))
             state = _attach_last_action_result(old_state, next_state, action)
+            if forced_map_action is not None and route_plan_tracker is not None:
+                meta["route_plan_effect"] = route_plan_tracker.apply_forced_map_action(
+                    state=old_state,
+                    action=action,
+                )
+            _log_executed_action(
+                logger=logger,
+                log_level=log_level,
+                step=step,
+                decision=decision,
+                action=action,
+                meta=meta,
+                next_state=state,
+            )
             if combat_recorder is not None:
                 combat_recorder.after_action(
                     step=step,
@@ -486,7 +659,10 @@ def run_one(
                 action,
                 state,
             )
-            _record_agent_transition(agent, old_state, action, meta, state)
+            if forced_map_action is not None:
+                _record_runtime_transition(agent, old_state, action, meta, state)
+            else:
+                _record_agent_transition(agent, old_state, action, meta, state)
             if _max_game_actions_reached(result, max_game_actions, state):
                 return result
 
@@ -502,6 +678,8 @@ def run_one(
     finally:
         if combat_recorder is not None:
             combat_recorder.finalize(state, reason="run_finally")
+        if log_level == "full" and isinstance(state, dict):
+            _attach_authoritative_last_state(result, state)
         result.wall_time_sec = time.time() - started
         logger and logger.write({"type": "result", "result": result.to_dict()})
         if owns_process:
@@ -542,7 +720,22 @@ def _choose_action_with_runner_validation(
         },
     )
     while True:
-        action, meta = agent.choose(state, legal_actions, prompt=prompt)
+        run_context_store = _agent_run_context_store(agent)
+        run_context_checkpoint = run_context_store.to_dict() if run_context_store is not None else None
+        try:
+            action, meta = agent.choose(state, legal_actions, prompt=prompt)
+        except ModelActionError as exc:
+            if logger:
+                logger.write(
+                    {
+                        "type": "model_error",
+                        "step": step,
+                        "decision": decision,
+                        "error": str(exc),
+                        "agent_meta": exc.audit_meta,
+                    }
+                )
+            raise
         if not isinstance(action, LegalAction):
             raise TypeError("Agent returned a non-LegalAction")
         meta = {
@@ -576,6 +769,15 @@ def _choose_action_with_runner_validation(
                 details={"reason": reason_error},
             )
             if logger:
+                _log_rejected_action(
+                    logger=logger,
+                    log_level=log_level,
+                    step=step,
+                    decision=decision,
+                    action=action,
+                    meta=meta,
+                    validation=event.to_dict(),
+                )
                 logger.write(
                     feedback_bus.trace_entry(
                         event,
@@ -583,6 +785,7 @@ def _choose_action_with_runner_validation(
                         reason=reason_error,
                     )
                 )
+            _restore_run_context_checkpoint(run_context_store, run_context_checkpoint)
             if not feedback_bus.dispatch_retry(
                 agent=agent,
                 state=state,
@@ -607,6 +810,15 @@ def _choose_action_with_runner_validation(
                 details={"reason": evidence_error},
             )
             if logger:
+                _log_rejected_action(
+                    logger=logger,
+                    log_level=log_level,
+                    step=step,
+                    decision=decision,
+                    action=action,
+                    meta=meta,
+                    validation=event.to_dict(),
+                )
                 logger.write(
                     feedback_bus.trace_entry(
                         event,
@@ -614,6 +826,7 @@ def _choose_action_with_runner_validation(
                         reason=evidence_error,
                     )
                 )
+            _restore_run_context_checkpoint(run_context_store, run_context_checkpoint)
             if not feedback_bus.dispatch_retry(
                 agent=agent,
                 state=state,
@@ -626,9 +839,6 @@ def _choose_action_with_runner_validation(
             ):
                 return action, meta, f"evidence validation failed: {evidence_error}"
             continue
-
-        if logger:
-            logger.write(_action_log_entry(log_level=log_level, step=step, decision=decision, action=action, meta=meta))
 
         if route_plan_enabled and route_plan_tracker is not None:
             route_plan_result = route_plan_tracker.validate_and_apply(
@@ -665,6 +875,17 @@ def _choose_action_with_runner_validation(
                     result.extra["route_plan_validation_soft_error_count"] = int(
                         result.extra.get("route_plan_validation_soft_error_count") or 0
                     ) + 1
+                else:
+                    _log_rejected_action(
+                        logger=logger,
+                        log_level=log_level,
+                        step=step,
+                        decision=decision,
+                        action=action,
+                        meta=meta,
+                        validation=event.to_dict(),
+                    )
+                    _restore_run_context_checkpoint(run_context_store, run_context_checkpoint)
                 if not feedback_bus.dispatch_retry(
                     agent=agent,
                     state=state,
@@ -714,6 +935,15 @@ def _choose_action_with_runner_validation(
             details={"reason": validation_error, "sequence": sequence_payload},
         )
         if logger:
+            _log_rejected_action(
+                logger=logger,
+                log_level=log_level,
+                step=step,
+                decision=decision,
+                action=action,
+                meta=meta,
+                validation=event.to_dict(),
+            )
             logger.write(
                 feedback_bus.trace_entry(
                     event,
@@ -722,6 +952,7 @@ def _choose_action_with_runner_validation(
                     sequence=sequence_payload,
                 )
             )
+        _restore_run_context_checkpoint(run_context_store, run_context_checkpoint)
         if not feedback_bus.dispatch_retry(
             agent=agent,
             state=state,
@@ -836,6 +1067,14 @@ def _fill_result(result: RunResult, state: dict[str, Any]) -> None:
     result.deck_size = player.get("deck_size")
 
 
+def _attach_authoritative_last_state(result: RunResult, state: dict[str, Any]) -> None:
+    snapshot = json.loads(json.dumps(state, ensure_ascii=False))
+    result.extra["last_observed_state"] = snapshot
+    result.extra["last_observed_state_authoritative"] = True
+    if state.get("decision") == "game_over":
+        result.extra["authoritative_terminal_state"] = snapshot
+
+
 def _max_game_actions_reached(
     result: RunResult,
     max_game_actions: int | None,
@@ -923,7 +1162,7 @@ def _agent_run_context_store(agent: Agent) -> RunContextStore | None:
     if isinstance(agent, CoordinatorAgent):
         return agent.store
     if isinstance(agent, OutOfCombatContextAgent):
-        return agent.store
+        return None if agent.reward_only else agent.store
     return None
 
 
@@ -976,12 +1215,59 @@ def _record_agent_transition(
             record(state, action, meta)
 
 
+def _record_runtime_transition(
+    agent: Agent,
+    state: dict[str, Any],
+    action: LegalAction,
+    meta: dict[str, Any],
+    next_state: dict[str, Any] | None = None,
+) -> None:
+    record = getattr(agent, "record_runtime_transition", None)
+    if callable(record):
+        record(state, action, meta, next_state)
+
+
+def _forced_singleton_map_action(
+    state: dict[str, Any],
+    legal_actions: list[LegalAction],
+) -> LegalAction | None:
+    if state.get("decision") != "map_select":
+        return None
+    choices = [
+        choice
+        for choice in state.get("choices") or []
+        if isinstance(choice, dict)
+        and choice.get("col") is not None
+        and choice.get("row") is not None
+    ]
+    if len(choices) != 1:
+        return None
+    map_actions = [
+        action
+        for action in legal_actions
+        if action.kind == "map"
+        and action.command.get("cmd") == "action"
+        and action.command.get("action") == "select_map_node"
+    ]
+    if len(map_actions) != 1:
+        return None
+    args = map_actions[0].command.get("args")
+    if not isinstance(args, dict):
+        return None
+    choice = choices[0]
+    if args.get("col") != choice.get("col") or args.get("row") != choice.get("row"):
+        return None
+    return map_actions[0]
+
+
 def _apply_view_action(proc: Sts2Process, state: dict[str, Any], command: dict[str, Any]) -> dict[str, Any]:
     view = command.get("view")
     if view == "deck":
         return {**state, "view_deck": True}
     if view == "map":
         map_state = proc.send({"cmd": "get_map"})
+        if _headless_error_message(map_state) is not None:
+            return map_state
         if map_state.get("type") == "map":
             return {**state, "view_map": True, "full_map": map_state}
         return {**state, "view_map": True, "view_map_error": map_state}
@@ -1145,6 +1431,7 @@ def _decision_log_entry(
         entry["skip_action_visible"] = evidence_bundle.skip_action_visible
     if log_level == "full":
         entry["state"] = compact_state(state)
+        entry["authoritative_state"] = json.loads(json.dumps(state, ensure_ascii=False))
         entry["legal_actions"] = [action.to_log_dict() for action in legal_actions]
         if evidence_bundle is not None:
             entry["evidence_bundle"] = evidence_bundle.to_dict()
@@ -1157,6 +1444,30 @@ def _decision_log_entry(
     if evidence_bundle is not None:
         entry["evidence_bundle"] = evidence_bundle.summary_dict()
     return entry
+
+
+def _log_invalid_decision_state(
+    *,
+    logger: JsonlLogger | None,
+    log_level: LogLevel,
+    step: int,
+    state: dict[str, Any],
+    error: str,
+) -> None:
+    if logger is None:
+        return
+    decision_entry = _decision_log_entry(
+        log_level=log_level,
+        step=step,
+        state=state,
+        legal_actions=[],
+        prompt=None,
+    )
+    if decision_entry is None:
+        return
+    decision_entry["decision_error"] = error
+    decision_entry["report_required"] = True
+    logger.write(decision_entry)
 
 
 def _map_snapshot_for_trace(state: dict[str, Any]) -> dict[str, Any] | None:
@@ -1218,6 +1529,67 @@ def _action_log_entry(
     entry["action"] = _legal_action_summary(action)
     entry["agent_meta"] = _agent_meta_summary(meta)
     return entry
+
+
+def _log_executed_action(
+    *,
+    logger: JsonlLogger | None,
+    log_level: LogLevel,
+    step: int,
+    decision: Any,
+    action: LegalAction,
+    meta: dict[str, Any],
+    next_state: dict[str, Any] | None = None,
+    extra: dict[str, Any] | None = None,
+) -> None:
+    """Write the single authoritative action event after successful execution."""
+
+    if logger is None:
+        return
+    entry = _action_log_entry(
+        log_level=log_level,
+        step=step,
+        decision=decision,
+        action=action,
+        meta=meta,
+    )
+    if log_level == "full" and isinstance(next_state, dict):
+        entry["state_after"] = json.loads(json.dumps(next_state, ensure_ascii=False))
+    if extra:
+        entry.update(extra)
+    logger.write(entry)
+
+
+def _log_rejected_action(
+    *,
+    logger: JsonlLogger | None,
+    log_level: LogLevel,
+    step: int,
+    decision: Any,
+    action: LegalAction,
+    meta: dict[str, Any],
+    validation: dict[str, Any],
+) -> None:
+    if logger is None:
+        return
+    entry = _action_log_entry(
+        log_level=log_level,
+        step=step,
+        decision=decision,
+        action=action,
+        meta=meta,
+    )
+    entry["type"] = "rejected_action"
+    entry["validation"] = validation
+    logger.write(entry)
+
+
+def _restore_run_context_checkpoint(
+    store: RunContextStore | None,
+    checkpoint: dict[str, Any] | None,
+) -> None:
+    if store is not None and checkpoint is not None:
+        store.restore(checkpoint)
 
 
 def _state_summary(state: dict[str, Any]) -> dict[str, Any]:
@@ -1291,6 +1663,17 @@ def _agent_meta_summary(meta: dict[str, Any]) -> dict[str, Any]:
         "active_agent",
         "route_reason",
         "conversation_mode",
+        "combat_context_variant",
+        "current_state_payload_sha256",
+        "legal_actions_sha256",
+        "history_message_count",
+        "history_completed_turns",
+        "history_rounds",
+        "history_chars",
+        "history_token_estimate",
+        "history_token_usage",
+        "assistant_history",
+        "active_policy_owner",
         "message_count",
         "turn_chat_history_turns",
         "turn_key",
@@ -1311,6 +1694,7 @@ def _agent_meta_summary(meta: dict[str, Any]) -> dict[str, Any]:
         "skip_action_visible",
         "feedback_events",
         "reward_posterior_evaluator",
+        "reward_posterior_evaluator_enabled",
         "reward_posterior_model",
         "reward_posterior_attempt",
         "reward_posterior_elapsed_sec",
@@ -1323,7 +1707,6 @@ def _agent_meta_summary(meta: dict[str, Any]) -> dict[str, Any]:
         "action_prompt_order",
         "action_prompt_order_changed",
         "action_prompt_map_action_ids",
-        "reflection_verifier_selected_action_id",
         "action_prompt_map_action_labels",
         "route_candidate_objective",
         "route_candidate_followed",
@@ -1331,6 +1714,14 @@ def _agent_meta_summary(meta: dict[str, Any]) -> dict[str, Any]:
         "route_candidate_counts",
         "route_candidate_route_text",
         "route_candidate_remaining",
+        "game_ruleset_id",
+        "game_ruleset_sha256",
+        "game_rule_module_ids",
+        "game_rule_render_sha256",
+        "game_rule_delivery",
+        "game_rule_projection_enabled",
+        "rule_projection_and_recent_changes_enabled",
+        "recent_state_changes_delivery",
     ):
         if key in meta and meta[key] is not None:
             summary[key] = meta[key]
@@ -1352,16 +1743,6 @@ def _agent_meta_summary(meta: dict[str, Any]) -> dict[str, Any]:
             "majority_vote_applied": self_consistency.get("majority_vote_applied"),
             "disagreement": self_consistency.get("disagreement"),
         }
-    reflection = meta.get("reflection_verifier")
-    if isinstance(reflection, dict):
-        summary["reflection_verifier"] = {
-            "mode": reflection.get("mode"),
-            "primary_action_id": reflection.get("primary_action_id"),
-            "selected_action_id": reflection.get("selected_action_id"),
-            "verifier_vote_applied": reflection.get("verifier_vote_applied"),
-            "verifier_vote_allowed": reflection.get("verifier_vote_allowed"),
-            "override_block_reason": reflection.get("override_block_reason"),
-        }
 
     parsed = meta.get("parsed")
     if isinstance(parsed, dict):
@@ -1377,55 +1758,70 @@ def summarize(results: Iterable[RunResult]) -> dict[str, Any]:
     rows = list(results)
     if not rows:
         return {"runs": 0}
-    complete = [row for row in rows if row.error is None and not row.truncated]
-    floors = [row.floor or 0 for row in rows]
-    total_steps = sum(row.steps for row in rows)
+    complete = [
+        row
+        for row in rows
+        if row.error is None and not row.truncated and row.decision == "game_over"
+    ]
+    floors = [row.floor or 0 for row in complete]
+    total_steps = sum(row.steps for row in complete)
     total_view_actions = sum(
         row.view_deck_count
         + row.view_map_count
         + row.view_draw_pile_count
         + row.view_discard_pile_count
         + row.view_exhaust_pile_count
-        for row in rows
+        for row in complete
     )
-    total_game_actions = sum(row.game_action_count for row in rows)
+    total_game_actions = sum(row.game_action_count for row in complete)
     truncated = sum(1 for row in rows if row.truncated)
     errors = sum(1 for row in rows if row.error is not None)
     summary = {
         "runs": len(rows),
         "completed": len(complete),
-        "victories": sum(1 for row in rows if row.victory),
+        "victories": sum(1 for row in complete if row.victory),
         "deaths": sum(1 for row in complete if not row.victory),
         "truncated": truncated,
         "errors": errors,
         "truncation_rate": truncated / len(rows),
         "error_rate": errors / len(rows),
-        "win_rate": sum(1 for row in rows if row.victory) / len(rows),
-        "min_floor": min(floors),
-        "max_floor": max(floors),
-        "median_floor": median(floors),
-        "avg_floor": sum(floors) / len(rows),
+        "win_rate": sum(1 for row in complete if row.victory) / len(complete) if complete else 0.0,
+        "min_floor": min(floors) if floors else 0,
+        "max_floor": max(floors) if floors else 0,
+        "median_floor": median(floors) if floors else 0,
+        "avg_floor": sum(floors) / len(complete) if complete else 0.0,
         "avg_floor_completed": (
             sum((row.floor or 0) for row in complete) / len(complete)
             if complete
             else 0.0
         ),
-        "avg_steps": sum(row.steps for row in rows) / len(rows),
-        "avg_game_action_count": total_game_actions / len(rows),
-        "avg_view_deck_count": sum(row.view_deck_count for row in rows) / len(rows),
-        "avg_view_map_count": sum(row.view_map_count for row in rows) / len(rows),
-        "avg_view_draw_pile_count": sum(row.view_draw_pile_count for row in rows) / len(rows),
-        "avg_view_discard_pile_count": sum(row.view_discard_pile_count for row in rows) / len(rows),
-        "avg_view_exhaust_pile_count": sum(row.view_exhaust_pile_count for row in rows) / len(rows),
-        "avg_view_action_count": total_view_actions / len(rows),
-        "avg_repeated_view_count": sum(row.repeated_view_count for row in rows) / len(rows),
+        "avg_steps": sum(row.steps for row in complete) / len(complete) if complete else 0.0,
+        "avg_game_action_count": total_game_actions / len(complete) if complete else 0.0,
+        "avg_view_deck_count": sum(row.view_deck_count for row in complete) / len(complete) if complete else 0.0,
+        "avg_view_map_count": sum(row.view_map_count for row in complete) / len(complete) if complete else 0.0,
+        "avg_view_draw_pile_count": sum(row.view_draw_pile_count for row in complete) / len(complete) if complete else 0.0,
+        "avg_view_discard_pile_count": sum(row.view_discard_pile_count for row in complete) / len(complete) if complete else 0.0,
+        "avg_view_exhaust_pile_count": sum(row.view_exhaust_pile_count for row in complete) / len(complete) if complete else 0.0,
+        "avg_view_action_count": total_view_actions / len(complete) if complete else 0.0,
+        "avg_repeated_view_count": sum(row.repeated_view_count for row in complete) / len(complete) if complete else 0.0,
         "view_action_rate": total_view_actions / total_steps if total_steps else 0.0,
-        "avg_model_fallback_count": sum(row.model_fallback_count for row in rows) / len(rows),
-        "avg_invalid_states": sum(row.invalid_states for row in rows) / len(rows),
-        "avg_wall_time_sec": sum(row.wall_time_sec for row in rows) / len(rows),
+        "avg_model_fallback_count": sum(row.model_fallback_count for row in complete) / len(complete) if complete else 0.0,
+        "avg_invalid_states": sum(row.invalid_states for row in complete) / len(complete) if complete else 0.0,
+        "avg_wall_time_sec": sum(row.wall_time_sec for row in complete) / len(complete) if complete else 0.0,
     }
     if truncated:
-        summary["warning"] = "Some runs hit max_steps; floor is not a natural terminal result for those runs."
+        truncation_reasons = sorted(
+            {
+                str(row.extra.get("truncation_reason") or "unspecified truncation")
+                for row in rows
+                if row.truncated
+            }
+        )
+        summary["truncation_reasons"] = truncation_reasons
+        summary["warning"] = (
+            "Some runs were intentionally or externally truncated; outcome aggregates "
+            "exclude them because their floors are not natural terminal results."
+        )
     return summary
 
 
@@ -1441,33 +1837,36 @@ def agent_from_args(
     llm_temperature: float = 0.0,
     include_json_state: bool = False,
     prompt_style: PromptStyle = "default",
-    memory_enabled: bool = False,
-    memory_window: int = 8,
-    memory_mode: MemoryMode = "action_reason",
+    short_term_memory_enabled: bool = False,
+    short_term_memory_window: int = 8,
+    short_term_memory_mode: ShortTermMemoryMode = "action_reason",
     run_summary_enabled: bool = True,
     conversation_mode: ConversationMode = "single_turn",
     turn_chat_window: int = 4,
+    combat_dialogue_history_turns: int = 3,
     turn_chat_update_mode: TurnChatUpdateMode = "delta",
     turn_chat_assistant_history: TurnChatAssistantHistory = "compact",
     turn_chat_plan_enabled: bool = False,
     turn_check_enabled: bool | None = None,
     route_plan_enabled: bool = True,
     route_map_prompt_format: RouteMapPromptFormat = "canonical",
+    map_route_hint: MapRouteHint = "none",
     route_plan_enforcement: RoutePlanEnforcement = "hard",
     reward_posterior_evaluator_enabled: bool = True,
     self_consistency_enabled: bool = False,
     self_consistency_samples: int = 3,
     self_consistency_decisions: tuple[str, ...] | str = ("map_select", "card_reward"),
     self_consistency_mode: str = "diagnostic",
-    reflection_enabled: bool = False,
-    reflection_decisions: tuple[str, ...] | str = ("card_reward",),
-    reflection_mode: str = "diagnostic",
-    reflection_max_options: int = 8,
     action_prompt_order: ActionPromptOrderMode = "default",
     action_prompt_order_seed: int | None = 0,
     combat_card_sequences_enabled: bool = True,
     combat_reasoning_pool_enabled: bool = False,
     combat_turn_board_enabled: bool = False,
+    combat_skill_hints_enabled: bool = False,
+    combat_skill_hints_profile: CombatSkillHintsProfile = "baseline",
+    combat_skill_hints_max_hints: int = 4,
+    combat_skill_lines_enabled: bool = True,
+    rule_projection_and_recent_changes_enabled: bool = True,
     route_candidate_objective: RouteObjective | None = None,
     occ_context_mode: str = "room_process",
 ) -> Agent:
@@ -1483,23 +1882,93 @@ def agent_from_args(
                 seed=0,
                 include_json_state=include_json_state,
                 prompt_style=prompt_style,
-                memory_enabled=memory_enabled,
-                memory_window=memory_window,
-                memory_mode=memory_mode,
+                short_term_memory_enabled=short_term_memory_enabled,
+                short_term_memory_window=short_term_memory_window,
+                short_term_memory_mode=short_term_memory_mode,
                 run_summary_enabled=run_summary_enabled,
             ),
             route_candidate_objective,
         )
-    if kind in {"llm", "coordinator"}:
+    if kind in {"llm", "coordinator", "formal_generalist"}:
         if not base_url or not model:
             raise ValueError("--base-url and --model, or STS2_BENCH_BASE_URL and STS2_BENCH_MODEL, are required for LLM-backed agents")
         if api_key == "local" and not _is_local_url(base_url):
             raise ValueError(
-                "Set --api-key, DEEPSEEK_API_KEY, or OPENAI_API_KEY for non-local LLM endpoints"
+                "Set --api-key or a supported provider credential for non-local LLM endpoints"
+            )
+        if kind == "formal_generalist":
+            incompatible = {
+                "context_mode": conversation_mode != "combat_state_only",
+                "short_term_memory": short_term_memory_enabled,
+                "run_summary": run_summary_enabled,
+                "fallback_mode": llm_fallback_mode != "error",
+                "turn_check": bool(turn_check_enabled or turn_chat_plan_enabled),
+                "route_plan": route_plan_enabled,
+                "reward_posterior_evaluator": reward_posterior_evaluator_enabled,
+                "self_consistency": self_consistency_enabled,
+                "combat_card_sequences": combat_card_sequences_enabled,
+                "combat_reasoning_pool": combat_reasoning_pool_enabled,
+                "combat_turn_board": combat_turn_board_enabled,
+                "combat_skill_hints": combat_skill_hints_enabled,
+                "combat_skill_lines": combat_skill_lines_enabled,
+                "rule_projection_and_recent_changes": rule_projection_and_recent_changes_enabled,
+                "route_candidate_objective": route_candidate_objective is not None,
+                "map_route_hint": map_route_hint != "none",
+            }
+            enabled = [name for name, present in incompatible.items() if present]
+            if enabled:
+                raise ValueError(
+                    "formal_generalist requires its fixed formal context contract; "
+                    f"incompatible settings: {', '.join(enabled)}"
+                )
+            return OpenAICompatAgent(
+                base_url=base_url,
+                model=model,
+                api_key=api_key,
+                timeout=llm_timeout,
+                max_retries=llm_max_retries,
+                fallback_mode=llm_fallback_mode,
+                temperature=llm_temperature,
+                include_json_state=True,
+                prompt_style=prompt_style,
+                short_term_memory_enabled=False,
+                run_summary_enabled=False,
+                conversation_mode="combat_state_only",
+                prompt_profile="formal_generalist",
+                active_policy_owner="formal_generalist",
+                turn_chat_window=turn_chat_window,
+                combat_dialogue_history_turns=combat_dialogue_history_turns,
+                turn_chat_update_mode=turn_chat_update_mode,
+                turn_chat_assistant_history=turn_chat_assistant_history,
+                turn_chat_plan_enabled=False,
+                turn_check_enabled=False,
+                route_plan_enabled=False,
+                route_map_prompt_format="canonical",
+                map_route_hint="none",
+                context_patch_fields_enabled=False,
+                self_consistency_enabled=False,
+                self_consistency_samples=self_consistency_samples,
+                self_consistency_decisions=self_consistency_decisions,
+                self_consistency_mode=self_consistency_mode,  # type: ignore[arg-type]
+                action_prompt_order="default",
+                action_prompt_order_seed=action_prompt_order_seed,
+                combat_card_sequences_enabled=combat_card_sequences_enabled,
+                combat_reasoning_pool_enabled=False,
+                combat_turn_board_enabled=False,
+                combat_skill_hints_enabled=False,
+                combat_skill_lines_enabled=False,
+                rule_projection_and_recent_changes_enabled=False,
             )
         if kind == "coordinator":
-            ca_conversation_mode = "combat_mdp_state" if conversation_mode == "combat_mdp_state" else "turn_chat"
-            store = RunContextStore()
+            if short_term_memory_enabled:
+                raise ValueError(
+                    "short_term_memory is an episode-local single-agent context method and is not supported by coordinator"
+                )
+            ca_conversation_mode = conversation_mode
+            store = RunContextStore(
+                formal_route_plan_enabled=route_plan_enabled,
+                route_plan_enabled=route_plan_enabled,
+            )
             ca_agent = OpenAICompatAgent(
                 base_url=base_url,
                 model=model,
@@ -1510,30 +1979,34 @@ def agent_from_args(
                 temperature=llm_temperature,
                 include_json_state=include_json_state,
                 prompt_style=prompt_style,
-                memory_enabled=False,
+                short_term_memory_enabled=False,
                 run_summary_enabled=run_summary_enabled,
                 conversation_mode=ca_conversation_mode,
+                active_policy_owner="combat_agent",
                 turn_chat_window=turn_chat_window,
+                combat_dialogue_history_turns=combat_dialogue_history_turns,
                 turn_chat_update_mode=turn_chat_update_mode,
                 turn_chat_assistant_history=turn_chat_assistant_history,
                 turn_chat_plan_enabled=turn_chat_plan_enabled,
                 turn_check_enabled=turn_check_enabled,
                 route_plan_enabled=False,
                 route_map_prompt_format=route_map_prompt_format,
+                map_route_hint=map_route_hint,
                 context_patch_fields_enabled=False,
                 self_consistency_enabled=False,
                 self_consistency_samples=self_consistency_samples,
                 self_consistency_decisions=self_consistency_decisions,
                 self_consistency_mode=self_consistency_mode,  # type: ignore[arg-type]
-                reflection_enabled=False,
-                reflection_decisions=reflection_decisions,
-                reflection_mode=reflection_mode,  # type: ignore[arg-type]
-                reflection_max_options=reflection_max_options,
                 action_prompt_order=action_prompt_order,
                 action_prompt_order_seed=action_prompt_order_seed,
                 combat_card_sequences_enabled=combat_card_sequences_enabled,
                 combat_reasoning_pool_enabled=combat_reasoning_pool_enabled,
                 combat_turn_board_enabled=combat_turn_board_enabled,
+                combat_skill_hints_enabled=combat_skill_hints_enabled,
+                combat_skill_hints_profile=combat_skill_hints_profile,
+                combat_skill_hints_max_hints=combat_skill_hints_max_hints,
+                combat_skill_lines_enabled=combat_skill_lines_enabled,
+                rule_projection_and_recent_changes_enabled=rule_projection_and_recent_changes_enabled,
             )
             occ_inner = OpenAICompatAgent(
                 base_url=base_url,
@@ -1545,30 +2018,32 @@ def agent_from_args(
                 temperature=llm_temperature,
                 include_json_state=include_json_state,
                 prompt_style=prompt_style,
-                memory_enabled=False,
+                short_term_memory_enabled=False,
                 run_summary_enabled=run_summary_enabled,
                 conversation_mode="single_turn",
+                active_policy_owner="out_of_combat_agent",
                 turn_chat_window=turn_chat_window,
+                combat_dialogue_history_turns=combat_dialogue_history_turns,
                 turn_chat_update_mode=turn_chat_update_mode,
                 turn_chat_assistant_history=turn_chat_assistant_history,
                 turn_chat_plan_enabled=False,
                 turn_check_enabled=False,
                 route_plan_enabled=route_plan_enabled,
                 route_map_prompt_format=route_map_prompt_format,
+                map_route_hint=map_route_hint,
                 context_patch_fields_enabled=True,
                 self_consistency_enabled=self_consistency_enabled,
                 self_consistency_samples=self_consistency_samples,
                 self_consistency_decisions=self_consistency_decisions,
                 self_consistency_mode=self_consistency_mode,  # type: ignore[arg-type]
-                reflection_enabled=reflection_enabled,
-                reflection_decisions=reflection_decisions,
-                reflection_mode=reflection_mode,  # type: ignore[arg-type]
-                reflection_max_options=reflection_max_options,
                 action_prompt_order=action_prompt_order,
                 action_prompt_order_seed=action_prompt_order_seed,
                 combat_card_sequences_enabled=combat_card_sequences_enabled,
                 combat_reasoning_pool_enabled=False,
                 combat_turn_board_enabled=False,
+                combat_skill_hints_enabled=False,
+                combat_skill_lines_enabled=combat_skill_lines_enabled,
+                rule_projection_and_recent_changes_enabled=rule_projection_and_recent_changes_enabled,
             )
             reward_posterior_evaluator = (
                 LLMRewardPosteriorEvaluator(occ_inner, max_retries=llm_max_retries)
@@ -1590,8 +2065,7 @@ def agent_from_args(
                 ),
                 route_candidate_objective,
             )
-        return _wrap_route_candidate_agent(
-            OpenAICompatAgent(
+        llm_agent = OpenAICompatAgent(
                 base_url=base_url,
                 model=model,
                 api_key=api_key,
@@ -1601,32 +2075,51 @@ def agent_from_args(
                 temperature=llm_temperature,
                 include_json_state=include_json_state,
                 prompt_style=prompt_style,
-                memory_enabled=memory_enabled,
-                memory_window=memory_window,
-                memory_mode=memory_mode,
+                short_term_memory_enabled=short_term_memory_enabled,
+                short_term_memory_window=short_term_memory_window,
+                short_term_memory_mode=short_term_memory_mode,
                 run_summary_enabled=run_summary_enabled,
                 conversation_mode=conversation_mode,
+                active_policy_owner="legacy_llm_policy",
                 turn_chat_window=turn_chat_window,
+                combat_dialogue_history_turns=combat_dialogue_history_turns,
                 turn_chat_update_mode=turn_chat_update_mode,
                 turn_chat_assistant_history=turn_chat_assistant_history,
                 turn_chat_plan_enabled=turn_chat_plan_enabled,
                 turn_check_enabled=turn_check_enabled,
                 route_plan_enabled=route_plan_enabled,
                 route_map_prompt_format=route_map_prompt_format,
+                map_route_hint=map_route_hint,
                 context_patch_fields_enabled=True,
                 self_consistency_enabled=self_consistency_enabled,
                 self_consistency_samples=self_consistency_samples,
                 self_consistency_decisions=self_consistency_decisions,
                 self_consistency_mode=self_consistency_mode,  # type: ignore[arg-type]
-                reflection_enabled=reflection_enabled,
-                reflection_decisions=reflection_decisions,
-                reflection_mode=reflection_mode,  # type: ignore[arg-type]
-                reflection_max_options=reflection_max_options,
                 action_prompt_order=action_prompt_order,
                 action_prompt_order_seed=action_prompt_order_seed,
                 combat_card_sequences_enabled=combat_card_sequences_enabled,
                 combat_reasoning_pool_enabled=combat_reasoning_pool_enabled,
                 combat_turn_board_enabled=combat_turn_board_enabled,
+                combat_skill_hints_enabled=combat_skill_hints_enabled,
+                combat_skill_hints_profile=combat_skill_hints_profile,
+                combat_skill_hints_max_hints=combat_skill_hints_max_hints,
+                combat_skill_lines_enabled=combat_skill_lines_enabled,
+                rule_projection_and_recent_changes_enabled=rule_projection_and_recent_changes_enabled,
+            )
+        reward_posterior_evaluator = (
+            LLMRewardPosteriorEvaluator(llm_agent, max_retries=llm_max_retries)
+            if reward_posterior_evaluator_enabled
+            else None
+        )
+        return _wrap_route_candidate_agent(
+            OutOfCombatContextAgent(
+                llm_agent,
+                RunContextStore(
+                    formal_route_plan_enabled=False,
+                    route_plan_enabled=False,
+                ),
+                reward_posterior_evaluator=reward_posterior_evaluator,
+                reward_only=True,
             ),
             route_candidate_objective,
         )

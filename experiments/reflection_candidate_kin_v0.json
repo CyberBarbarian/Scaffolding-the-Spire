@@ -1,0 +1,66 @@
+{
+  "schema_version": 1,
+  "experiment_id": "llm-reflection-candidate-kin-v0",
+  "pool_id": "kin-offline-reflection-candidates-v0",
+  "scenario_id": "act1_kin_boss_multienemy_loss67",
+  "description": "Use five baseline-only Kin trajectories to let the combat model generate one inactive reflection candidate, then screen it only on fresh rollouts.",
+  "base_experiment": "experiments/reflection_probe_v0.json",
+  "base_experiment_sha256": "0AD5D1D329C0964927BEC21ADEF1177334198DC9F310E4CB27ADF5359B559E61",
+  "generation_output_root": "results/reflection_candidate_kin_v0_20260713",
+  "source_traces": [
+    {
+      "trace_id": "kin-b0-block-001",
+      "path": "results/reflection_triads_r1_v1_20260712/blocks/block_001/act1_kin_boss_multienemy_loss67/b0/trace.jsonl",
+      "sha256": "06f6e16f984cda9d7b88a078cf49e9ab07e1acadfb2dbd0731613934c8b06428",
+      "expected_outcome": "game_over"
+    },
+    {
+      "trace_id": "kin-b0-block-002",
+      "path": "results/reflection_triads_r1_v1_20260712/blocks/block_002/act1_kin_boss_multienemy_loss67/b0/trace.jsonl",
+      "sha256": "397bbad5342831f31b92f15549ce00add4b010e2815fc7ab4bfa792f85f9bc6a",
+      "expected_outcome": "game_over"
+    },
+    {
+      "trace_id": "kin-b0-block-003",
+      "path": "results/reflection_triads_r1_confirmatory_20260713/blocks/block_003/act1_kin_boss_multienemy_loss67/b0/trace.jsonl",
+      "sha256": "bd1d89b6da2026dda1ceac02babd841f6bc25c0e94a616216832ca09effb4391",
+      "expected_outcome": "game_over"
+    },
+    {
+      "trace_id": "kin-b0-block-004",
+      "path": "results/reflection_triads_r1_confirmatory_20260713/blocks/block_004/act1_kin_boss_multienemy_loss67/b0/trace.jsonl",
+      "sha256": "3a8dbcd03f6ce30cbd778e973c2da6f4ff0e3b26bb4f120bb101555f1a6a8684",
+      "expected_outcome": "combat_complete"
+    },
+    {
+      "trace_id": "kin-b0-block-005",
+      "path": "results/reflection_triads_r1_confirmatory_20260713/blocks/block_005/act1_kin_boss_multienemy_loss67/b0/trace.jsonl",
+      "sha256": "53370494877146d7e376566a29a8dcb6c2dbac4a7de3483cffc086a26e33820c",
+      "expected_outcome": "game_over"
+    }
+  ],
+  "generator": {
+    "base_url": "https://zgc.apihy.com/v1",
+    "model": "deepseek-v4-flash",
+    "secret_env": "DEEPSEEK_API_KEY",
+    "temperature": 0.0,
+    "timeout": 180.0,
+    "max_retries": 1,
+    "prompt_version": 0,
+    "include_visible_hand": false,
+    "reason_field": "model_reason",
+    "max_reason_chars": 160
+  },
+  "screening": {
+    "output_root": "results/reflection_candidate_kin_v0_screen_20260713",
+    "block_start": 1,
+    "block_end": 3,
+    "workers": 3,
+    "start_interval_sec": 5.0,
+    "endpoint_failure_limit": 2,
+    "minimum_complete_blocks": 3,
+    "minimum_improvements": 2,
+    "minimum_primary_improvements": 1,
+    "maximum_degradations": 0
+  }
+}

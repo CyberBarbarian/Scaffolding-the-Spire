@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "extension_id": "reflection-r1-abstention-scenes-blocks-3-to-5",
+  "declared_at_local_date": "2026-07-13",
+  "analysis_status": "user_directed_gate_coverage_supplement_after_zero_delivery",
+  "description": "After the three triggered scenes finish, add blocks 3-5 for Bygone and Queen as a separate low-priority gate-coverage supplement. Zero-delivery blocks are not interpreted as reflection-content efficacy.",
+  "parent_experiment": "experiments/reflection_r1_v1.json",
+  "parent_experiment_sha256": "f6a2a9ce702a2a81526ecb375f8904abe487c3529a0b162c29c8245ff110bbe5",
+  "parent_stage1_analysis": "results/reflection_triads_r1_v1_20260712/triad_analysis.json",
+  "parent_stage1_analysis_sha256": "b98ea863d835ea18d4fe804619fa4ff5a33f0a915a5a8c9696370428802a42d7",
+  "parent_stage1_suite_status_sha256": "159c6801b2d04fdbe5bb134bcf2c186e9b4e07154834022924aef8fd01a2380f",
+  "output_root": "results/reflection_triads_r1_abstention_20260713",
+  "selected_scenarios": [
+    "act1_bygone_effigy_elite_loss52",
+    "act3_queen_multienemy_boss_loss42"
+  ],
+  "excluded_scenarios": {
+    "act1_kin_boss_multienemy_loss67": "Covered by the higher-priority triggered-scenes confirmatory extension.",
+    "act2_entomancer_multihit_elite_loss43": "Covered by the higher-priority triggered-scenes confirmatory extension.",
+    "act3_mecha_knight_lategame_elite_loss25": "Covered by the higher-priority triggered-scenes confirmatory extension."
+  },
+  "block_range": [3, 5],
+  "new_triad_count": 6,
+  "new_arm_count": 18,
+  "target_total_blocks_per_selected_scenario": 5,
+  "workers": 2,
+  "start_interval_sec": 5.0,
+  "endpoint_failure_limit": 2,
+  "frozen_sources": {
+    "reflection_probe": "406aae3b5d303b60f25bd9fc6e5cc7a817a0c44ced274e5d6e35936f1013c6a0",
+    "reflection_r1": "c1d9bbc31e12bda0cc569e98825ef64ad1fa1188f99a9beb1d1b7a9fa06c4f46",
+    "reflection_triads_extension_runner": "dd6b4c1af383bc40d77dd37be7a2a6963e2da7db9e3a1f5a39b29f858855c804",
+    "reflection_extension_launcher": "a14b270bd5a804a92bc2fe73a726844be4cd9fcb28d1d8111979c3d5597d3cb2"
+  },
+  "invariants": [
+    "Do not change the frozen baseline, card text, or R1 gate semantics.",
+    "Start only after the triggered-scenes confirmatory extension releases the endpoint.",
+    "Run B0/R0/R1 serially inside each triad and use workers=2 only across triads.",
+    "Treat zero-delivery R1 blocks as gate abstention, not reflection-content efficacy.",
+    "Report any newly triggered block separately from continued abstention."
+  ]
+}

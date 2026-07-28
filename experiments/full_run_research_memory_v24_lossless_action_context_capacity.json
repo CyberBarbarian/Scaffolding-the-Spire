@@ -1,0 +1,14 @@
+{
+  "schema_version": 2,
+  "extends": "full_run_research_memory_v23_context_transport_fix.json",
+  "extends_sha256": "EEDC982592C139456C3D467C1C12CBA6B8CCD5F732B69663DD6B462FC88F805E",
+  "overrides": {
+    "experiment_id": "full-run-research-memory-v24-lossless-action-context-capacity",
+    "study_phase": "natural_exposure_pilot",
+    "purpose": "Minimal configuration-only successor to the failed V23 Pilot. V24 preserves the frozen baseline, complete state/card/legal-action context, CoT route behavior, memory content, retrieval, injection and reflection semantics byte-for-byte. It removes the obsolete 16000-character memory-only action-prompt ceiling that terminated V23 after 92 real injections, while retaining an explicit fail-closed capacity equal to the already established lossless provider envelope. V23 remains an immutable failed historical artifact.",
+    "memory": {
+      "max_prompt_chars": 3000000,
+      "action_memory_capacity_contract": "Every selected Pending and Active experience is appended exactly once without Top-K, truncation, summarization, or semantic Python filtering. Rendering fails closed only when the complete memory payload exceeds the same 3000000-character provider envelope used by lossless reflection requests."
+    }
+  }
+}

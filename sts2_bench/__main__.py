@@ -20,6 +20,16 @@ COMMANDS: dict[str, Command] = {
     "card-choice-bias": Command("sts2_bench.card_choice_bias_eval", "Run card reward bias probes."),
     "card-choice-trace": Command("sts2_bench.card_choice_trace_eval", "Replay card reward choices from traces."),
     "combat-snapshot": Command("sts2_bench.combat_snapshot", "Extract, verify, or run combat snapshots."),
+    "direct-cli-experiment": Command(
+        "sts2_bench.direct_cli_experiment",
+        "Run the resumable, code-frozen direct-CLI paper experiment.",
+    ),
+    "direct-cli-report": Command("sts2_bench.direct_cli_report", "Generate reports from direct-CLI engine telemetry."),
+    "default-v1-experiment": Command(
+        "sts2_bench.default_v1_experiment",
+        "Run the resumable, code-frozen Default-v1 paper experiment.",
+    ),
+    "parallel": Command("sts2_bench.parallel_benchmark", "Run benchmark suites in parallel."),
     "trace-analysis": Command("sts2_bench.trace_analysis", "Generate replay and failure-analysis artifacts."),
     "process-smoke": Command("sts2_bench.process", "Start the headless process and print its ready message."),
 }

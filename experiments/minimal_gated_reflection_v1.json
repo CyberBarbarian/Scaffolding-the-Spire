@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "experiment_id": "minimal-gated-reflection-v1-seed1-to-seed2",
+  "purpose": "Exploratory one-run validation of deterministic, fail-closed state/entity-gated experience injection. A real-trace mini check separately exercises a legal-action card gate. Reuse the complete seed-1007 trajectory for offline reflection, then run only seed 2407 with a frozen memory store and no online reflection.",
+  "baseline_experiment": "experiments/full_run_layered_reflection_v21.json",
+  "source": {
+    "seed": "ironclad_a0_1007",
+    "trace": "results/full_run_layered_reflection_v18_20260716_round1/r1/seeds/ironclad_a0_1007/trace.jsonl",
+    "trace_sha256": "4709468D1C47EC194458F93BFB0CC5A7D4A42D379F0BBB75028BC52E565FF1E9",
+    "audit": "results/full_run_layered_reflection_v18_20260716_round1/r1/memory_store.audit.jsonl",
+    "reflection_scopes": ["offline_run_end_combat"]
+  },
+  "mini_gate": {
+    "trace": "results/full_run_layered_reflection_v18_20260716_round1/r1/seeds/ironclad_a0_2407/trace.jsonl",
+    "irrelevant_step": 336,
+    "relevant_step": 339,
+    "enemy": "Exoskeleton",
+    "required_card": "Breakthrough",
+    "expected_action_id": 5
+  },
+  "evaluation": {
+    "seed": "ironclad_a0_2407",
+    "historical_b0_result": "results/full_run_layered_reflection_v18_20260716_round1/b0/seeds/ironclad_a0_2407/result.json",
+    "historical_b0_result_sha256": "CCA3107F1F720DF01AE7277B52DDF87D7548D131B3701F858CB1B7113711E1B6",
+    "historical_b0_trace": "results/full_run_layered_reflection_v18_20260716_round1/b0/seeds/ironclad_a0_2407/trace.jsonl",
+    "historical_b0_trace_sha256": "401242FE6E4C582573EAFC7A57EC2CF055350421DD2E77184071CF246F38DE77",
+    "comparison_role": "descriptive_only"
+  },
+  "memory": {
+    "offline_reflection_deadline_sec": 600,
+    "global_combat_limit": 0,
+    "exact_enemy_limit": 1,
+    "enemy_tag_limit": 1,
+    "combat_card_limit": 1,
+    "card_choice_limit": 4,
+    "route_limit": 4,
+    "max_prompt_chars": 2400,
+    "max_reflection_transitions": 80,
+    "reflection_output_limit": 8,
+    "reflection_json_response_format": 1,
+    "reflection_format_retries": 1
+  },
+  "output_root": "results/minimal_gated_reflection_v1_20260718"
+}

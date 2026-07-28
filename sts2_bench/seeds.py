@@ -7,7 +7,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_SEEDS_FILE = ROOT / "sts2_bench" / "seeds_ironclad_a0.json"
+DEFAULT_SEEDS_FILE = ROOT / "sts2_bench" / "seeds_ironclad_a0_smoke.json"
 DEFAULT_TEST_SEED = "ironclad_a0_3407"
 
 

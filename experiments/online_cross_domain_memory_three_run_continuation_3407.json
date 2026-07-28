@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "experiment_id": "online-cross-domain-memory-three-run-continuation-3407-20260720",
+  "purpose": "Continue the completed two-run same-seed chain for three additional full games. The first continuation round inherits the complete evolved memory from original round 2, and each later round strictly inherits the previous continuation round without freezing or resetting runtime counters.",
+  "online_experiment": "experiments/online_cross_domain_memory_v1.json",
+  "seed": "ironclad_a0_3407",
+  "repeat_count": 3,
+  "initial_memory": {
+    "path": "results/online_cross_domain_memory_two_run_3407_20260720/round_02/r1/ironclad_a0_3407/memory_after_reflection.json",
+    "content_hash": "5b06fac8e017a57782dd5a667747cfb2ab54a5fe45b2cdcc9b464f318157f0bb",
+    "reset_runtime_counters": false
+  },
+  "output_root": "results/online_cross_domain_memory_three_run_continuation_3407_20260720"
+}

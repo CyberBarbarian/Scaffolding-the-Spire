@@ -1,0 +1,83 @@
+{
+  "schema_version": 1,
+  "experiment_id": "nightly-qwen-smoke-matrix-r2-20260728",
+  "scope": "bounded_smoke_only_not_formal_samples",
+  "model": "qwen3.6-flash",
+  "base_url": "https://zgc.apihy.com/v1",
+  "provider_catalog_timeout_sec": 30,
+  "provider_generation_timeout_sec": 60,
+  "max_parallel_conditions": 7,
+  "temperature": 0.0,
+  "request_timeout_sec": 180,
+  "request_retries": 1,
+  "condition_timeout_sec": 7200,
+  "fallback_mode": "error",
+  "character": "Defect",
+  "ascension": 0,
+  "lang": "en",
+  "seed": "ironclad_a0_2407",
+  "agent_real_action_budget": 48,
+  "direct_cli_decision_budget": 48,
+  "output_root": "C:/WorkSpace/BG-Agent/sts2-agent-bench/results/nightly_qwen_smoke_matrix_r2_20260728",
+  "parallel_conditions": [
+    {
+      "id": "B0_direct_cli",
+      "runner": "direct_cli",
+      "treatment": "human-facing terminal with complete static rules-v2"
+    },
+    {
+      "id": "B1_formal_generalist",
+      "runner": "agent",
+      "template": "experiments/formal_generalist_defect_template_20260726.json",
+      "treatment": "formalized generalist bridge baseline"
+    },
+    {
+      "id": "B2_full_bg_agent",
+      "runner": "agent",
+      "template": "experiments/ablation_combat_state_only_defect_template_20260726.json",
+      "derive": "managed_control",
+      "treatment": "full role-specialized BG-Agent control"
+    },
+    {
+      "id": "A1_no_route_plan",
+      "runner": "agent",
+      "template": "experiments/ablation_combat_state_only_defect_template_20260726.json",
+      "derive": "managed_control_no_route_plan",
+      "treatment": "persistent route plan removed"
+    },
+    {
+      "id": "A2_combat_state_only",
+      "runner": "agent",
+      "template": "experiments/ablation_combat_state_only_defect_template_20260726.json",
+      "treatment": "combat history removed; current formal state retained"
+    },
+    {
+      "id": "A3_combat_raw_dialogue",
+      "runner": "agent",
+      "template": "experiments/ablation_combat_dialogue_defect_template_20260726.json",
+      "treatment": "raw accepted combat dialogue replaces managed history"
+    },
+    {
+      "id": "A4_no_reward_posterior",
+      "runner": "agent",
+      "template": "experiments/ablation_combat_state_only_defect_template_20260726.json",
+      "derive": "managed_control_no_reward_posterior",
+      "treatment": "independent reward posterior evaluation removed"
+    }
+  ],
+  "paired_scene_condition": {
+    "id": "A5_no_rule_projection_recent_changes",
+    "source_condition": "B2_full_bg_agent",
+    "selection": "first combat_play decision after an accepted in-combat action with a non-empty authoritative last_action_result",
+    "control": "rule projection and immediate preceding state-change display enabled",
+    "treatment": "both rule projection and immediate preceding state-change display removed",
+    "steps_per_arm": 1,
+    "pairing": "same replay snapshot, model, temperature, legal actions, and authoritative state"
+  },
+  "release_gate": {
+    "formal_pool_eligible": false,
+    "intentional_budget_stop_is_expected": true,
+    "every_lane_requires_manual_prompt_and_trace_audit": true,
+    "formal_batches_remain_blocked_until_all_lanes_pass": true
+  }
+}

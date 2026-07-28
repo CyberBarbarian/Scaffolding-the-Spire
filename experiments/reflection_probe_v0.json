@@ -1,0 +1,170 @@
+{
+  "schema_version": 1,
+  "experiment_id": "reflection-probe-v0-five-pressure-fights",
+  "description": "Fresh paired B0/R0 mechanism probe. B0 is the exact current baseline agent; R0 appends one frozen same-scenario offline ReflectionCard to CA prompts.",
+  "output_root": "results/reflection_probe_v0_20260711",
+  "freeze": {
+    "git_commit_at_design": "12ae8ba480ffca7d12ab3c79ac435d0c4385375f",
+    "baseline_files": {
+      "sts2_bench/benchmark.yaml": "6353C114F97273431FE8EEB13B1F5F7F937D9649262D33AC3AD4EB36F29A4F26",
+      "sts2_bench/agents.py": "62FDE3D3AD48E577DCF3D6E98D9A4F99559A2C29417463F77559CEE41D8CD67A",
+      "sts2_bench/context.py": "DA20783236B924398673E9DE9808E5FB6800E7D8EC4F2030BB0D30F2A69AED1A",
+      "sts2_bench/multi_agent.py": "4E59A84342ABE85A0EC29C9ACE4C818400DCE22428472BE1C7BE6C6C7269F2BA",
+      "sts2_bench/runner.py": "DF713921DA50421C6F5556745EF54CFB162B3F5106CAC11564FDB7DD426A17FF",
+      "sts2_bench/combat_snapshot.py": "302FEA0521FD0BBA08AA847ED1285A0DDD24952EB1EADC264864097449432E1A"
+    }
+  },
+  "baseline": {
+    "name": "current_mdp_combat_no_skill_cot",
+    "kind": "coordinator",
+    "base_url": "https://zgc.apihy.com/v1",
+    "model": "deepseek-v4-flash",
+    "secret_env": "DEEPSEEK_API_KEY",
+    "llm_timeout": 180.0,
+    "llm_max_retries": 1,
+    "llm_fallback_mode": "error",
+    "llm_temperature": 0.0,
+    "include_json_state": false,
+    "prompt_style": "analysis",
+    "short_term_memory_enabled": false,
+    "short_term_memory_window": 8,
+    "short_term_memory_mode": "factual_diff",
+    "run_summary_enabled": false,
+    "conversation_mode": "combat_mdp_state",
+    "turn_chat_window": 10,
+    "turn_chat_update_mode": "delta",
+    "turn_chat_assistant_history": "compact",
+    "turn_chat_plan_enabled": false,
+    "turn_check_enabled": false,
+    "route_plan_enabled": true,
+    "route_map_prompt_format": "canonical",
+    "map_route_hint": "none",
+    "route_plan_enforcement": "hard",
+    "reward_posterior_evaluator_enabled": false,
+    "self_consistency_enabled": false,
+    "self_consistency_samples": 3,
+    "self_consistency_decisions": "map_select,card_reward",
+    "self_consistency_mode": "diagnostic",
+    "action_prompt_order": "default",
+    "action_prompt_order_seed": 0,
+    "combat_card_sequences_enabled": false,
+    "combat_reasoning_pool_enabled": true,
+    "combat_turn_board_enabled": true,
+    "combat_skill_hints_enabled": false,
+    "combat_skill_hints_profile": "baseline",
+    "combat_skill_hints_max_hints": 4,
+    "combat_skill_lines_enabled": false,
+    "occ_context_mode": "reference_turn"
+  },
+  "run": {
+    "max_steps": null,
+    "max_game_actions": 0,
+    "allow_repeat_views": false,
+    "allow_custom_sequences": true,
+    "custom_sequence_exposure": "safe",
+    "combat_card_sequences_enabled": false,
+    "precomputed_combat_card_sequences_enabled": false,
+    "route_plan_enabled": true,
+    "route_plan_enforcement": "hard",
+    "log_level": "decisions",
+    "print_prompts": false,
+    "print_model_output": false
+  },
+  "scenarios": [
+    {
+      "scenario_id": "act1_bygone_effigy_elite_loss52",
+      "snapshot": "results/complete_pressure_fights_20260708_1815/snapshots/act1_bygone_effigy_default_elite_loss52.snapshot.json",
+      "snapshot_sha256": "9B52164893E109C2BCA7015F5F009AF38988E837AED8519A7BA5F7EB4C6C70DA"
+    },
+    {
+      "scenario_id": "act1_kin_boss_multienemy_loss67",
+      "snapshot": "results/complete_pressure_fights_20260708_1815/snapshots/act1_kin_boss_default_loss67.snapshot.json",
+      "snapshot_sha256": "E435D18F8DB483AE85F0ABA36E88EF21EE5A712BDFA749D8E40C80115A63320A"
+    },
+    {
+      "scenario_id": "act2_entomancer_multihit_elite_loss43",
+      "snapshot": "results/complete_pressure_fights_20260708_1815/snapshots/act2_entomancer_boot_llm_elite_loss43.snapshot.json",
+      "snapshot_sha256": "647CADC125C202B609A3C5704DB08001115E9146BBC5C78843CE92FAFE1D6269"
+    },
+    {
+      "scenario_id": "act3_mecha_knight_lategame_elite_loss25",
+      "snapshot": "results/complete_pressure_fights_20260708_1815/snapshots/act3_mecha_knight_llm_cot_elite_loss25.snapshot.json",
+      "snapshot_sha256": "8DF29967C0E88FB881A3961D7E928314F610845B35719409925F4BACC868936B"
+    },
+    {
+      "scenario_id": "act3_queen_multienemy_boss_loss42",
+      "snapshot": "results/complete_pressure_fights_20260708_1815/snapshots/act3_queen_llm_cot_boss_loss42.snapshot.json",
+      "snapshot_sha256": "0ADAEB48E1D39840AF4C6F6E835173414AC6FA37CCD35FA76F8CEF726B4500D6"
+    }
+  ],
+  "reflection_cards": [
+    {
+      "card_id": "combat-bygone-kill-clock-v0",
+      "scenario_id": "act1_bygone_effigy_elite_loss52",
+      "trigger": "A single repeating high-damage attacker is active and another defensive turn will still expose you to a similar large attack.",
+      "recommendation": "Optimize time-to-kill, not only damage prevented this turn. When extra defense does not change the number of enemy attacks you survive, spend available resources on damage to remove one future attack cycle.",
+      "avoid": "Do not prolong the fight merely to minimize current-turn HP loss when the enemy's repeated attack makes delay more expensive.",
+      "evidence_refs": [
+        "natural supplement, mdp_turn_skill rep04: clear at 38 HP in 19 steps",
+        "natural supplement, mdp_turn_skill rep06: clear at 8 HP in 25 steps"
+      ],
+      "uncertainty": "Ignore this rule if the current defensive action crosses a real survival threshold or enables a stronger next-turn lethal line."
+    },
+    {
+      "card_id": "combat-kin-follower-focus-v0",
+      "scenario_id": "act1_kin_boss_multienemy_loss67",
+      "trigger": "Kin Priest is accompanied by living Followers and the Priest is not immediately killable.",
+      "recommendation": "Concentrate early damage on one low-HP, attacking, or buffing Follower until it is removed; reducing enemy action economy should take priority over scattered Priest damage.",
+      "avoid": "Do not spread opening damage into the 190-HP Priest while both Followers continue attacking or buffing unless the Priest is actually within a verified lethal line.",
+      "evidence_refs": [
+        "natural supplement, default_combat rep04: clear at 19 HP after targeting a Follower first",
+        "natural supplement, default_combat rep05: death after opening on the Priest; the first Follower was removed later"
+      ],
+      "uncertainty": "A verified immediate Priest lethal overrides this focus rule; recompute targets whenever enemy HP or intent changes."
+    },
+    {
+      "card_id": "combat-entomancer-keep-kill-clock-v0",
+      "scenario_id": "act2_entomancer_multihit_elite_loss43",
+      "trigger": "The escalating multi-hit enemy is alive and meaningful attacks are currently legal with energy available.",
+      "recommendation": "Maintain the kill clock: cash in high-value attacks and damage synergies before ending the turn, unless a concrete survival calculation requires defense.",
+      "avoid": "Do not end a turn just to preserve a no-attack bonus or avoid adding Dazed while playable attacks and unused energy can materially shorten the fight.",
+      "evidence_refs": [
+        "natural supplement, default_no_skill rep04: clear at 42 HP",
+        "natural supplement, default_no_skill rep06: death with the enemy at 10 HP after multiple early/late end turns with attacks and energy available"
+      ],
+      "uncertainty": "Do not force damage through an incoming lethal attack; this card changes the default only when the visible survival calculation permits it."
+    },
+    {
+      "card_id": "combat-mecha-spend-and-sequence-v0",
+      "scenario_id": "act3_mecha_knight_lategame_elite_loss25",
+      "trigger": "Energy cannot carry over; either current block already covers incoming damage, or a high-damage turn requires explicit survival sequencing.",
+      "recommendation": "On safe turns, spend otherwise wasted energy on durable power or scaling. On dangerous turns, apply Weak and sufficient real block before optional scaling, then spend remaining energy.",
+      "avoid": "Do not end a safe turn to save non-carrying resources, and do not state a defense plan without executing its Weak/block components before end turn.",
+      "evidence_refs": [
+        "natural supplement, mdp_combat rep04: clear at 70 HP; used scaling on a turn already covered by 26 block",
+        "natural supplement, mdp_combat rep06: clear at 35 HP; ended the comparable safe opening and lost more HP on a later 40-damage turn"
+      ],
+      "uncertainty": "Prefer immediate lethal over scaling, and never spend the block/Weak card needed to survive the visible incoming attack."
+    },
+    {
+      "card_id": "combat-queen-primary-target-v0",
+      "scenario_id": "act3_queen_multienemy_boss_loss42",
+      "trigger": "The Queen and Torch Head are both alive.",
+      "recommendation": "Default to concentrating damage on the Queen. Switch to Torch Head only when killing it now demonstrably prevents lethal or creates a better verified survival threshold.",
+      "avoid": "Do not split damage into Torch Head while the Queen is close to a kill-clock threshold and the minion kill does not change immediate survival.",
+      "evidence_refs": [
+        "natural supplement, default_no_skill rep05: natural event exit at 31 HP",
+        "natural supplement, default_no_skill rep06: death after retargeting Torch Head, with the Queen left at 4 HP near the end"
+      ],
+      "uncertainty": "If Torch Head is immediately lethal and its removal prevents otherwise lethal incoming damage, the minion becomes the correct temporary target."
+    }
+  ],
+  "evaluation": {
+    "min_improved_scenarios": 3,
+    "max_degraded_scenarios": 1,
+    "clear_hp_meaningful_delta": 10,
+    "death_enemy_hp_meaningful_delta": 10,
+    "phase_1_pairs": 5,
+    "expand_replicates_per_arm_per_scenario": 2
+  }
+}
